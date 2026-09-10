@@ -109,6 +109,40 @@ def forward_returns(ticker: str, start_date: str, horizons=HORIZONS) -> dict | N
     return out or None
 
 
+def _excess_return(prices, bench, days: int) -> float | None:
+    """Ticker return over the last `days` bars minus the benchmark's, in points.
+    None if either series is absent or has <= `days` bars."""
+    if prices is None or bench is None or len(prices) <= days or len(bench) <= days:
+        return None
+    r = (float(prices.iloc[-1]) / float(prices.iloc[-1 - days]) - 1) * 100
+    b = (float(bench.iloc[-1]) / float(bench.iloc[-1 - days]) - 1) * 100
+    return r - b
+
+
+def _return_before(ticker: str, date: str, days: int = 63) -> float | None:
+    """Ticker vs benchmark over the `days` trading days ENDING at `date`.
+
+    `_series` only fetches forward from a date, so this fetches a window ending at
+    `date` and slices it. Cached like `_series` -- prices before a past date don't
+    change, but the process cache is fine and consistent with the rest of the file.
+    """
+    import yfinance as yf
+    key = ("_before", ticker, date, days)
+    if key in _SERIES_CACHE:
+        return _SERIES_CACHE[key]
+    out = None
+    try:
+        start = (dt.date.fromisoformat(date) - dt.timedelta(days=days * 2 + 40)).isoformat()
+        end = (dt.date.fromisoformat(date) + dt.timedelta(days=1)).isoformat()
+        px = yf.Ticker(ticker.replace(".", "-")).history(start=start, end=end)["Close"].dropna()
+        spy = yf.Ticker(BENCHMARK).history(start=start, end=end)["Close"].dropna()
+        out = _excess_return(px, spy, days)
+    except Exception:
+        pass
+    _SERIES_CACHE[key] = out
+    return out
+
+
 def sign_test_p(wins: int, n: int) -> float | None:
     """Two-sided exact binomial test against a coin flip.
 
