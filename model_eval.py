@@ -129,3 +129,64 @@ def build_feature_frame(conn, rows: list[dict], corpus: str, horizon: int):
     y = np.array([r["label"] for r in rows], dtype=int)
     dates = [r["disclosure_date"] for r in rows]
     return X, y, dates
+
+
+def _add_months(ym: str, k: int) -> str:
+    y, m = int(ym[:4]), int(ym[5:7])
+    total = y * 12 + (m - 1) + k
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def _months_of(dates: list[str]) -> list[str]:
+    return sorted({d[:7] for d in dates})
+
+
+def walk_forward_folds(dates: list[str], n_folds: int = 3, min_test: int = 12):
+    """Expanding-window walk-forward folds by calendar month. Test folds are the
+    last `n_folds` months that each have >= min_test rows; sparse months can still
+    train a later fold but are never a test fold. None if it can't be built."""
+    months = _months_of(dates)
+    counts = {m: sum(1 for d in dates if d[:7] == m) for m in months}
+    eligible = [m for m in months if counts[m] >= min_test]
+    if len(eligible) < n_folds:
+        return None
+    test_months = eligible[-n_folds:]
+    if sum(1 for m in months if m < test_months[0]) < 2:
+        return None
+    folds = []
+    for tm in test_months:
+        train_idx = [i for i, d in enumerate(dates) if d[:7] < tm]
+        test_idx = [i for i, d in enumerate(dates) if d[:7] == tm]
+        if not train_idx or not test_idx:
+            return None
+        folds.append((train_idx, test_idx))
+    return folds
+
+
+def check_sufficiency(dates: list[str], n_folds: int, min_rows: int, min_test: int,
+                       corpus: str, coverage_start: str) -> str | None:
+    n = len(dates)
+    months = _months_of(dates)
+    counts = {m: sum(1 for d in dates if d[:7] == m) for m in months}
+    eligible = [m for m in months if counts[m] >= min_test]
+
+    problems = []
+    if n < min_rows:
+        problems.append(f"{n} labelled rows (need >={min_rows})")
+    if len(eligible) < n_folds:
+        problems.append(f"{len(eligible)} eligible months of >={min_test} rows "
+                        f"(need >={n_folds})")
+    elif sum(1 for m in months if m < eligible[-n_folds]) < 2:
+        problems.append("not enough history before the first test month")
+    if not problems:
+        return None
+
+    lines = [f"INSUFFICIENT DATA for {corpus}.", "  " + "; ".join(problems) + "."]
+    if months:
+        rate = n / len(months)
+        need = max(0, min_rows - n)
+        eta_k = math.ceil(need / rate) if rate else 0
+        if eta_k:
+            lines.append(f"  Coverage since {coverage_start}; at ~{rate:.0f} rows/month, "
+                         f"re-run around {_add_months(months[-1], eta_k)}.")
+    return "\n".join(lines)

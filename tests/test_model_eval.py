@@ -90,3 +90,50 @@ def test_build_feature_frame_insiders_shape(conn, monkeypatch):
     assert X["position_increase_pct"].iloc[1] == pytest.approx(100.0)  # brand-new position
     assert X["role"].iloc[0] == "officer/director"
     assert X["is_first_buy"].iloc[0] in (0.0, 1.0)
+
+
+def _dates(spec: dict[str, int]) -> list[str]:
+    out = []
+    for month, n in spec.items():
+        out += [f"{month}-{(i % 27) + 1:02d}" for i in range(n)]
+    return sorted(out)
+
+
+def test_walk_forward_folds_expanding_no_overlap():
+    dates = _dates({"2025-03": 15, "2025-04": 15, "2025-05": 15,
+                    "2025-06": 15, "2025-07": 15})
+    folds = model_eval.walk_forward_folds(dates, n_folds=3, min_test=12)
+    assert folds is not None and len(folds) == 3
+    for train_idx, test_idx in folds:
+        assert not (set(train_idx) & set(test_idx))
+        latest_train = max(dates[i] for i in train_idx)
+        earliest_test = min(dates[i] for i in test_idx)
+        assert latest_train[:7] < earliest_test[:7]      # train strictly before test month
+    # test months are the last 3
+    assert {min(dates[i] for i in f[1])[:7] for f in folds} == {"2025-05", "2025-06", "2025-07"}
+
+
+def test_walk_forward_folds_skips_a_sparse_month_as_a_test_fold():
+    dates = _dates({"2025-02": 15, "2025-03": 15, "2025-04": 15,
+                    "2025-05": 15, "2025-06": 15, "2025-07": 4})   # July too thin
+    folds = model_eval.walk_forward_folds(dates, n_folds=3, min_test=12)
+    test_months = {min(dates[i] for i in f[1])[:7] for f in folds}
+    assert test_months == {"2025-04", "2025-05", "2025-06"}   # July excluded
+
+
+def test_walk_forward_folds_none_when_not_enough_months():
+    dates = _dates({"2025-06": 30, "2025-07": 30})
+    assert model_eval.walk_forward_folds(dates, n_folds=3, min_test=12) is None
+
+
+def test_check_sufficiency_flags_too_few_rows():
+    dates = _dates({"2026-07": 10, "2026-08": 10})
+    msg = model_eval.check_sufficiency(dates, 3, 80, 12, "insiders", "2026-07")
+    assert msg is not None and "INSUFFICIENT DATA for insiders" in msg
+    assert "re-run around" in msg
+
+
+def test_check_sufficiency_passes_a_healthy_political_set():
+    dates = _dates({"2025-03": 20, "2025-04": 20, "2025-05": 20,
+                    "2025-06": 20, "2025-07": 20})
+    assert model_eval.check_sufficiency(dates, 3, 80, 12, "politicians", "2025-03") is None
