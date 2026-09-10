@@ -206,39 +206,54 @@ def collect_signals(conn, horizons=HORIZONS) -> list[dict]:
     return out
 
 
-def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365) -> list[dict]:
+def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365, *,
+                       extended_features: bool = False) -> list[dict]:
     """Individual SEC insider purchases with their outcomes.
 
-    Available before the journal has anything in it, and finer-grained: it can ask
-    whether a feature matters at the level of a single purchase rather than a whole
-    cluster.
+    `extended_features=True` is for model_eval: it additionally selects the raw
+    fields the model features need (shares / shares_owned_after), attaches a single
+    binary `label` from `horizons[0]`, and an ISO `disclosure_date`. It does not
+    change the default (`--purchases`) output at all.
     """
     since = (dt.date.today() - dt.timedelta(days=since_days)).isoformat()
+    cols = ("ticker, owner_name, transaction_date, value, is_officer, is_director, "
+            "is_ten_pct_owner, derivative, COALESCE(is_10b5_1, 0), filed_date")
+    if extended_features:
+        cols += ", shares, shares_owned_after"
     rows = conn.execute(
-        """SELECT ticker, owner_name, transaction_date, value, is_officer, is_director,
-                  is_ten_pct_owner, derivative, COALESCE(is_10b5_1, 0), filed_date
-           FROM sec_purchases
-           WHERE transaction_date >= ? AND ticker IS NOT NULL AND ticker != ''
-           ORDER BY transaction_date""",
+        f"""SELECT {cols} FROM sec_purchases
+            WHERE transaction_date >= ? AND ticker IS NOT NULL AND ticker != ''
+            ORDER BY transaction_date""",
         (since,),
     ).fetchall()
     out = []
-    for (ticker, owner, txn_date, value, officer, director, ten_pct, deriv,
-         is_10b5_1, filed) in rows:
-        # Enter on the disclosure date, not the trade date: the trade is not public
-        # until it is filed, so measuring from the trade date would credit the
-        # signal with a move nobody could have acted on.
+    for row in rows:
+        (ticker, owner, txn_date, value, officer, director, ten_pct, deriv,
+         is_10b5_1, filed) = row[:10]
         entry = filed or txn_date
         fr = forward_returns(ticker, entry, horizons)
         if not fr:
             continue
-        out.append({
+        rec = {
             "ticker": ticker, "owner": owner, "value": value or 0,
             "role": ("officer/director" if (officer or director)
                      else "10% holder" if ten_pct else "other"),
             "derivative": bool(deriv), "is_10b5_1": bool(is_10b5_1),
             "returns": fr,
-        })
+        }
+        if extended_features:
+            h = horizons[0]
+            if h not in fr or fr[h].get("excess") is None:
+                continue
+            shares, owned_after = row[10], row[11]
+            rec.update(
+                disclosure_date=entry,
+                trade_date=txn_date,          # raw transaction_date, for lag_days
+                label=1 if fr[h]["excess"] > 0 else 0,
+                shares=float(shares or 0),
+                owned_after=None if owned_after is None else float(owned_after),
+            )
+        out.append(rec)
     return out
 
 

@@ -66,3 +66,33 @@ def test_collect_political_trades_drops_unlabelable_and_junk(conn, monkeypatch):
                         lambda t, s, h: {21: {"return": 1.0, "excess": 1.0}} if t == "AAA" else None)
     rows = backtest.collect_political_trades(conn, horizon=21, since_days=100000)
     assert [r["ticker"] for r in rows] == ["AAA"]   # NONE = junk, DDD = no disclosure date, others unlabelable
+
+
+from conftest import add_sec_purchase
+
+
+def test_collect_purchases_default_shape_unchanged(conn, monkeypatch):
+    add_sec_purchase(conn, "AAA", "Buyer", 200_000, "2026-09-01")
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {1: {"return": 2.0, "excess": 1.0},
+                                          21: {"return": 3.0, "excess": 2.0}})
+    rows = backtest.collect_purchases(conn, (1, 21), since_days=100000)
+    assert rows and "returns" in rows[0]
+    assert "label" not in rows[0] and "disclosure_date" not in rows[0]
+
+
+def test_collect_purchases_extended_adds_label_and_features(conn, monkeypatch):
+    add_sec_purchase(conn, "AAA", "Winner", 200_000, "2026-09-01",
+                     shares=100, shares_owned_after=1100, filed_date="2026-09-03")
+    add_sec_purchase(conn, "BBB", "Loser", 200_000, "2026-09-01",
+                     shares=50, shares_owned_after=50, filed_date="2026-09-02")
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 3.0,
+                                              "excess": 4.0 if t == "AAA" else -1.0}})
+    rows = {r["owner"]: r for r in
+            backtest.collect_purchases(conn, (21,), since_days=100000, extended_features=True)}
+    assert rows["Winner"]["label"] == 1 and rows["Loser"]["label"] == 0
+    assert rows["Winner"]["disclosure_date"] == "2026-09-03"
+    assert rows["Winner"]["trade_date"] == "2026-09-01"
+    assert rows["Winner"]["shares"] == 100 and rows["Winner"]["owned_after"] == 1100
+    assert rows["Loser"]["owned_after"] == 50
