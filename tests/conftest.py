@@ -151,3 +151,21 @@ def add_sweden_txn(conn, isin, person, value, date="2026-09-01", txn_type="P",
          value, 0, 0, status, "https://example.test/fi"),
     )
     conn.commit()
+
+
+def add_house_txn(conn, ticker, member, amount_range, date="09/03/2026",
+                  notification_date="09/20/2026", txn_type="P", asset=None,
+                  state_district="CA-12", doc_id=None):
+    """House PTR row. Dates are M/D/YYYY here (House PDF format), unlike every
+    other table."""
+    conn.execute(
+        """INSERT INTO house_purchases
+           (doc_id, member_name, state_district, owner, asset, ticker, txn_type,
+            txn_date, notification_date, amount_range, source_url)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (doc_id or f"doc-{ticker}-{member}-{date}-{amount_range}", member,
+         state_district, "Self", asset or f"{ticker} Inc", ticker, txn_type,
+         date, notification_date, amount_range,
+         f"https://example.test/house/{ticker}"),
+    )
+    conn.commit()

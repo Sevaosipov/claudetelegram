@@ -7,3 +7,6 @@ lxml>=5.0
 # transitive dependency of yfinance, which would break the moment yfinance dropped
 # it -- and only at runtime, inside the BaFin pass.
 beautifulsoup4>=4.12
+# model_eval.py: logistic regression + gradient boosting for walk-forward
+# evaluation of predictive skill. Pulls scipy, joblib, threadpoolctl.
+scikit-learn>=1.5
