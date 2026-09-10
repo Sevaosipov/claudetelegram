@@ -242,3 +242,104 @@ def _interpret(auc: float | None, n: int, folds: int) -> str:
                 f"treat with suspicion until the sample is several times larger. "
                 f"This is not a forecast.")
     return ">>> Worse than chance -- almost certainly noise at this n."
+
+
+def make_pipeline(numeric: list[str], categorical: list[str], kind: str):
+    from sklearn.compose import ColumnTransformer
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+    num = Pipeline([("impute", SimpleImputer(strategy="median", keep_empty_features=True)),
+                    ("scale", StandardScaler())])
+    transformers = [("num", num, numeric)]
+    if categorical:
+        cat = Pipeline([("impute", SimpleImputer(strategy="most_frequent")),
+                        ("oh", OneHotEncoder(handle_unknown="ignore"))])
+        transformers.append(("cat", cat, categorical))
+    pre = ColumnTransformer(transformers)
+
+    if kind == "gbt":
+        clf = HistGradientBoostingClassifier(max_depth=3, max_iter=200,
+                                             learning_rate=0.05, early_stopping=True,
+                                             random_state=0)
+    else:   # "lr" and "baseline"
+        clf = LogisticRegression(class_weight="balanced", max_iter=1000)
+    return Pipeline([("pre", pre), ("clf", clf)])
+
+
+def _feature_names_out(pipe, numeric, categorical) -> list[str]:
+    try:
+        raw = list(pipe.named_steps["pre"].get_feature_names_out())
+        # ColumnTransformer prefixes each name with its transformer key
+        # ("num__" / "cat__"); strip it so names read as real feature names.
+        return [n.split("__", 1)[1] if n.startswith(("num__", "cat__")) else n
+                for n in raw]
+    except Exception:
+        return numeric + categorical
+
+
+def run_walk_forward(X, y, dates, folds, corpus: str) -> dict:
+    from sklearn.inspection import permutation_importance
+
+    numeric, categorical, baseline_col = _COLUMNS[corpus]
+    specs = {
+        "lr": (numeric, categorical, "lr"),
+        "gbt": (numeric, categorical, "gbt"),
+        "baseline": ([baseline_col], [], "baseline"),
+    }
+    result = {"n": 0, "base_rate": float(np.mean(y)), "models": {}}
+    pooled_lr_true, pooled_lr_prob = [], []
+    last_lr = last_gbt = None
+    last_test_idx = folds[-1][1]
+
+    for name, (num, cat, kind) in specs.items():
+        per_fold, train_aucs, p_true, p_prob = [], [], [], []
+        for train_idx, test_idx in folds:
+            pipe = make_pipeline(num, cat, kind)
+            pipe.fit(X.iloc[train_idx], y[train_idx])
+            prob = pipe.predict_proba(X.iloc[test_idx])[:, 1]
+            per_fold.append(pooled_auc(y[test_idx], prob))
+            train_aucs.append(pooled_auc(y[train_idx],
+                                          pipe.predict_proba(X.iloc[train_idx])[:, 1]))
+            p_true.extend(y[test_idx].tolist())
+            p_prob.extend(prob.tolist())
+        valid_train = [a for a in train_aucs if a is not None]
+        entry = {
+            "auc": pooled_auc(p_true, p_prob),
+            "per_fold_auc": per_fold,
+            "train_auc": float(np.mean(valid_train)) if valid_train else None,
+        }
+        if name != "baseline":
+            entry["brier"] = brier(p_true, p_prob)
+        result["models"][name] = entry
+        if name == "lr":
+            pooled_lr_true, pooled_lr_prob = p_true, p_prob
+            last_lr = pipe
+        if name == "gbt":
+            last_gbt = pipe
+
+    result["n"] = len(pooled_lr_true)
+    result["calibration"] = calibration_deciles(pooled_lr_true, pooled_lr_prob)
+    result["top_decile"] = top_decile_precision(pooled_lr_true, pooled_lr_prob)
+
+    # LR coefficients -- fit once on all rows, interpretation only.
+    full = make_pipeline(numeric, categorical, "lr")
+    full.fit(X, y)
+    names = _feature_names_out(full, numeric, categorical)
+    coefs = full.named_steps["clf"].coef_[0]
+    result["lr_coefficients"] = sorted(
+        zip(names, (float(c) for c in coefs)), key=lambda kv: abs(kv[1]), reverse=True)
+
+    # GBT permutation importance on the last fold's test set.
+    try:
+        imp = permutation_importance(last_gbt, X.iloc[last_test_idx], y[last_test_idx],
+                                     n_repeats=10, random_state=0, scoring="roc_auc")
+        result["gbt_importance"] = sorted(
+            zip(numeric + categorical, (float(v) for v in imp.importances_mean)),
+            key=lambda kv: kv[1], reverse=True)
+    except Exception:
+        result["gbt_importance"] = []
+    return result

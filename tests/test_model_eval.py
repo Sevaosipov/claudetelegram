@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import model_eval
@@ -165,3 +166,40 @@ def test_calibration_deciles_group_by_predicted_probability():
 ])
 def test_interpret_bands(auc, fragment):
     assert fragment in model_eval._interpret(auc, n=150, folds=3)
+
+
+def _synthetic_frame(n=90, signal=True):
+    rng = np.random.default_rng(0)
+    months = ["2025-04", "2025-05", "2025-06", "2025-07", "2025-08"]
+    dates, feat, y = [], [], []
+    for i in range(n):
+        m = months[i % len(months)]
+        dates.append(f"{m}-{(i % 27) + 1:02d}")
+        strong = rng.normal()
+        noise = rng.normal()
+        label = 1 if (strong if signal else rng.normal()) > 0 else 0
+        feat.append({"log_amount": strong, "lag_days": noise, "cluster_size": 0,
+                     "member_prior_hitrate": float("nan"), "price_vs_spy_63d": noise,
+                     "chamber": "house", "mcap_bucket": "small"})
+        y.append(label)
+    X = pd.DataFrame(feat, columns=model_eval._COLUMNS["politicians"][0]
+                                  + model_eval._COLUMNS["politicians"][1])
+    return X, np.array(y), sorted(dates)
+
+
+def test_run_walk_forward_recovers_a_planted_signal():
+    X, y, dates = _synthetic_frame(signal=True)
+    folds = model_eval.walk_forward_folds(dates, n_folds=3, min_test=12)
+    res = model_eval.run_walk_forward(X, y, dates, folds, "politicians")
+    assert res["models"]["lr"]["auc"] > 0.75          # log_amount ~ label by construction
+    assert len(res["models"]["lr"]["per_fold_auc"]) == 3
+    assert 0.0 <= res["base_rate"] <= 1.0
+    assert res["lr_coefficients"][0][0] in X.columns
+    assert res["calibration"] and "n" in res["calibration"][0]
+
+
+def test_run_walk_forward_finds_nothing_in_noise():
+    X, y, dates = _synthetic_frame(signal=False)
+    folds = model_eval.walk_forward_folds(dates, n_folds=3, min_test=12)
+    res = model_eval.run_walk_forward(X, y, dates, folds, "politicians")
+    assert 0.30 < res["models"]["lr"]["auc"] < 0.70   # ~coin flip
