@@ -190,3 +190,55 @@ def check_sufficiency(dates: list[str], n_folds: int, min_rows: int, min_test: i
             lines.append(f"  Coverage since {coverage_start}; at ~{rate:.0f} rows/month, "
                          f"re-run around {_add_months(months[-1], eta_k)}.")
     return "\n".join(lines)
+
+
+def pooled_auc(y_true, y_score) -> float | None:
+    from sklearn.metrics import roc_auc_score
+    y_true = list(y_true)
+    if len(set(y_true)) < 2:
+        return None
+    return float(roc_auc_score(y_true, list(y_score)))
+
+
+def brier(y_true, y_prob) -> float:
+    from sklearn.metrics import brier_score_loss
+    return float(brier_score_loss(list(y_true), list(y_prob)))
+
+
+def calibration_deciles(y_true, y_prob) -> list[dict]:
+    y_true, y_prob = list(y_true), list(y_prob)
+    out = []
+    for b in range(10):
+        lo, hi = b / 10, (b + 1) / 10
+        idx = [i for i, p in enumerate(y_prob)
+               if (lo <= p < hi) or (b == 9 and p == 1.0)]
+        if not idx:
+            continue
+        out.append({
+            "bucket": f"{lo:.1f}-{hi:.1f}",
+            "n": len(idx),
+            "predicted": sum(y_prob[i] for i in idx) / len(idx),
+            "actual": sum(y_true[i] for i in idx) / len(idx),
+        })
+    return out
+
+
+def top_decile_precision(y_true, y_prob) -> float | None:
+    y_true, y_prob = list(y_true), list(y_prob)
+    if not y_true:
+        return None
+    k = max(1, len(y_true) // 10)
+    top = sorted(range(len(y_prob)), key=lambda i: y_prob[i], reverse=True)[:k]
+    return sum(y_true[i] for i in top) / k
+
+
+def _interpret(auc: float | None, n: int, folds: int) -> str:
+    if auc is None:
+        return ">>> Not enough label variety in the test folds to score."
+    if 0.45 <= auc <= 0.55:
+        return ">>> No detectable edge. AUC ~0.5 is a coin flip."
+    if auc > 0.55:
+        return (f">>> Nominal edge, but {folds} folds of ~{max(n // folds, 1)} rows -- "
+                f"treat with suspicion until the sample is several times larger. "
+                f"This is not a forecast.")
+    return ">>> Worse than chance -- almost certainly noise at this n."

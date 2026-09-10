@@ -137,3 +137,31 @@ def test_check_sufficiency_passes_a_healthy_political_set():
     dates = _dates({"2025-03": 20, "2025-04": 20, "2025-05": 20,
                     "2025-06": 20, "2025-07": 20})
     assert model_eval.check_sufficiency(dates, 3, 80, 12, "politicians", "2025-03") is None
+
+
+def test_pooled_auc_perfect_and_none():
+    assert model_eval.pooled_auc([0, 0, 1, 1], [0.1, 0.2, 0.8, 0.9]) == pytest.approx(1.0)
+    assert model_eval.pooled_auc([1, 1, 1], [0.3, 0.6, 0.9]) is None
+
+
+def test_top_decile_precision():
+    y = [0] * 18 + [1, 1]
+    p = [0.1] * 18 + [0.9, 0.95]        # the two 1s are the top decile
+    assert model_eval.top_decile_precision(y, p) == pytest.approx(1.0)
+
+
+def test_calibration_deciles_group_by_predicted_probability():
+    y = [0, 0, 1, 1]
+    p = [0.05, 0.05, 0.95, 0.95]
+    dec = model_eval.calibration_deciles(y, p)
+    lo = next(d for d in dec if d["bucket"] == "0.0-0.1")
+    hi = next(d for d in dec if d["bucket"] == "0.9-1.0")
+    assert lo["actual"] == pytest.approx(0.0) and hi["actual"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("auc,fragment", [
+    (0.50, "No detectable edge"), (0.53, "No detectable edge"),
+    (0.62, "Nominal edge"), (0.38, "Worse than chance"), (None, "label variety"),
+])
+def test_interpret_bands(auc, fragment):
+    assert fragment in model_eval._interpret(auc, n=150, folds=3)
