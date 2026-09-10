@@ -52,6 +52,7 @@ import logging
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 import db
+import cluster
 import marketcap
 
 BASE_DIR = Path(__file__).parent
@@ -237,6 +238,49 @@ def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365) -> list[di
                      else "10% holder" if ten_pct else "other"),
             "derivative": bool(deriv), "is_10b5_1": bool(is_10b5_1),
             "returns": fr,
+        })
+    return out
+
+
+def _mdy_to_iso(s: str | None) -> str | None:
+    """House dates are M/D/YYYY (zero-padded or not) -> ISO, else None."""
+    try:
+        return dt.datetime.strptime((s or "").strip(), "%m/%d/%Y").date().isoformat()
+    except ValueError:
+        return None
+
+
+def collect_political_trades(conn, horizon: int = 21, since_days: int = 1200) -> list[dict]:
+    """House PTR *purchases* with a beat-the-benchmark label at `horizon` trading
+    days after the DISCLOSURE date. See model_eval.py.
+
+    House only in practice: `house_purchases.notification_date` is the disclosure
+    date; `senate_purchases` has no disclosure-date column, so Senate rows are
+    excluded until that scraper records one.
+    """
+    since = (dt.date.today() - dt.timedelta(days=since_days)).isoformat()
+    rows = conn.execute(
+        f"""SELECT ticker, member_name, txn_date, notification_date, amount_range
+            FROM house_purchases
+            WHERE txn_type = 'P' AND ticker IS NOT NULL AND ticker != ''
+              AND notification_date != '' AND {cluster._JUNK_TICKER_SQL}""",
+    ).fetchall()
+    out = []
+    for ticker, member, txn_date, notif_date, amount_range in rows:
+        disc = _mdy_to_iso(notif_date)
+        if not disc or disc < since:
+            continue
+        fr = forward_returns(ticker, disc, (horizon,))
+        if not fr or horizon not in fr or fr[horizon].get("excess") is None:
+            continue
+        out.append({
+            "ticker": ticker,
+            "member": member,
+            "chamber": "house",
+            "disclosure_date": disc,
+            "trade_date": _mdy_to_iso(txn_date) or disc,
+            "amount_range": amount_range or "",
+            "label": 1 if fr[horizon]["excess"] > 0 else 0,
         })
     return out
 

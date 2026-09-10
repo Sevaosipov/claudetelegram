@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import backtest
+from conftest import add_house_txn
 
 
 def _series(values):
@@ -27,3 +28,41 @@ def test_excess_return_none_when_history_too_short():
     prices = _series([100, 110])
     bench = _series([100, 104])
     assert backtest._excess_return(prices, bench, days=3) is None
+
+
+@pytest.mark.parametrize("raw,iso", [
+    ("9/3/2026", "2026-09-03"), ("09/03/2026", "2026-09-03"),
+    ("12/31/2025", "2025-12-31"), ("", None), ("not a date", None), (None, None),
+])
+def test_mdy_to_iso(raw, iso):
+    assert backtest._mdy_to_iso(raw) == iso
+
+
+def test_collect_political_trades_labels_by_beat_or_miss(conn, monkeypatch):
+    add_house_txn(conn, "AAA", "Rep A", "$1,001 - $15,000",
+                  date="06/01/2025", notification_date="06/15/2025")
+    add_house_txn(conn, "BBB", "Rep B", "$50,001 - $100,000",
+                  date="06/01/2025", notification_date="06/15/2025")
+
+    def fake_forward(ticker, start, horizons):
+        return {21: {"return": 5.0, "excess": 3.0 if ticker == "AAA" else -2.0}}
+    monkeypatch.setattr(backtest, "forward_returns", fake_forward)
+
+    rows = backtest.collect_political_trades(conn, horizon=21, since_days=100000)
+    by_ticker = {r["ticker"]: r for r in rows}
+    assert by_ticker["AAA"]["label"] == 1
+    assert by_ticker["BBB"]["label"] == 0
+    assert by_ticker["AAA"]["disclosure_date"] == "2025-06-15"
+    assert by_ticker["AAA"]["trade_date"] == "2025-06-01"
+    assert by_ticker["AAA"]["chamber"] == "house"
+
+
+def test_collect_political_trades_drops_unlabelable_and_junk(conn, monkeypatch):
+    add_house_txn(conn, "AAA", "Rep A", "$1,001 - $15,000", notification_date="06/15/2025")
+    add_house_txn(conn, "NONE", "Rep C", "$1,001 - $15,000", notification_date="06/15/2025")
+    add_house_txn(conn, "DDD", "Rep D", "$1,001 - $15,000", notification_date="")
+
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 1.0, "excess": 1.0}} if t == "AAA" else None)
+    rows = backtest.collect_political_trades(conn, horizon=21, since_days=100000)
+    assert [r["ticker"] for r in rows] == ["AAA"]   # NONE = junk, DDD = no disclosure date, others unlabelable
