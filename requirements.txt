@@ -9,4 +9,4 @@ lxml>=5.0
 beautifulsoup4>=4.12
 # model_eval.py: logistic regression + gradient boosting for walk-forward
 # evaluation of predictive skill. Pulls scipy, joblib, threadpoolctl.
-scikit-learn>=1.5
+scikit-learn>=1.6
