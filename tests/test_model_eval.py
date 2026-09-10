@@ -27,20 +27,21 @@ def test_cluster_counts_is_backward_looking_and_excludes_self():
 
 
 def test_prior_hitrate_only_uses_settled_earlier_trades():
+    # Chronological on purpose: the feature is date-based (a member's trades whose
+    # own 2*horizon-day settle window closed before D), so order in the list must
+    # not matter -- these rows happen to be sorted, but the logic does not rely on it.
     rows = [
-        _prow("AAA", "Rep A", "2025-01-01", 1),
-        _prow("BBB", "Rep A", "2025-02-01", 0),
-        # 2025-05-01: earlier Rep A trades whose window settled by 2025-05-01 minus
-        # 42 days (= 2025-03-20). Both Jan and Feb qualify -> mean(1, 0) = 0.5
-        _prow("CCC", "Rep A", "2025-05-01", 1),
-        # 2025-02-15: only the Jan trade is old enough (>= 2025-01-04) -> 1.0
-        _prow("DDD", "Rep A", "2025-02-15", 0),
-        _prow("EEE", "Rep Z", "2025-05-01", 1),   # no prior Rep Z trades -> nan
+        _prow("T1", "Rep A", "2025-01-01", 1),
+        _prow("T2", "Rep A", "2025-02-01", 0),   # Jan is 31d back (< 2*21=42) -> not settled -> nan
+        _prow("T3", "Rep A", "2025-03-01", 1),   # Jan settled (59d), Feb not (28d) -> mean(1) = 1.0
+        _prow("T4", "Rep A", "2025-06-01", 0),   # Jan/Feb/Mar all settled -> mean(1,0,1) = 2/3
+        _prow("T5", "Rep Z", "2025-06-01", 1),   # no prior Rep Z trade -> nan
     ]
     hr = model_eval._prior_hitrate(rows, horizon=21, id_key="member")
-    assert hr[0] != hr[0] or math.isnan(hr[0])   # first trade ever -> nan
-    assert hr[2] == pytest.approx(0.5)
-    assert hr[3] == pytest.approx(1.0)
+    assert math.isnan(hr[0])
+    assert math.isnan(hr[1])
+    assert hr[2] == pytest.approx(1.0)
+    assert hr[3] == pytest.approx(2 / 3)
     assert math.isnan(hr[4])
 
 

@@ -42,7 +42,7 @@
 ```
 # model_eval.py: logistic regression + gradient boosting for walk-forward
 # evaluation of predictive skill. Pulls scipy, joblib, threadpoolctl.
-scikit-learn>=1.5
+scikit-learn>=1.6
 ```
 `requirements-dev.txt` — it currently reads `-r requirements.txt` then `pytest>=8.0`; no change needed (it inherits the line above). Leave it, but confirm it still starts with `-r requirements.txt`.
 
@@ -50,7 +50,7 @@ scikit-learn>=1.5
 
 Run:
 ```bash
-cd ~/Desktop/disclosure-bot && .venv/bin/pip install 'scikit-learn>=1.5'
+cd ~/Desktop/disclosure-bot && .venv/bin/pip install 'scikit-learn>=1.6'
 .venv/bin/python -c "import sklearn, scipy, joblib; print(sklearn.__version__)"
 ```
 Expected: a version string ≥ 1.5, no error.
@@ -397,6 +397,7 @@ def test_collect_purchases_extended_adds_label_and_features(conn, monkeypatch):
             backtest.collect_purchases(conn, (21,), since_days=100000, extended_features=True)}
     assert rows["Winner"]["label"] == 1 and rows["Loser"]["label"] == 0
     assert rows["Winner"]["disclosure_date"] == "2026-09-03"
+    assert rows["Winner"]["trade_date"] == "2026-09-01"
     assert rows["Winner"]["shares"] == 100 and rows["Winner"]["owned_after"] == 1100
     assert rows["Loser"]["owned_after"] == 50
 ```
@@ -452,6 +453,7 @@ def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365, *,
             shares, owned_after = row[10], row[11]
             rec.update(
                 disclosure_date=entry,
+                trade_date=txn_date,          # raw transaction_date, for lag_days
                 label=1 if fr[h]["excess"] > 0 else 0,
                 shares=float(shares or 0),
                 owned_after=None if owned_after is None else float(owned_after),
@@ -530,20 +532,21 @@ def test_cluster_counts_is_backward_looking_and_excludes_self():
 
 
 def test_prior_hitrate_only_uses_settled_earlier_trades():
+    # Chronological on purpose: the feature is date-based (a member's trades whose
+    # own 2*horizon-day settle window closed before D), so order in the list must
+    # not matter -- these rows happen to be sorted, but the logic does not rely on it.
     rows = [
-        _prow("AAA", "Rep A", "2025-01-01", 1),
-        _prow("BBB", "Rep A", "2025-02-01", 0),
-        # 2025-05-01: earlier Rep A trades whose window settled by 2025-05-01 minus
-        # 42 days (= 2025-03-20). Both Jan and Feb qualify -> mean(1, 0) = 0.5
-        _prow("CCC", "Rep A", "2025-05-01", 1),
-        # 2025-02-15: only the Jan trade is old enough (>= 2025-01-04) -> 1.0
-        _prow("DDD", "Rep A", "2025-02-15", 0),
-        _prow("EEE", "Rep Z", "2025-05-01", 1),   # no prior Rep Z trades -> nan
+        _prow("T1", "Rep A", "2025-01-01", 1),
+        _prow("T2", "Rep A", "2025-02-01", 0),   # Jan is 31d back (< 2*21=42) -> not settled -> nan
+        _prow("T3", "Rep A", "2025-03-01", 1),   # Jan settled (59d), Feb not (28d) -> mean(1) = 1.0
+        _prow("T4", "Rep A", "2025-06-01", 0),   # Jan/Feb/Mar all settled -> mean(1,0,1) = 2/3
+        _prow("T5", "Rep Z", "2025-06-01", 1),   # no prior Rep Z trade -> nan
     ]
     hr = model_eval._prior_hitrate(rows, horizon=21, id_key="member")
-    assert hr[0] != hr[0] or math.isnan(hr[0])   # first trade ever -> nan
-    assert hr[2] == pytest.approx(0.5)
-    assert hr[3] == pytest.approx(1.0)
+    assert math.isnan(hr[0])
+    assert math.isnan(hr[1])
+    assert hr[2] == pytest.approx(1.0)
+    assert hr[3] == pytest.approx(2 / 3)
     assert math.isnan(hr[4])
 
 
@@ -569,6 +572,29 @@ def test_build_feature_frame_politicians_shape(conn, monkeypatch):
     assert dates == ["2025-06-01", "2025-06-02", "2025-06-15"]
     assert X["log_amount"].iloc[0] > 0
     assert X["mcap_bucket"].iloc[0] in ("small", "mid")
+
+
+def test_build_feature_frame_insiders_shape(conn, monkeypatch):
+    from conftest import add_sec_purchase
+    monkeypatch.setattr(model_eval.backtest, "_return_before", lambda t, d, days=63: -2.0)
+    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t: 5e9)
+    rows = [
+        {"ticker": "AAA", "owner": "Buyer One", "value": 250_000, "role": "officer/director",
+         "disclosure_date": "2026-09-03", "trade_date": "2026-09-01",
+         "shares": 100.0, "owned_after": 1100.0, "label": 1},
+        {"ticker": "AAA", "owner": "Buyer Two", "value": 90_000, "role": "10% holder",
+         "disclosure_date": "2026-09-04", "trade_date": "2026-09-02",
+         "shares": 500.0, "owned_after": 500.0, "label": 0},
+    ]
+    X, y, dates = model_eval.build_feature_frame(conn, rows, "insiders", horizon=21)
+    num, cat, _ = model_eval._COLUMNS["insiders"]
+    assert list(X.columns) == num + cat
+    assert list(y) == [1, 0]
+    assert X["lag_days"].iloc[0] == 2
+    assert X["position_increase_pct"].iloc[0] == pytest.approx(10.0)   # 100 into 1000 held
+    assert X["position_increase_pct"].iloc[1] == pytest.approx(100.0)  # brand-new position
+    assert X["role"].iloc[0] == "officer/director"
+    assert X["is_first_buy"].iloc[0] in (0.0, 1.0)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -689,8 +715,7 @@ def build_feature_frame(conn, rows: list[dict], corpus: str, horizon: int):
     for i, r in enumerate(rows):
         d = r["disclosure_date"]
         feat = {
-            "lag_days": _days_between(d, r["trade_date"]) if corpus == "politicians"
-                        else _days_between(d, r.get("trade_date", d)),
+            "lag_days": _days_between(d, r["trade_date"]),   # both corpora carry trade_date
             "cluster_size": cluster_size[i],
             "price_vs_spy_63d": backtest._return_before(r["ticker"], d, 63),
             "mcap_bucket": marketcap.size_bucket(marketcap.market_cap_eur(conn, r["ticker"])),
@@ -717,7 +742,7 @@ def build_feature_frame(conn, rows: list[dict], corpus: str, horizon: int):
 - [ ] **Step 4: Run to verify pass**
 
 Run: `cd ~/Desktop/disclosure-bot && .venv/bin/python -m pytest tests/test_model_eval.py -q`
-Expected: PASS (4 passed).
+Expected: PASS (5 passed — 3 helper tests + both `build_feature_frame` shape tests).
 
 - [ ] **Step 5: Regression**
 
@@ -772,8 +797,8 @@ def test_walk_forward_folds_expanding_no_overlap():
 
 
 def test_walk_forward_folds_skips_a_sparse_month_as_a_test_fold():
-    dates = _dates({"2025-03": 15, "2025-04": 15, "2025-05": 15,
-                    "2025-06": 15, "2025-07": 4})   # July too thin
+    dates = _dates({"2025-02": 15, "2025-03": 15, "2025-04": 15,
+                    "2025-05": 15, "2025-06": 15, "2025-07": 4})   # July too thin
     folds = model_eval.walk_forward_folds(dates, n_folds=3, min_test=12)
     test_months = {min(dates[i] for i in f[1])[:7] for f in folds}
     assert test_months == {"2025-04", "2025-05", "2025-06"}   # July excluded
@@ -1083,7 +1108,7 @@ def make_pipeline(numeric: list[str], categorical: list[str], kind: str):
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-    num = Pipeline([("impute", SimpleImputer(strategy="median")),
+    num = Pipeline([("impute", SimpleImputer(strategy="median", keep_empty_features=True)),
                     ("scale", StandardScaler())])
     transformers = [("num", num, numeric)]
     if categorical:

@@ -78,22 +78,18 @@ def _cluster_counts(rows: list[dict], window_days: int, id_key: str) -> list[int
 
 
 def _prior_hitrate(rows: list[dict], horizon: int, id_key: str) -> list[float]:
-    """For each row: mean label of *earlier* same-id rows whose own outcome window
+    """For each row: mean label of earlier same-id rows whose own outcome window
     had settled by D. 'Settled' is approximated as disclosed at least 2*horizon
-    calendar days before D -- strictly leak-free. nan when there are none.
-
-    'Earlier' is positional: only rows that precede this one in ``rows`` are
-    consulted, so a row that appears later in the list is never used even if its
-    ``disclosure_date`` is older. Callers pass rows in disclosure order."""
+    calendar days before D -- strictly leak-free. nan when there are none."""
     settle = horizon * 2
-    seen: dict[str, list[tuple[str, int]]] = {}
+    by_id: dict[str, list[tuple[str, int]]] = {}
+    for r in rows:
+        by_id.setdefault(r[id_key], []).append((r["disclosure_date"], r["label"]))
     out = []
     for r in rows:
         d = r["disclosure_date"]
-        prior = [lab for (when, lab) in seen.get(r[id_key], [])
-                 if _days_between(d, when) >= settle]
+        prior = [lab for (when, lab) in by_id[r[id_key]] if _days_between(d, when) >= settle]
         out.append(sum(prior) / len(prior) if prior else math.nan)
-        seen.setdefault(r[id_key], []).append((d, r["label"]))
     return out
 
 
