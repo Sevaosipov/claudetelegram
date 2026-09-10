@@ -343,3 +343,72 @@ def run_walk_forward(X, y, dates, folds, corpus: str) -> dict:
     except Exception:
         result["gbt_importance"] = []
     return result
+
+
+_TITLES = {"politicians": "political trades (House PTRs)",
+           "insiders": "SEC Form 4 insider purchases"}
+
+_FOOTER = (
+    "Evaluates the historical skill of these features with walk-forward folds. It "
+    "does not\nforecast, is not investment advice, and cannot be pointed at a live "
+    "signal. The\nsample is small -- read the n on every line, and the per-fold "
+    "spread."
+)
+
+
+def _header(corpus: str, horizon: int) -> str:
+    return ("=" * 72 + "\n"
+            f"  MODEL EVALUATION -- {_TITLES.get(corpus, corpus)}\n"
+            f"  Do the recorded features predict beating SPY over {horizon} "
+            f"trading days?\n"
+            + "=" * 72)
+
+
+def format_report(corpus: str, result, horizon: int, folds: int) -> str:
+    if isinstance(result, str):
+        return f"{_header(corpus, horizon)}\n\n{result}\n\n{_FOOTER}"
+
+    m = result
+    L = [_header(corpus, horizon)]
+    L.append(f"  Labelled rows pooled over {folds} test folds: {m['n']}   "
+             f"Base rate (beat SPY): {m['base_rate'] * 100:.0f}%")
+    L.append("")
+    L.append(f"  {'':22}{'AUC':>7}{'Brier':>9}{'top-decile':>13}")
+    L.append("  " + "-" * 50)
+    rows = [("lr", "Logistic regression"), ("gbt", "Gradient boosting"),
+            ("baseline", "Baseline (amount only)")]
+    for key, label in rows:
+        e = m["models"][key]
+        auc = f"{e['auc']:.2f}" if e["auc"] is not None else "  -"
+        brier = f"{e['brier']:.3f}" if "brier" in e else "    -"
+        td = f"{m['top_decile'] * 100:.0f}%" if key == "lr" and m["top_decile"] is not None else "-"
+        L.append(f"  {label:22}{auc:>7}{brier:>9}{td:>13}")
+    lr = m["models"]["lr"]
+    L.append("")
+    L.append("  Per-fold AUC (LR): " + ", ".join(f"{a:.2f}" if a is not None else "-"
+                                                  for a in lr["per_fold_auc"]))
+    if lr.get("train_auc") is not None and lr["auc"] is not None and lr["train_auc"] - lr["auc"] > 0.15:
+        L.append(f"  (LR train AUC {lr['train_auc']:.2f} vs test {lr['auc']:.2f} -- overfitting)")
+    gbt = m["models"]["gbt"]
+    if gbt.get("train_auc") is not None and gbt["auc"] is not None and gbt["train_auc"] - gbt["auc"] > 0.15:
+        L.append(f"  (GBT train AUC {gbt['train_auc']:.2f} vs test {gbt['auc']:.2f} -- overfitting, "
+                 f"as expected at this n)")
+    L.append("")
+    L.append("  " + _interpret(lr["auc"], m["n"], folds))
+    L.append("")
+    L.append("  Calibration (predicted probability -> actual hit rate):")
+    for d in m["calibration"]:
+        L.append(f"    {d['bucket']:>9}  n={d['n']:<4}  predicted {d['predicted']:.2f}  "
+                 f"actual {d['actual']:.2f}")
+    L.append("")
+    L.append("  LR standardized coefficients (interpretation only, fit on all rows):")
+    for name, coef in m["lr_coefficients"][:12]:
+        L.append(f"    {coef:+.2f}  {name}")
+    if m.get("gbt_importance"):
+        L.append("")
+        L.append("  GBT permutation importance (last fold test set, AUC drop):")
+        for name, val in m["gbt_importance"][:8]:
+            L.append(f"    {val:+.3f}  {name}")
+    L.append("")
+    L.append(_FOOTER)
+    return "\n".join(L)

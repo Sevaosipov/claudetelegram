@@ -203,3 +203,41 @@ def test_run_walk_forward_finds_nothing_in_noise():
     folds = model_eval.walk_forward_folds(dates, n_folds=3, min_test=12)
     res = model_eval.run_walk_forward(X, y, dates, folds, "politicians")
     assert 0.30 < res["models"]["lr"]["auc"] < 0.70   # ~coin flip
+
+
+_FAKE_METRICS = {
+    "n": 60, "base_rate": 0.48,
+    "models": {
+        "lr": {"auc": 0.52, "brier": 0.249, "per_fold_auc": [0.49, 0.58, 0.50], "train_auc": 0.71},
+        "gbt": {"auc": 0.50, "brier": 0.255, "per_fold_auc": [0.47, 0.55, 0.49], "train_auc": 0.95},
+        "baseline": {"auc": 0.51, "per_fold_auc": [0.50, 0.53, 0.50], "train_auc": 0.55},
+    },
+    "calibration": [{"bucket": "0.4-0.5", "n": 30, "predicted": 0.45, "actual": 0.47},
+                    {"bucket": "0.5-0.6", "n": 30, "predicted": 0.55, "actual": 0.50}],
+    "top_decile": 0.50,
+    "lr_coefficients": [("log_amount", 0.31), ("chamber_house", -0.02)],
+    "gbt_importance": [("log_amount", 0.01), ("lag_days", -0.00)],
+}
+
+
+def test_format_report_renders_metrics_and_interpretation():
+    text = model_eval.format_report("politicians", _FAKE_METRICS, horizon=21, folds=3)
+    assert "MODEL EVALUATION" in text and "political trades" in text
+    assert "0.52" in text and "Base rate" in text
+    assert "No detectable edge" in text          # AUC 0.52 -> coin-flip band
+    assert "Per-fold AUC (LR): 0.49, 0.58, 0.50" in text
+    assert "log_amount" in text
+    assert "not investment advice" in text.lower()
+
+
+def test_format_report_passes_through_an_abort_message():
+    text = model_eval.format_report("insiders", "INSUFFICIENT DATA for insiders.\n  20 rows.",
+                                     horizon=21, folds=3)
+    assert "INSUFFICIENT DATA for insiders." in text
+    assert "not investment advice" in text.lower()
+
+
+def test_format_report_has_no_ticker_verdict_language():
+    text = model_eval.format_report("politicians", _FAKE_METRICS, horizon=21, folds=3).lower()
+    for bad in ("buy ", "sell ", "will rise", "will fall", "target price", "forecast:"):
+        assert bad not in text
