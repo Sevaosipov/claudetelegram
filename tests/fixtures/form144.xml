@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/ownership" xmlns:com="http://www.sec.gov/edgar/common">
+  <headerData>
+    <submissionType>144</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001718601</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <issuerInfo>
+      <issuerCik>0001018840</issuerCik>
+      <issuerName>ABERCROMBIE &amp; FITCH CO /DE/</issuerName>
+      <secFileNumber>001-12107</secFileNumber>
+      <issuerAddress>
+        <com:street1>6301 FITCH PATH</com:street1>
+        <com:city>NEW ALBANY</com:city>
+        <com:stateOrCountry>OH</com:stateOrCountry>
+        <com:zipCode>43054</com:zipCode>
+      </issuerAddress>
+      <issuerContactPhone>6142836500</issuerContactPhone>
+      <nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>Lipesky Scott D.</nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>
+      <relationshipsToIssuer>
+        <relationshipToIssuer>Officer</relationshipToIssuer>
+      </relationshipsToIssuer>
+    </issuerInfo>
+    <securitiesInformation>
+      <securitiesClassTitle>Class A</securitiesClassTitle>
+      <brokerOrMarketmakerDetails>
+        <name>Fidelity Brokerage Services LLC</name>
+        <address>
+          <com:street1>900 Salem Street</com:street1>
+          <com:city>Smithfield</com:city>
+          <com:stateOrCountry>RI</com:stateOrCountry>
+          <com:zipCode>02917</com:zipCode>
+        </address>
+      </brokerOrMarketmakerDetails>
+      <noOfUnitsSold>2000</noOfUnitsSold>
+      <aggregateMarketValue>293633.82</aggregateMarketValue>
+      <noOfUnitsOutstanding>44431710</noOfUnitsOutstanding>
+      <approxSaleDate>09/04/2026</approxSaleDate>
+      <securitiesExchangeName>NYSE</securitiesExchangeName>
+    </securitiesInformation>
+    <securitiesToBeSold>
+      <securitiesClassTitle>Class A</securitiesClassTitle>
+      <acquiredDate>03/31/2025</acquiredDate>
+      <natureOfAcquisitionTransaction>Restricted Stock Vesting</natureOfAcquisitionTransaction>
+      <nameOfPersonfromWhomAcquired>Issuer</nameOfPersonfromWhomAcquired>
+      <isGiftTransaction>N</isGiftTransaction>
+      <amountOfSecuritiesAcquired>2000</amountOfSecuritiesAcquired>
+      <paymentDate>03/31/2025</paymentDate>
+      <natureOfPayment>Compensation</natureOfPayment>
+    </securitiesToBeSold>
+    <nothingToReportFlagOnSecuritiesSoldInPast3Months>N</nothingToReportFlagOnSecuritiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails>
+        <name>Scott D. Lipesky</name>
+        <address>
+          <com:street1>6301 Fitch Path</com:street1>
+          <com:city>New Albany</com:city>
+          <com:stateOrCountry>OH</com:stateOrCountry>
+          <com:zipCode>43054</com:zipCode>
+        </address>
+      </sellerDetails>
+      <securitiesClassTitle>Class A</securitiesClassTitle>
+      <saleDate>07/16/2026</saleDate>
+      <amountOfSecuritiesSold>10000</amountOfSecuritiesSold>
+      <grossProceeds>1000000.00</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails>
+        <name>Scott D. Lipesky</name>
+        <address>
+          <com:street1>6301 Fitch Path</com:street1>
+          <com:city>New Albany</com:city>
+          <com:stateOrCountry>OH</com:stateOrCountry>
+          <com:zipCode>43054</com:zipCode>
+        </address>
+      </sellerDetails>
+      <securitiesClassTitle>Class A</securitiesClassTitle>
+      <saleDate>07/28/2026</saleDate>
+      <amountOfSecuritiesSold>10000</amountOfSecuritiesSold>
+      <grossProceeds>1050000.00</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails>
+        <name>Scott D. Lipesky</name>
+        <address>
+          <com:street1>6301 Fitch Path</com:street1>
+          <com:city>New Albany</com:city>
+          <com:stateOrCountry>OH</com:stateOrCountry>
+          <com:zipCode>43054</com:zipCode>
+        </address>
+      </sellerDetails>
+      <securitiesClassTitle>Class A</securitiesClassTitle>
+      <saleDate>08/04/2026</saleDate>
+      <amountOfSecuritiesSold>10000</amountOfSecuritiesSold>
+      <grossProceeds>1100000.00</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails>
+        <name>Scott D. Lipesky</name>
+        <address>
+          <com:street1>6301 Fitch Path</com:street1>
+          <com:city>New Albany</com:city>
+          <com:stateOrCountry>OH</com:stateOrCountry>
+          <com:zipCode>43054</com:zipCode>
+        </address>
+      </sellerDetails>
+      <securitiesClassTitle>Class A</securitiesClassTitle>
+      <saleDate>08/10/2026</saleDate>
+      <amountOfSecuritiesSold>10000</amountOfSecuritiesSold>
+      <grossProceeds>1150000.00</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <securitiesSoldInPast3Months>
+      <sellerDetails>
+        <name>Scott D. Lipesky</name>
+        <address>
+          <com:street1>6301 Fitch Path</com:street1>
+          <com:city>New Albany</com:city>
+          <com:stateOrCountry>OH</com:stateOrCountry>
+          <com:zipCode>43054</com:zipCode>
+        </address>
+      </sellerDetails>
+      <securitiesClassTitle>Class A</securitiesClassTitle>
+      <saleDate>08/28/2026</saleDate>
+      <amountOfSecuritiesSold>5000</amountOfSecuritiesSold>
+      <grossProceeds>745000.00</grossProceeds>
+    </securitiesSoldInPast3Months>
+    <noticeSignature>
+      <noticeDate>09/04/2026</noticeDate>
+      <signature>/s/ Louis Kurnick, as a duly authorized representative of Fidelity Brokerage Services LLC, as attorney-in-fact for Scott D. Lipesky</signature>
+    </noticeSignature>
+  </formData>
+</edgarSubmission>

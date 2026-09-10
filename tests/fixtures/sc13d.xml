@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:com="http://www.sec.gov/edgar/common">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13D</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <!-- Field: Pseudo-Tag; ID: Name; Data: BlueArc Capital Management, LLC -->
+          <cik>0002097963</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Class S units of beneficial interest</securitiesClassTitle>
+      <dateOfEvent>09/01/2026</dateOfEvent>
+      <previouslyFiledFlag>true</previouslyFiledFlag>
+      <issuerInfo>
+        <issuerCIK>0002046200</issuerCIK>
+        <issuerCusips>
+          <issuerCusipNumber>03116R105</issuerCusipNumber>
+        </issuerCusips>
+        <issuerName>AMG Pantheon Infrastructure Fund, LLC</issuerName>
+        <address>
+          <com:street1>680 Washington Blvd., Suite 500</com:street1>
+          <com:city>Stamford</com:city>
+          <com:stateOrCountry>CT</com:stateOrCountry>
+          <com:zipCode>06901</com:zipCode>
+        </address>
+      </issuerInfo>
+      <authorizedPersons>
+        <notificationInfo>
+          <personName>Ronald Zazworsky, Jr.</personName>
+          <personPhoneNum>404-419-6130</personPhoneNum>
+          <personAddress>
+            <com:street1>One Buckhead Plaza</com:street1>
+            <com:street2>3060 Peachtree Road, Suite 1120</com:street2>
+            <com:city>Atlanta</com:city>
+            <com:stateOrCountry>GA</com:stateOrCountry>
+            <com:zipCode>30305</com:zipCode>
+          </personAddress>
+        </notificationInfo>
+      </authorizedPersons>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0002097963</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>BlueArc Capital Management, LLC</reportingPersonName>
+        <fundType>AF</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>17285425.04</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>17285425.04</sharedDispositivePower>
+        <aggregateAmountOwned>17285425.04</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>32.3</percentOfClass>
+        <typeOfReportingPerson>IA</typeOfReportingPerson>
+        <typeOfReportingPerson>HC</typeOfReportingPerson>
+        <typeOfReportingPerson>OO</typeOfReportingPerson>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0002098163</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>BlueArc Core Alternatives Management, LLC</reportingPersonName>
+        <fundType>AF</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>17285425.04</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>17285425.04</sharedDispositivePower>
+        <aggregateAmountOwned>17285425.04</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>32.3</percentOfClass>
+        <typeOfReportingPerson>HC</typeOfReportingPerson>
+        <typeOfReportingPerson>OO</typeOfReportingPerson>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0002082761</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Pantheon Infrastructure (QP), a series of BlueArc Core Alternatives, LLC</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>13442986.66</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>13442986.66</sharedDispositivePower>
+        <aggregateAmountOwned>13442986.66</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>25.1</percentOfClass>
+        <typeOfReportingPerson>OO</typeOfReportingPerson>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0002082762</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Pantheon Infrastructure (QP) (TE Onshore), a series of BlueArc Core Alternatives, LLC</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>3842438.38</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>3842438.38</sharedDispositivePower>
+        <aggregateAmountOwned>3842438.38</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>7.2</percentOfClass>
+        <typeOfReportingPerson>OO</typeOfReportingPerson>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001626970</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Ronald Zazworsky, Jr.</reportingPersonName>
+        <fundType>AF</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>X1</citizenshipOrOrganization>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>17285425.04</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>17285425.04</sharedDispositivePower>
+        <aggregateAmountOwned>17285425.04</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>32.3</percentOfClass>
+        <typeOfReportingPerson>IN</typeOfReportingPerson>
+        <typeOfReportingPerson>HC</typeOfReportingPerson>
+      </reportingPersonInfo>
+    </reportingPersons>
+    <items1To7>
+      <item1>
+        <securityTitle>Class S units of beneficial interest</securityTitle>
+        <issuerName>AMG Pantheon Infrastructure Fund, LLC</issuerName>
+        <issuerPrincipalAddress>
+          <com:street1>680 Washington Blvd., Suite 500</com:street1>
+          <com:city>Stamford</com:city>
+          <com:stateOrCountry>CT</com:stateOrCountry>
+          <com:zipCode>06901</com:zipCode>
+        </issuerPrincipalAddress>
+        <commentText>The Reporting Persons (as defined below) are filing this joint statement on Schedule 13D because the Reporting Persons' beneficial ownership has exceeded 20%, and pursuant to Rule 13d-1(f), the Reporting Persons are no longer able to continue filing a short-form statement on Schedule 13G under Rule 13d-1(c).  As such, this Schedule 13D amends and replaces a Schedule 13G that was previously filed on September 2, 2026.  The filing of this Schedule 13D does not reflect a change in the Reporting Persons' purpose or intent in holding the Class S Units (as defined below).</commentText>
+      </item1>
+      <item2>
+        <filingPersonName>This joint statement on Schedule 13G is being filed by (i) Pantheon Infrastructure (QP), a series of BlueArc Core Alternatives, LLC (ii) Pantheon Infrastructure (QP) (TE Onshore), a series of BlueArc Core Alternatives, LLC (together with Pantheon Infrastructure (QP), the "Funds"), (iii) BlueArc Core Alternatives Management, LLC, the managing member of BlueArc Core Alternatives, LLC, (iv) BlueArc Capital Management, LLC, the sole member of BlueArc Core Alternatives Management, LLC and the Funds' investment adviser, and (v) Ronald Zazworsky, Jr., the managing director of the Funds and the Chief Executive Officer of BlueArc Core Alternatives Management, LLC and BlueArc Capital Management, LLC (collectively with the Funds, BlueArc Core Alternatives Management, LLC, and BlueArc Capital Management, LLC, the  "Reporting Persons").</filingPersonName>
+        <principalBusinessAddress>The business address of each of the Reporting Persons is One Buckhead Plaza, 3060 Peachtree Road, Suite 1120, Atlanta, GA 30305.</principalBusinessAddress>
+        <principalJob>The principal business of each of the Reporting Persons is investing in securities.</principalJob>
+        <hasBeenConvicted>None of the Reporting Persons has, during the last five years, been convicted in a criminal proceeding (excluding traffic violations or similar misdemeanors).</hasBeenConvicted>
+        <convictionDescription>None of the Reporting Persons has, during the last five years, been a party to a civil proceeding of a judicial or administrative body of competent jurisdiction and, as a result of such proceeding, was, or is subject to, a judgment, decree or final order enjoining future violations of, or prohibiting or mandating activities subject to, federal or state securities laws or finding any violation with respect to such laws.</convictionDescription>
+        <citizenship>Each of the Funds is a series of a Delaware limited liability company.  BlueArc Core Alternatives Management, LLC and BlueArc Capital Management, LLC are Delaware limited liability companies.  Mr. Zazworsky is a citizen of the United States.</citizenship>
+      </item2>
+      <item3>
+        <fundsSource>Pursuant to the subscription agreement by and between Pantheon Infrastructure (QP) and AMG Pantheon Infrastructure Fund, LLC (the "Issuer"), dated September 1, 2026 (the "September 2026 Pantheon Infrastructure (QP) Subscription Agreement"), and the subscription agreement by and between Pantheon Infrastructure (QP) (TE Onshore) and the Issuer, dated September 1, 2026 (the "September 2026 Pantheon Infrastructure (QP) (TE Onshore) Subscription Agreement" and collectively with the September 2026 Pantheon Infrastructure (QP) Subscription Agreement, the "September 2026 Subscription Agreements"), the Reporting Persons acquired Class S Units of beneficial interest of the Issuer (the "Class S Units") on September 1, 2026 at a purchase price of $11.46 per Class S Unit (the "Current Acquisition").  Due to the timing of the calculation of the Issuer's net asset value, the number of units acquired and the purchase price per unit are estimates based on the Issuer's estimated net asset value per unit as of the date of the acquisition.
+
+The purchase price paid by Pantheon Infrastructure (QP) in the Current Acquisition was $77,712,475.74.  The source of the funds used by Pantheon Infrastructure (QP) to acquire the Class S Units consisted of its working capital and fund assets, including capital contributions made by its members.
+
+The purchase price paid by Pantheon Infrastructure (QP) (TE Onshore) in the Current Acquisition was $21,666,651.26.  The source of the funds used by Pantheon Infrastructure (QP) (TE Onshore) to acquire the Class S Units consisted of its working capital and fund assets, including capital contributions made by its members.
+
+Accordingly, the aggregate purchase price paid for the Current Acquisition pursuant to the September 2026 Subscription Agreements was $99,379,127.</fundsSource>
+      </item3>
+      <item4>
+        <transactionPurpose>The Reporting Persons acquired the Class S Units reported herein for passive investment purposes and without the intent to effect any change in management or control of the Issuer.
+
+As of the date of this Schedule 13D, the Reporting Persons have no present plan or proposal that relates to or would result in any of the matters set forth in subsections (a) through (j) of this Item 4.</transactionPurpose>
+      </item4>
+      <item5>
+        <percentageOfClassSecurities>The Reporting Persons beneficially own the following shares of Class S Units of the Issuer:
+(i) BlueArc Capital Management, LLC: 17,285,425.04
+(ii) BlueArc Core Alternatives Management, LLC: 17,285,425.04
+(iii) Pantheon Infrastructure (QP): 13,442,986.66
+(iv) Pantheon Infrastructure (QP) (TE Onshore): 3,842,438.38
+(v) Ronald Zazworsky, Jr.: 17,285,425.04
+
+Notwithstanding the inclusion of any security in this Schedule 13D, each of the Reporting Persons expressly disclaims beneficial ownership of any security reported herein, except to the extent of its or his pecuniary interest therein, if any.
+
+The percentages of beneficial ownership reported herein, and on each Reporting Person's cover page to this Schedule 13D, are based on a total of 53,470,683.70 shares of Issuer Class S Units outstanding as of September 1, 2026, as estimated by the Reporting Persons on September 3, 2026.
+(i) BlueArc Capital Management, LLC: 32.3%
+(ii) BlueArc Core Alternatives Management, LLC: 32.3%
+(iii) Pantheon Infrastructure (QP): 25.1%
+(iv) Pantheon Infrastructure (QP) (TE Onshore): 7.2%
+(v) Ronald Zazworsky, Jr.: 32.3%
+
+Due to the timing of the calculation of the Issuer's net asset value, the number of units acquired, the number of units beneficially owned following the acquisition, and the percentages of beneficial ownership following the acquisition are estimates based on the Issuer's estimated net asset value per unit as of the date of the acquisition.</percentageOfClassSecurities>
+        <numberOfShares>See rows (7) through (10) of the cover pages to this Schedule 13D, as well as Item 5(a) of this Schedule 13D, for the number of Class S Units as to which each Reporting Person has the sole or shared power to vote or direct the vote and sole or shared power to dispose or to direct the disposition.</numberOfShares>
+        <transactionDesc>Not Applicable</transactionDesc>
+        <listOfShareholders>Except as disclosed in the Schedule 13D, to the best knowledge of the Reporting Persons, no other person has the right to receive or the power to direct the receipt of dividends from, or the proceeds from the sale of, the Class S Units beneficially owned by any of the Reporting Persons.</listOfShareholders>
+        <date5PercentOwnership>Not Applicable</date5PercentOwnership>
+      </item5>
+      <item6>
+        <contractDescription>Not Applicable</contractDescription>
+      </item6>
+      <item7>
+        <filedExhibits>Exhibit 99.1 Form of Initial Subscription Agreement, incorporated herein by reference to Exhibit 99.1 of the Schedule 13G filed by the reporting persons with the Securities and Exchange Commission on September 2, 2026 https://www.sec.gov/Archives/edgar/data/2046200/000110465926104597/tm2624216d5_ex99-1.htm).
+
+Exhibit 99.2 Form of Subscription Agreement for Follow-On Investments, incorporated herein by reference to Exhibit 99.2 of the Schedule 13G filed by the reporting persons with the Securities and Exchange Commission on September 2, 2026 (https://www.sec.gov/Archives/edgar/data/2046200/000110465926104597/tm2624216d5_ex99-2.htm).
+
+Exhibit 99.3 Joint Filing Agreement, dated September 2, 2026, by and among the reporting persons, incorporated herein by reference to Exhibit 99.3 of the Schedule 13G filed by the reporting persons with the Securities and Exchange Commission on September 2, 2026 (https://www.sec.gov/Archives/edgar/data/2046200/000110465926104597/tm2624216d5_ex99-3.htm).</filedExhibits>
+      </item7>
+    </items1To7>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureReportingPerson>BlueArc Capital Management, LLC</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Ronald Zazworsky, Jr.</signature>
+          <title>Chief Executive Officer</title>
+          <date>09/04/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>BlueArc Core Alternatives Management, LLC</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Ronald Zazworsky, Jr.</signature>
+          <title>Chief Executive Officer</title>
+          <date>09/04/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Pantheon Infrastructure (QP), a series of BlueArc Core Alternatives, LLC</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Ronald Zazworsky, Jr.</signature>
+          <title>Chief Executive Officer of BlueArc Core Alternatives Management, LLC, its managing member</title>
+          <date>09/04/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Pantheon Infrastructure (QP) (TE Onshore), a series of BlueArc Core Alternatives, LLC</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Ronald Zazworsky, Jr.</signature>
+          <title>Chief Executive Officer of BlueArc Core Alternatives Management, LLC, its managing member</title>
+          <date>09/04/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Ronald Zazworsky, Jr.</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Ronald Zazworsky, Jr.</signature>
+          <title>Ronald Zazworsky, Jr.</title>
+          <date>09/04/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+</edgarSubmission>

@@ -1,0 +1,332 @@
+"""Send a digest of new purchases to Telegram via the Bot HTTP API.
+
+Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars. To get them:
+  1. Message @BotFather on Telegram, send /newbot, follow the prompts -> gives you
+     a bot token like "123456:ABC-DEF...".
+  2. Send any message to your new bot, then open in a browser:
+     https://api.telegram.org/bot<TOKEN>/getUpdates
+     Your numeric chat id is in the JSON response under result[0].message.chat.id.
+
+If either env var is missing, send_digest() prints a warning and does nothing --
+it never raises, so a misconfigured bot doesn't break the rest of the pipeline.
+"""
+from __future__ import annotations
+
+import os
+
+import requests
+
+import datefmt
+
+API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+MAX_LEN = 3500  # stay under Telegram's 4096-char limit with room to spare
+
+
+def _chunk(text: str, size: int) -> list[str]:
+    """Split a digest for Telegram's message limit, preferring signal boundaries.
+
+    Signals are joined by a blank line, so packing whole blocks keeps a signal's
+    header, members and links together instead of tearing one across two messages
+    at whatever line happens to cross the limit. A single block bigger than the
+    limit (a very large cluster) still falls back to splitting by line.
+    """
+    blocks = text.split("\n\n")
+    chunks: list[str] = []
+    current = ""
+    for block in blocks:
+        if len(block) + 2 > size:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(_chunk_lines(block, size))
+            continue
+        if current and len(current) + len(block) + 2 > size:
+            chunks.append(current)
+            current = ""
+        current = f"{current}\n\n{block}" if current else block
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _chunk_lines(text: str, size: int) -> list[str]:
+    lines = text.split("\n")
+    chunks, current = [], ""
+    for line in lines:
+        if len(current) + len(line) + 1 > size:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def send_text(text: str) -> bool:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("[telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set, skipping notification")
+        return False
+    ok = True
+    for chunk in _chunk(text, MAX_LEN):
+        try:
+            resp = requests.post(
+                API_URL.format(token=token),
+                data={
+                    "chat_id": chat_id,
+                    "text": chunk,
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            print(f"[telegram] send failed: {e}")
+            ok = False
+    return ok
+
+
+def format_sec_line(p, avg_return_pct: float | None) -> str:
+    role = p.officer_title or ("Director" if p.is_director else "10%+ Owner")
+    value = f"${p.value:,.0f}" if p.value else "?"
+    perf = f", track record {avg_return_pct:+.0f}% vs S&P" if avg_return_pct is not None else ""
+    return (
+        f"🟢 SEC: {p.owner_name} ({role}) bought {p.issuer_name} ({p.ticker or '?'})\n"
+        f"   {datefmt.fmt(p.transaction_date)} · {p.shares:g} sh @ ${p.price:,.2f} = {value}{perf}\n"
+        f"   {p.source_url}"
+    )
+
+
+def format_house_line(t) -> str:
+    return (
+        f"🏛 House: {t.member_name} [{t.state_district}] bought {t.asset}\n"
+        f"   {datefmt.fmt(t.txn_date)} · {t.amount_range}\n"
+        f"   {t.source_url}"
+    )
+
+
+def format_bafin_line(f, detail, source_url: str) -> str:
+    verb = "bought" if f.txn_type == "P" else "sold"
+    vol = f"€{detail.volume_eur:,.0f}" if detail.volume_eur else "?"
+    price = f" @ €{detail.price_eur:,.2f}" if detail.price_eur else ""
+    role = f" ({f.position})" if f.position else ""
+    return (
+        f"🇩🇪 BaFin: {f.notifier_name}{role} {verb} {f.issuer_name} ({f.isin})\n"
+        f"   {datefmt.fmt(f.txn_date)} · {vol}{price}\n"
+        f"   {source_url}"
+    )
+
+
+def format_norway_line(t: dict) -> str:
+    verb = "bought" if t["txn_type"] == "P" else "sold"
+    value = t["shares"] * t["price"]
+    vol = f"{value:,.0f} {t['currency']}" if value else "?"
+    price = f" @ {t['price']:,.2f} {t['currency']}/sh" if t.get("price") else ""
+    return (
+        f"🇳🇴 Oslo Børs: {t['person']} {verb} {t['issuer_name']} ({t['ticker'] or '?'})\n"
+        f"   {datefmt.fmt(t['txn_date'])} · {t['shares']:g} sh{price} = {vol}\n"
+        f"   {t['source_url']}"
+    )
+
+
+def format_senate_line(t) -> str:
+    return (
+        f"🏛 Senate: {t.member_name} [{t.office}] "
+        f"{'bought' if t.txn_type == 'P' else 'sold'} {t.asset}\n"
+        f"   {datefmt.fmt(t.txn_date)} · {t.amount_range}\n"
+        f"   {t.source_url}"
+    )
+
+
+def format_stake_line(f) -> str:
+    """One reporting person from a 13D/G filing, for the terminal feed."""
+    pct = f"{f.percent_of_class:.2f}%" if f.percent_of_class is not None else "?"
+    shares = f", {f.amount_owned:,.0f} sh" if f.amount_owned else ""
+    when = f" · {datefmt.fmt(f.event_date)}" if f.event_date else ""
+    icon = "🐋" if f.is_activist else "📊"
+    return (
+        f"{icon} {f.form_type}: {f.person_name} holds {pct} of "
+        f"{f.issuer_name} ({f.ticker or f.issuer_cik}){shares}{when}\n"
+        f"   {f.source_url}"
+    )
+
+
+def format_144_line(s) -> str:
+    """One Form 144 notice of intended sale, for the terminal feed."""
+    value = f"${s.market_value:,.0f}" if s.market_value else "?"
+    pct = f" ({s.percent_of_class:.3f}% of class)" if s.percent_of_class is not None else ""
+    nature = f" · {s.acquisition_nature}" if s.acquisition_nature else ""
+    return (
+        f"📤 Form 144: {s.person_name} ({s.relationship or '?'}) intends to sell "
+        f"{value} of {s.issuer_name} ({s.ticker or s.issuer_cik}){pct}\n"
+        f"   ~{datefmt.fmt(s.approx_sale_date)}{nature}\n"
+        f"   {s.source_url}"
+    )
+
+
+def format_sweden_line(t: dict) -> str:
+    verb = "bought" if t["txn_type"] == "P" else "sold"
+    vol = f"{t['value']:,.0f} {t['currency']}" if t["value"] else "?"
+    price = f" @ {t['price']:,.2f} {t['currency']}/sh" if t.get("price") else ""
+    role = f" ({t['position']})" if t.get("position") else ""
+    # Worth saying on the line: this is compensation being disclosed, not a
+    # decision to buy. No other source in this project distinguishes the two.
+    plan = " [share programme]" if t.get("share_program") else ""
+    return (
+        f"🇸🇪 FI: {t['person']}{role} {verb} {t['issuer_name']} ({t['isin']}){plan}\n"
+        f"   {datefmt.fmt(t['txn_date'])} · {t['shares']:g} sh{price} = {vol}\n"
+        f"   {t['source_url']}"
+    )
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Russian noun pluralization: 1 -> one, 2-4 -> few, 0/5-20 -> many (with the
+    usual 11-14 exception)."""
+    if 11 <= n % 100 <= 14:
+        return many
+    if n % 10 == 1:
+        return one
+    if 2 <= n % 10 <= 4:
+        return few
+    return many
+
+
+_SOURCE_ICON = {"SEC": "🟢", "HOUSE": "🏛", "SENATE": "🏛", "BAFIN": "🇩🇪",
+                "NORWAY": "🇳🇴", "SWEDEN": "🇸🇪"}
+
+# Signal amounts arrive already converted to EUR by cluster.py (see fx.py), so
+# every source formats the same way here. The per-filing lines above stay in
+# their native currency on purpose -- those mirror the linked source document.
+SIGNAL_CURRENCY = "€"
+
+
+def format_signal(sig) -> str:
+    icon = _SOURCE_ICON.get(sig.source, "🟢")
+    if sig.source == "HOUSE":
+        label = _plural(sig.buyer_count, "конгрессмен", "конгрессмена", "конгрессменов")
+    elif sig.source == "SENATE":
+        label = _plural(sig.buyer_count, "сенатор", "сенатора", "сенаторов")
+    else:
+        label = _plural(sig.buyer_count, "инсайдер", "инсайдера", "инсайдеров")
+    # House PTRs only disclose a bracket, never an exact figure, so the total
+    # there is a conservative lower-bound estimate, not an exact sum.
+    if sig.total_value:
+        # Both chambers disclose a bracket rather than an amount, so their totals
+        # are lower bounds, not sums.
+        prefix = "от " if sig.source in ("HOUSE", "SENATE") else ""
+        value = f", {prefix}{SIGNAL_CURRENCY}{sig.total_value:,.0f}"
+    else:
+        value = ""
+    reason = "КРУПНАЯ ПОКУПКА" if getattr(sig, "reason", "cluster") == "solo" else "СИГНАЛ"
+    # Say so when nobody in the cluster is an officer or director. An institution
+    # adding to a >10% stake and the people who run the company buying are different
+    # events, and the euro amounts alone make them look identical -- the largest
+    # signal in the database so far is a fund, not an insider.
+    tag = " · только держатели >10%" if getattr(sig, "holder_only", False) else ""
+    score = getattr(sig, "score", None)
+    rank = f" · {score:.0f} баллов" if score else ""
+    lines = [f"{icon} {reason}: {sig.ticker} — {sig.buyer_count} {label}{value}{tag}{rank}"]
+    lines.append(f"   {sig.company}")
+    lines.append(f"   {datefmt.fmt(sig.window_start)} – {datefmt.fmt(sig.window_end)}")
+    context = _context_line(sig)
+    if context:
+        lines.append(f"   {context}")
+    for m in sig.members:
+        lines.append(f"   • {m}")
+    return "\n".join(lines)
+
+
+def _context_line(sig) -> str:
+    """Company size, how big the purchase is against it, how liquid the name is, and
+    how stale the disclosure is.
+
+    None of this was ever shown. The euro amount alone made a purchase in a shell
+    company and one in a mega-cap read identically, and a two-day-old Form 4 look
+    the same as a six-week-old PTR.
+    """
+    import marketcap
+    parts = []
+    cap = getattr(sig, "market_cap_eur", None)
+    if cap:
+        parts.append(f"компания €{_short_money(cap)} ({marketcap.size_bucket(cap)})")
+    pct = getattr(sig, "value_pct_of_mcap", None)
+    if pct and pct <= 100:
+        parts.append(f"{pct:.2f}% капитализации")
+    pos = getattr(sig, "position_increase_pct", None)
+    if pos:
+        parts.append(f"+{pos:.0f}% к своей позиции")
+    if getattr(sig, "first_buy", False):
+        parts.append("первая покупка в этой бумаге")
+    adv = getattr(sig, "avg_daily_value", None)
+    if adv is not None:
+        note = " ⚠️ низкая ликвидность" if adv < 250_000 else ""
+        parts.append(f"оборот €{_short_money(adv)}/день{note}")
+    lag = getattr(sig, "lag_days", None)
+    if lag is not None:
+        parts.append(f"раскрыто через {lag:.0f} дн.")
+    return " · ".join(parts)
+
+
+def _short_money(value: float) -> str:
+    for unit, suffix in ((1e9, "млрд"), (1e6, "млн"), (1e3, "тыс")):
+        if abs(value) >= unit:
+            return f"{value / unit:,.1f} {suffix}"
+    return f"{value:,.0f}"
+
+
+def format_exit_signal(sig) -> str:
+    label = {"HOUSE": "конгрессменов", "SENATE": "сенаторов"}.get(sig.source, "инсайдеров")
+    icon = _SOURCE_ICON.get(sig.source, "🚨")
+    lines = [f"{icon} ВЫХОД: {sig.ticker} — {sig.seller_count} из {sig.total_buyers} {label}, "
+             f"кто покупал, теперь продали"]
+    lines.append(f"   {sig.company}")
+    for l in sig.lines:
+        lines.append(f"   • {l}")
+    return "\n".join(lines)
+
+
+def format_stake_signal(sig) -> str:
+    """Schedule 13D/G: one holder's share OF THE COMPANY, not an amount of money.
+    13D and 13G carry the same 5% trigger but opposite intent -- 13D means the
+    holder may seek to influence control -- so they're labelled differently."""
+    kind = "🐋 АКТИВИСТ" if sig.is_activist else "📊 КРУПНЫЙ ДЕРЖАТЕЛЬ"
+    delta = f" (было {sig.prev_percent:.2f}%)" if sig.prev_percent is not None else ""
+    lines = [f"{kind}: {sig.ticker} — {sig.person} {sig.percent:.2f}% компании{delta}"]
+    lines.append(f"   {sig.company}")
+    detail = sig.form_type
+    if sig.amount_owned:
+        detail = f"{sig.amount_owned:,.0f} акций · {detail}"
+    if sig.event_date:
+        detail += f" · событие {datefmt.fmt(sig.event_date)}"
+    lines.append(f"   {detail}")
+    lines.append(f"   {sig.url}")
+    return "\n".join(lines)
+
+
+def format_any_signal(s) -> str:
+    if hasattr(s, "seller_count"):
+        return format_exit_signal(s)
+    if hasattr(s, "percent"):
+        return format_stake_signal(s)
+    return format_signal(s)
+
+
+def format_signals_digest(signals: list) -> str:
+    exit_count = sum(1 for s in signals if hasattr(s, "seller_count"))
+    stake_count = sum(1 for s in signals if hasattr(s, "percent"))
+    buy_count = len(signals) - exit_count - stake_count
+    parts = [f"{buy_count} кластерных покупок", f"{exit_count} выходов"]
+    if stake_count:
+        parts.append(f"{stake_count} крупных долей")
+    header = "🎯 Новые сигналы: " + ", ".join(parts)
+    return "\n\n".join([header] + [format_any_signal(s) for s in signals])
+
+
+def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
+    parts = [f"📈 Disclosure bot — {len(sec_lines)} insider buy(s), {len(house_lines)} Congress buy(s)\n"]
+    parts.extend(sec_lines)
+    if sec_lines and house_lines:
+        parts.append("")
+    parts.extend(house_lines)
+    return "\n\n".join(parts) if len(parts) > 1 else parts[0]

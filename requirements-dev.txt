@@ -1,0 +1,4 @@
+# Test-only dependencies. The bot itself doesn't need these; requirements.lock
+# stays the record of what the bot runs with.
+-r requirements.txt
+pytest>=8.0
