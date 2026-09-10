@@ -241,3 +241,77 @@ def test_format_report_has_no_ticker_verdict_language():
     text = model_eval.format_report("politicians", _FAKE_METRICS, horizon=21, folds=3).lower()
     for bad in ("buy ", "sell ", "will rise", "will fall", "target price", "forecast:"):
         assert bad not in text
+
+
+import pathlib
+
+
+def test_run_aborts_cleanly_when_data_is_thin(conn, monkeypatch):
+    monkeypatch.setattr(model_eval.backtest, "collect_political_trades",
+                        lambda c, horizon=21, since_days=1200: [
+                            _prow("AAA", "Rep A", "2026-08-01", 1),
+                            _prow("BBB", "Rep B", "2026-08-02", 0)])
+    monkeypatch.setattr(model_eval.backtest, "_return_before", lambda t, d, days=63: 0.0)
+    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t: 1e9)
+    out = model_eval.run(conn, "politicians")
+    assert "INSUFFICIENT DATA for politicians" in out
+    assert "not investment advice" in out.lower()
+
+
+def test_run_produces_a_report_on_a_healthy_synthetic_corpus(conn, monkeypatch):
+    months = ["2025-03", "2025-04", "2025-05", "2025-06", "2025-07"]
+    rows = []
+    for i in range(100):
+        m = months[i % 5]
+        rows.append(_prow(f"T{i % 7}", f"Rep {i % 6}", f"{m}-{(i % 27) + 1:02d}", i % 2,
+                          amount="$50,001 - $100,000" if i % 2 else "$1,001 - $15,000"))
+    monkeypatch.setattr(model_eval.backtest, "collect_political_trades",
+                        lambda c, horizon=21, since_days=1200: rows)
+    monkeypatch.setattr(model_eval.backtest, "_return_before", lambda t, d, days=63: 0.0)
+    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t: 1e9)
+    out = model_eval.run(conn, "politicians")
+    assert "MODEL EVALUATION" in out and "Base rate" in out
+    assert "Per-fold AUC (LR):" in out
+
+
+def test_no_project_module_imports_model_eval():
+    """The binding non-goal: nothing on the bot / signal / Telegram path imports
+    model_eval. menu.py is the one allowed consumer (same pattern it uses for
+    research / backtest). A bare docstring mention -- backtest.py has one, since it
+    hosts model_eval's data collectors -- is not an import and is fine."""
+    import ast
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    allowed = {"model_eval.py", "menu.py"}
+    offenders = []
+    for p in root.glob("*.py"):
+        if p.name in allowed:
+            continue
+        tree = ast.parse(p.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(a.name == "model_eval"
+                                                    for a in node.names):
+                offenders.append(p.name)
+            elif isinstance(node, ast.ImportFrom) and node.module == "model_eval":
+                offenders.append(p.name)
+    assert offenders == [], f"these modules import model_eval: {offenders}"
+
+
+def test_format_report_tolerates_all_none_metrics():
+    """A single-class test fold makes pooled_auc return None; the renderer must
+    still produce a report rather than crash. Task 10's real run is the first thing
+    to exercise these guards, so lock them here."""
+    degenerate = {
+        "n": 14, "base_rate": 1.0,
+        "models": {
+            "lr": {"auc": None, "brier": 0.0, "per_fold_auc": [None, 0.5, None], "train_auc": None},
+            "gbt": {"auc": None, "brier": 0.0, "per_fold_auc": [None, None, None], "train_auc": None},
+            "baseline": {"auc": None, "per_fold_auc": [None, None, None], "train_auc": None},
+        },
+        "calibration": [], "top_decile": None,
+        "lr_coefficients": [], "gbt_importance": [],
+    }
+    text = model_eval.format_report("politicians", degenerate, horizon=21, folds=3)
+    assert "MODEL EVALUATION" in text
+    assert "label variety" in text          # _interpret(None, ...)
+    assert "not investment advice" in text.lower()

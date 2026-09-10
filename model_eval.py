@@ -412,3 +412,58 @@ def format_report(corpus: str, result, horizon: int, folds: int) -> str:
     L.append("")
     L.append(_FOOTER)
     return "\n".join(L)
+
+
+def run(conn, corpus: str, horizon: int = 21, folds: int = 3,
+        min_rows: int = 80, min_test: int = 12) -> str:
+    if corpus == "both":
+        return "\n\n".join(
+            run(conn, c, horizon, folds, min_rows, min_test)
+            for c in ("politicians", "insiders"))
+
+    if corpus == "politicians":
+        rows = backtest.collect_political_trades(conn, horizon=horizon)
+    else:
+        rows = backtest.collect_purchases(conn, (horizon,), since_days=1200,
+                                          extended_features=True)
+    if not rows:
+        return format_report(corpus, f"INSUFFICIENT DATA for {corpus}.\n  "
+                             f"No labelled rows at all.", horizon, folds)
+
+    # Sort by disclosure date so the pooled walk-forward predictions concatenate in
+    # time order. The cross-row features (_cluster_counts, _prior_hitrate) are
+    # date-based and order-independent, so this is belt-and-braces, not required.
+    rows.sort(key=lambda r: r["disclosure_date"])
+
+    X, y, dates = build_feature_frame(conn, rows, corpus, horizon)
+    coverage_start = min(dates)[:7]
+    abort = check_sufficiency(dates, folds, min_rows, min_test, corpus, coverage_start)
+    if abort:
+        return format_report(corpus, abort, horizon, folds)
+
+    fold_idx = walk_forward_folds(dates, folds, min_test)
+    if fold_idx is None:
+        return format_report(corpus, f"INSUFFICIENT DATA for {corpus}.\n  "
+                             f"Could not build {folds} walk-forward folds.", horizon, folds)
+    metrics = run_walk_forward(X, y, dates, fold_idx, corpus)
+    return format_report(corpus, metrics, horizon, len(fold_idx))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("corpus", nargs="?", default="both",
+                    choices=["politicians", "insiders", "both"])
+    ap.add_argument("--horizon", type=int, default=21,
+                    help="trading days after disclosure to measure (default 21)")
+    ap.add_argument("--folds", type=int, default=3, help="walk-forward test months")
+    ap.add_argument("--min-rows", type=int, default=80, help="gate: total labelled rows")
+    ap.add_argument("--min-test", type=int, default=12,
+                    help="gate: rows an eligible test month needs")
+    args = ap.parse_args()
+    conn = db.connect(DB_PATH)
+    print(run(conn, args.corpus, args.horizon, args.folds, args.min_rows, args.min_test))
+
+
+if __name__ == "__main__":
+    main()

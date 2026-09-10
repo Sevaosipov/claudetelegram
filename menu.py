@@ -15,6 +15,7 @@ import cluster
 import congress_score
 import datefmt
 import db
+import model_eval
 import politician_report
 import research
 import telegram_notify
@@ -229,6 +230,20 @@ def show_backtest(conn) -> None:
           f"прогноз, и это не инвестиционный совет.")
 
 
+def show_model_eval(conn) -> None:
+    """Walk-forward оценка того, есть ли у признаков предсказательная сила.
+    Не прогноз и не рекомендация — см. подпись внизу отчёта."""
+    corpus = (input("Корпус [politicians / insiders / both] (Enter = both): ").strip()
+              or "both")
+    if corpus not in ("politicians", "insiders", "both"):
+        print("Не понял корпус.")
+        return
+    h = input("Горизонт в торговых днях (Enter = 21): ").strip()
+    horizon = int(h) if h.isdigit() else 21
+    print("Считаю (нужны исторические цены — политический прогон может занять минуту)...")
+    print(model_eval.run(conn, corpus, horizon))
+
+
 def main() -> None:
     conn = db.connect(DB_PATH)
     while True:
@@ -239,6 +254,7 @@ def main() -> None:
         print("3) Текущие сигналы (кластеры покупок + выходы + крупные доли 13D/G)")
         print("4) Проверка сигналов на истории (что было с ценой после)")
         print("5) Досье по тикеру (всё, что известно + новости и отчётность)")
+        print("6) Оценка предсказательной силы (walk-forward модель)")
         print("0) Выход")
         choice = input("Выбор: ").strip()
 
@@ -252,10 +268,12 @@ def main() -> None:
             show_backtest(conn)
         elif choice == "5":
             show_research(conn)
+        elif choice == "6":
+            show_model_eval(conn)
         elif choice == "0":
             break
         else:
-            print("Не понял выбор, введите 0, 1, 2, 3, 4 или 5.")
+            print("Не понял выбор, введите 0, 1, 2, 3, 4, 5 или 6.")
 
 
 if __name__ == "__main__":
