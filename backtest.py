@@ -54,6 +54,7 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 import db
 import cluster
 import marketcap
+import termstyle
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "disclosures.db"
@@ -311,17 +312,21 @@ def collect_political_trades(conn, horizon: int = 21, since_days: int = 1200) ->
 
 
 def _report(title: str, groups: dict, horizon: int) -> None:
-    print(f"\n=== {title} — {horizon} trading day(s) after disclosure ===")
-    print(f"{'group':22} {'n':>5} {'median':>9} {'vs bench':>10} {'hit rate':>9} {'p':>7}")
-    print("-" * 66)
+    print()
+    print(termstyle.section(f"{title} — {horizon} trading day(s) after disclosure"))
+    table_rows = []
     for name, rows in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         stats = summarise([r["returns"].get(horizon, {}) for r in rows], horizon)
         if not stats:
             continue
         p = f"{stats['p']:.2f}" if stats["p"] is not None else "-"
-        flag = "" if stats["meaningful"] else "  ← too few to read anything into"
-        print(f"{name:22} {stats['n']:>5} {stats['median_return']:>8.1f}% "
-              f"{stats['median_excess']:>+9.1f}pp {stats['hit_rate']:>8.0f}% {p:>7}{flag}")
+        note = "" if stats["meaningful"] else "too few to read anything into"
+        table_rows.append([
+            name, str(stats["n"]), f"{stats['median_return']:.1f}%",
+            f"{stats['median_excess']:+.1f}pp", f"{stats['hit_rate']:.0f}%", p, note,
+        ])
+    print(termstyle.table(["group", "n", "median", "vs bench", "hit rate", "p", "note"],
+                          table_rows, align=["l", "r", "r", "r", "r", "r", "l"]))
 
 
 def main() -> None:
@@ -339,8 +344,10 @@ def main() -> None:
     horizons = tuple(sorted({args.horizon, *HORIZONS}))
 
     if args.purchases:
+        print(termstyle.header("BACKTEST -- individual SEC purchases",
+                               f"{args.horizon} trading day(s) after disclosure"))
         data = collect_purchases(conn, horizons, since_days=args.days)
-        print(f"{len(data)} SEC purchases with usable price history")
+        print(f"\n{len(data)} SEC purchases with usable price history")
         if not data:
             print("Nothing to measure yet. Collect some data first: python bot.py --once")
             return
@@ -357,8 +364,10 @@ def main() -> None:
                                          "EUR 100k-1m" if r["value"] < 1_000_000 else "EUR 1m+")),
                 args.horizon)
     else:
+        print(termstyle.header("BACKTEST -- recorded signals",
+                               f"{args.horizon} trading day(s) after disclosure"))
         data = collect_signals(conn, horizons)
-        print(f"{len(data)} recorded signals with usable price history")
+        print(f"\n{len(data)} recorded signals with usable price history")
         if not data:
             print("signal_journal is empty -- it only fills as signals fire from now on.\n"
                   "For something measurable today, try: python backtest.py --purchases")
