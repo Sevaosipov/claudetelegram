@@ -22,6 +22,20 @@ API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_LEN = 3500  # stay under Telegram's 4096-char limit with room to spare
 
 
+def _esc(text) -> str:
+    """Escape the 3 characters Telegram's HTML parse_mode treats specially.
+    Applied to any text that isn't a literal written in this file -- names,
+    company names, tickers -- anything that ultimately comes from a filing."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _b(text: str, html: bool) -> str:
+    """Bold a line for Telegram, escaping it in the same step -- the two must
+    happen together so a stray '&'/'<'/'>' inside filer-supplied text (a
+    ticker, a company name) can never land inside the tag unescaped."""
+    return f"<b>{_esc(text)}</b>" if html else text
+
+
 def _chunk(text: str, size: int) -> list[str]:
     """Split a digest for Telegram's message limit, preferring signal boundaries.
 
@@ -76,6 +90,7 @@ def send_text(text: str) -> bool:
                 data={
                     "chat_id": chat_id,
                     "text": chunk,
+                    "parse_mode": "HTML",
                     "disable_web_page_preview": True,
                 },
                 timeout=15,
@@ -201,7 +216,7 @@ _SOURCE_ICON = {"SEC": "🟢", "HOUSE": "🏛", "SENATE": "🏛", "BAFIN": "🇩
 SIGNAL_CURRENCY = "€"
 
 
-def format_signal(sig) -> str:
+def format_signal(sig, *, html: bool = False) -> str:
     icon = _SOURCE_ICON.get(sig.source, "🟢")
     if sig.source == "HOUSE":
         label = _plural(sig.buyer_count, "конгрессмен", "конгрессмена", "конгрессменов")
@@ -226,14 +241,15 @@ def format_signal(sig) -> str:
     tag = " · только держатели >10%" if getattr(sig, "holder_only", False) else ""
     score = getattr(sig, "score", None)
     rank = f" · {score:.0f} баллов" if score else ""
-    lines = [f"{icon} {reason}: {sig.ticker} — {sig.buyer_count} {label}{value}{tag}{rank}"]
-    lines.append(f"   {sig.company}")
+    headline = f"{reason}: {sig.ticker} — {sig.buyer_count} {label}{value}{tag}{rank}"
+    lines = [f"{icon} {_b(headline, html)}"]
+    lines.append(f"   {_esc(sig.company) if html else sig.company}")
     lines.append(f"   {datefmt.fmt(sig.window_start)} – {datefmt.fmt(sig.window_end)}")
     context = _context_line(sig)
     if context:
-        lines.append(f"   {context}")
+        lines.append(f"   {_esc(context) if html else context}")
     for m in sig.members:
-        lines.append(f"   • {m}")
+        lines.append(f"   • {_esc(m) if html else m}")
     return "\n".join(lines)
 
 
@@ -275,41 +291,46 @@ def _short_money(value: float) -> str:
     return f"{value:,.0f}"
 
 
-def format_exit_signal(sig) -> str:
+def format_exit_signal(sig, *, html: bool = False) -> str:
     label = {"HOUSE": "конгрессменов", "SENATE": "сенаторов"}.get(sig.source, "инсайдеров")
     icon = _SOURCE_ICON.get(sig.source, "🚨")
-    lines = [f"{icon} ВЫХОД: {sig.ticker} — {sig.seller_count} из {sig.total_buyers} {label}, "
-             f"кто покупал, теперь продали"]
-    lines.append(f"   {sig.company}")
+    headline = (f"ВЫХОД: {sig.ticker} — {sig.seller_count} из {sig.total_buyers} {label}, "
+                f"кто покупал, теперь продали")
+    lines = [f"{icon} {_b(headline, html)}"]
+    lines.append(f"   {_esc(sig.company) if html else sig.company}")
     for l in sig.lines:
-        lines.append(f"   • {l}")
+        lines.append(f"   • {_esc(l) if html else l}")
     return "\n".join(lines)
 
 
-def format_stake_signal(sig) -> str:
+def format_stake_signal(sig, *, html: bool = False) -> str:
     """Schedule 13D/G: one holder's share OF THE COMPANY, not an amount of money.
     13D and 13G carry the same 5% trigger but opposite intent -- 13D means the
     holder may seek to influence control -- so they're labelled differently."""
     kind = "🐋 АКТИВИСТ" if sig.is_activist else "📊 КРУПНЫЙ ДЕРЖАТЕЛЬ"
     delta = f" (было {sig.prev_percent:.2f}%)" if sig.prev_percent is not None else ""
-    lines = [f"{kind}: {sig.ticker} — {sig.person} {sig.percent:.2f}% компании{delta}"]
-    lines.append(f"   {sig.company}")
+    headline = f"{kind}: {sig.ticker} — {sig.person} {sig.percent:.2f}% компании{delta}"
+    lines = [_b(headline, html)]
+    lines.append(f"   {_esc(sig.company) if html else sig.company}")
     detail = sig.form_type
     if sig.amount_owned:
         detail = f"{sig.amount_owned:,.0f} акций · {detail}"
     if sig.event_date:
         detail += f" · событие {datefmt.fmt(sig.event_date)}"
-    lines.append(f"   {detail}")
-    lines.append(f"   {sig.url}")
+    lines.append(f"   {_esc(detail) if html else detail}")
+    if html:
+        lines.append(f'   <a href="{_esc(sig.url)}">источник</a>')
+    else:
+        lines.append(f"   {sig.url}")
     return "\n".join(lines)
 
 
-def format_any_signal(s) -> str:
+def format_any_signal(s, *, html: bool = False) -> str:
     if hasattr(s, "seller_count"):
-        return format_exit_signal(s)
+        return format_exit_signal(s, html=html)
     if hasattr(s, "percent"):
-        return format_stake_signal(s)
-    return format_signal(s)
+        return format_stake_signal(s, html=html)
+    return format_signal(s, html=html)
 
 
 def format_signals_digest(signals: list) -> str:
@@ -319,8 +340,8 @@ def format_signals_digest(signals: list) -> str:
     parts = [f"{buy_count} кластерных покупок", f"{exit_count} выходов"]
     if stake_count:
         parts.append(f"{stake_count} крупных долей")
-    header = "🎯 Новые сигналы: " + ", ".join(parts)
-    return "\n\n".join([header] + [format_any_signal(s) for s in signals])
+    header = "🎯 <b>Новые сигналы: " + ", ".join(parts) + "</b>"
+    return "\n\n".join([header] + [format_any_signal(s, html=True) for s in signals])
 
 
 def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
