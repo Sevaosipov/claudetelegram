@@ -33,6 +33,7 @@ import backtest
 import cluster
 import db
 import marketcap
+import termstyle
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "disclosures.db"
@@ -365,11 +366,9 @@ _FOOTER = (
 
 
 def _header(corpus: str, horizon: int) -> str:
-    return ("=" * 72 + "\n"
-            f"  MODEL EVALUATION -- {_TITLES.get(corpus, corpus)}\n"
-            f"  Do the recorded features predict beating SPY over {horizon} "
-            f"trading days?\n"
-            + "=" * 72)
+    return termstyle.header(
+        f"MODEL EVALUATION -- {_TITLES.get(corpus, corpus)}",
+        f"Do the recorded features predict beating SPY over {horizon} trading days?")
 
 
 def format_report(corpus: str, result, horizon: int, folds: int) -> str:
@@ -385,16 +384,15 @@ def format_report(corpus: str, result, horizon: int, folds: int) -> str:
         L.append(f"  Test folds: {', '.join(m['test_months'])} "
                  f"(rows disclosed after {latest} were not evaluated)")
     L.append("")
-    L.append(f"  {'':22}{'AUC':>7}{'Brier':>9}{'top-decile':>13}")
-    L.append("  " + "-" * 50)
-    rows = [("lr", "Logistic regression"), ("gbt", "Gradient boosting"),
-            ("baseline", "Baseline (amount only)")]
-    for key, label in rows:
+    table_rows = []
+    for key, label in (("lr", "Logistic regression"), ("gbt", "Gradient boosting"),
+                        ("baseline", "Baseline (amount only)")):
         e = m["models"][key]
-        auc = f"{e['auc']:.2f}" if e["auc"] is not None else "  -"
-        brier = f"{e['brier']:.3f}" if "brier" in e else "    -"
+        auc = f"{e['auc']:.2f}" if e["auc"] is not None else "-"
+        brier = f"{e['brier']:.3f}" if "brier" in e else "-"
         td = f"{m['top_decile'] * 100:.0f}%" if key == "lr" and m["top_decile"] is not None else "-"
-        L.append(f"  {label:22}{auc:>7}{brier:>9}{td:>13}")
+        table_rows.append([label, auc, brier, td])
+    L.append(termstyle.table(["", "AUC", "Brier", "top-decile"], table_rows))
     lr = m["models"]["lr"]
     L.append("")
     L.append("  Per-fold AUC (LR): " + ", ".join(f"{a:.2f}" if a is not None else "-"
@@ -406,7 +404,7 @@ def format_report(corpus: str, result, horizon: int, folds: int) -> str:
         L.append(f"  (GBT train AUC {gbt['train_auc']:.2f} vs test {gbt['auc']:.2f} -- overfitting, "
                  f"as expected at this n)")
     L.append("")
-    L.append("  " + _interpret(lr["auc"], m["n"], folds))
+    L.append(f"  {termstyle.CYAN}" + _interpret(lr["auc"], m["n"], folds) + f"{termstyle.RESET}")
     L.append("")
     L.append("  Calibration (predicted probability -> actual hit rate):")
     for d in m["calibration"]:
