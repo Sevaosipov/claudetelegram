@@ -1240,18 +1240,18 @@ _FAKE_METRICS = {
     "calibration": [{"bucket": "0.4-0.5", "n": 30, "predicted": 0.45, "actual": 0.47},
                     {"bucket": "0.5-0.6", "n": 30, "predicted": 0.55, "actual": 0.50}],
     "top_decile": 0.50,
-    "lr_coefficients": [("num__log_amount", 0.31), ("cat__chamber_house", -0.02)],
+    "lr_coefficients": [("log_amount", 0.31), ("chamber_house", -0.02)],
     "gbt_importance": [("log_amount", 0.01), ("lag_days", -0.00)],
 }
 
 
 def test_format_report_renders_metrics_and_interpretation():
     text = model_eval.format_report("politicians", _FAKE_METRICS, horizon=21, folds=3)
-    assert "MODEL EVALUATION" in text and "politicians" in text
+    assert "MODEL EVALUATION" in text and "political trades" in text
     assert "0.52" in text and "Base rate" in text
     assert "No detectable edge" in text          # AUC 0.52 -> coin-flip band
     assert "Per-fold AUC (LR): 0.49, 0.58, 0.50" in text
-    assert "num__log_amount" in text
+    assert "log_amount" in text
     assert "not investment advice" in text.lower()
 
 
@@ -1420,6 +1420,26 @@ def test_no_project_module_imports_model_eval():
     offenders = [p.name for p in root.glob("*.py")
                  if p.name != "model_eval.py" and "model_eval" in p.read_text()]
     assert offenders == [], f"these modules reference model_eval: {offenders}"
+
+
+def test_format_report_tolerates_all_none_metrics():
+    """A single-class test fold makes pooled_auc return None; the renderer must
+    still produce a report rather than crash. Task 10's real run is the first thing
+    to exercise these guards, so lock them here."""
+    degenerate = {
+        "n": 14, "base_rate": 1.0,
+        "models": {
+            "lr": {"auc": None, "brier": 0.0, "per_fold_auc": [None, 0.5, None], "train_auc": None},
+            "gbt": {"auc": None, "brier": 0.0, "per_fold_auc": [None, None, None], "train_auc": None},
+            "baseline": {"auc": None, "per_fold_auc": [None, None, None], "train_auc": None},
+        },
+        "calibration": [], "top_decile": None,
+        "lr_coefficients": [], "gbt_importance": [],
+    }
+    text = model_eval.format_report("politicians", degenerate, horizon=21, folds=3)
+    assert "MODEL EVALUATION" in text
+    assert "label variety" in text          # _interpret(None, ...)
+    assert "not investment advice" in text.lower()
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1446,6 +1466,11 @@ def run(conn, corpus: str, horizon: int = 21, folds: int = 3,
     if not rows:
         return format_report(corpus, f"INSUFFICIENT DATA for {corpus}.\n  "
                              f"No labelled rows at all.", horizon, folds)
+
+    # Sort by disclosure date so the pooled walk-forward predictions concatenate in
+    # time order. The cross-row features (_cluster_counts, _prior_hitrate) are
+    # date-based and order-independent, so this is belt-and-braces, not required.
+    rows.sort(key=lambda r: r["disclosure_date"])
 
     X, y, dates = build_feature_frame(conn, rows, corpus, horizon)
     coverage_start = min(dates)[:7]
@@ -1533,13 +1558,25 @@ Expected: the import prints `ok`; the isolation test **fails** now (menu.py impo
 Resolve: the isolation rule is "no module imports `model_eval` *at module scope*". `menu.py` is the one allowed consumer via the same pattern it uses for `research`/`backtest`. Update the isolation test to allowlist `menu.py`:
 ```python
 def test_no_project_module_imports_model_eval():
+    """The binding rule is that nothing IMPORTS model_eval (menu.py excepted).
+    A docstring mention -- backtest.py's collectors say "see model_eval.py" -- is
+    fine, so this is an AST import scan, not a substring scan."""
+    import ast
     root = pathlib.Path(__file__).resolve().parent.parent
     allowed = {"model_eval.py", "menu.py"}
-    offenders = [p.name for p in root.glob("*.py")
-                 if p.name not in allowed and "model_eval" in p.read_text()]
-    assert offenders == [], f"these modules reference model_eval: {offenders}"
+    offenders = []
+    for py in root.glob("*.py"):
+        if py.name in allowed:
+            continue
+        tree = ast.parse(py.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(a.name == "model_eval" for a in node.names):
+                offenders.append(py.name)
+            elif isinstance(node, ast.ImportFrom) and node.module == "model_eval":
+                offenders.append(py.name)
+    assert offenders == [], f"these modules import model_eval: {offenders}"
 ```
-Re-run the isolation test → PASS. (`menu.py` importing it is fine — the binding rule is that `bot.py` / the signal path / the Telegram digest never touch it, and they don't.)
+Re-run the isolation test → PASS. (`menu.py` importing it is fine — the binding rule is that `bot.py` / the signal path / the Telegram digest never touch it, and they don't. `backtest.py` references it only in docstrings, which an AST scan correctly ignores.)
 
 - [ ] **Step 7: Full regression + live smoke**
 
@@ -1549,8 +1586,9 @@ cd ~/Desktop/disclosure-bot && .venv/bin/python -m pytest tests/ -q
 .venv/bin/python model_eval.py insiders                 # expect INSUFFICIENT DATA + re-run estimate
 .venv/bin/python model_eval.py politicians              # expect a real report (slow, ~1-2 min)
 .venv/bin/python bot.py --once --sec-only --forms 4 --no-telegram   # unaffected
+grep -rlE '^(import model_eval|from model_eval)' *.py | grep -v '^menu\.py$'   # empty
 ```
-Expected: suite green; insiders aborts cleanly; politicians prints a pooled AUC (almost certainly ~0.5 with "No detectable edge"), per-fold AUCs, calibration, coefficients, footer; bot run unaffected.
+Expected: suite green; insiders aborts cleanly; politicians prints a pooled AUC and an interpretation line matched to it (on this data, near a coin flip -- "no detectable edge" or "worse than chance -- noise at this n"), per-fold AUCs, calibration, coefficients, footer; bot run unaffected; the grep is empty.
 
 - [ ] **Step 8: README section**
 
