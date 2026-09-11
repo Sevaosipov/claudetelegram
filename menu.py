@@ -7,7 +7,6 @@ Usage:
 from __future__ import annotations
 
 import datetime as dt
-import sys
 from pathlib import Path
 
 import backtest
@@ -19,37 +18,33 @@ import model_eval
 import politician_report
 import research
 import telegram_notify
+import termstyle
 
 # Absolute, like bot.py's -- a relative path silently opened (and CREATED) an empty
 # database whenever the menu was launched from anywhere but the project directory.
 DB_PATH = Path(__file__).parent / "data" / "disclosures.db"
 
-
-# Only emit ANSI color codes to a real terminal -- piped/redirected output would
-# otherwise show the raw escape sequences as garbage text.
-GREEN = "\033[92m" if sys.stdout.isatty() else ""
-RESET = "\033[0m" if sys.stdout.isatty() else ""
+GREEN, RESET = termstyle.GREEN, termstyle.RESET
 
 
-def show_insiders(conn) -> None:
-    ticker = input("Тикер/ISIN (Enter = все): ").strip().upper()
-    where = "WHERE ticker = ?" if ticker else ""
-    params = (ticker,) if ticker else ()
+def _render_insiders(conn) -> None:
+    """Every insider/politician-adjacent purchase and sale in the database,
+    unfiltered -- one line per (person, ticker) pair, most recently active last."""
+    rows = [
+        (*r, "P", "$") for r in conn.execute(
+            "SELECT transaction_date, owner_name, officer_title, is_director, ticker, "
+            "value, source_url FROM sec_purchases ORDER BY transaction_date DESC LIMIT 200"
+        ).fetchall()
+    ] + [
+        (*r, "S", "$") for r in conn.execute(
+            "SELECT transaction_date, owner_name, officer_title, is_director, ticker, "
+            "value, source_url FROM sec_sales ORDER BY transaction_date DESC LIMIT 200"
+        ).fetchall()
+    ]
 
-    buys = conn.execute(
-        f"SELECT transaction_date, owner_name, officer_title, is_director, ticker, value, source_url "
-        f"FROM sec_purchases {where} ORDER BY transaction_date DESC LIMIT 200", params
-    ).fetchall()
-    sells = conn.execute(
-        f"SELECT transaction_date, owner_name, officer_title, is_director, ticker, value, source_url "
-        f"FROM sec_sales {where} ORDER BY transaction_date DESC LIMIT 200", params
-    ).fetchall()
-    rows = [(*r, "P", "$") for r in buys] + [(*r, "S", "$") for r in sells]
-
-    bafin_where = "WHERE isin = ?" if ticker else ""
     bafin_rows = conn.execute(
-        f"SELECT txn_date, notifier_name, position, 0, isin, volume_eur, source_url, txn_type "
-        f"FROM bafin_purchases {bafin_where} ORDER BY txn_date DESC LIMIT 200", params
+        "SELECT txn_date, notifier_name, position, 0, isin, volume_eur, source_url, txn_type "
+        "FROM bafin_purchases ORDER BY txn_date DESC LIMIT 200"
     ).fetchall()
     # BaFin dates are DD.MM.YYYY, not sortable as plain strings like SEC's ISO
     # dates -- normalize to ISO here so min()/max()/sort() below stay correct.
@@ -62,10 +57,9 @@ def show_insiders(conn) -> None:
 
     # Norway's txn_date is already ISO (from Newsweb's publishedTime), unlike
     # BaFin's DD.MM.YYYY -- no conversion needed before it's sorted/displayed.
-    norway_where = "WHERE ticker = ?" if ticker else ""
     norway_rows = conn.execute(
-        f"SELECT txn_date, person, '', 0, ticker, value, source_url, txn_type, currency "
-        f"FROM norway_purchases {norway_where} ORDER BY txn_date DESC LIMIT 200", params
+        "SELECT txn_date, person, '', 0, ticker, value, source_url, txn_type, currency "
+        "FROM norway_purchases ORDER BY txn_date DESC LIMIT 200"
     ).fetchall()
     for txn_date, name, position, _zero, tkr, value, url, code, currency in norway_rows:
         rows.append((txn_date, name, position, 0, tkr, value, url, code if code in ("P", "S") else "P", currency))
@@ -74,10 +68,9 @@ def show_insiders(conn) -> None:
     # Dates are already ISO, so no conversion is needed before sorting.
     # status = 'Aktuell' keeps corrected/superseded versions of a filing out of the
     # list, so one transaction shows once rather than once per revision.
-    sweden_where = "isin = ? AND status = 'Aktuell'" if ticker else "status = 'Aktuell'"
     sweden_rows = conn.execute(
-        f"SELECT txn_date, person, position, 0, isin, value, source_url, txn_type, currency "
-        f"FROM sweden_purchases WHERE {sweden_where} ORDER BY txn_date DESC LIMIT 200", params
+        "SELECT txn_date, person, position, 0, isin, value, source_url, txn_type, currency "
+        "FROM sweden_purchases WHERE status = 'Aktuell' ORDER BY txn_date DESC LIMIT 200"
     ).fetchall()
     for txn_date, name, position, _zero, isin, value, url, code, currency in sweden_rows:
         rows.append((txn_date, name, position, 0, isin, value, url, code if code in ("P", "S") else "P", currency))
@@ -132,10 +125,12 @@ def show_insiders(conn) -> None:
         print(f"  {icon} {date_range:<22}  {tkr:<{ticker_w}}  {name_role:<{name_w}}{times}  {GREEN}{currency}{g['total']:,.0f}{RESET}")
 
 
-def show_politicians(conn) -> None:
+def _render_politicians(conn) -> list:
     """Top 10 members of Congress ranked by estimated profit on their PTR
     purchases (see congress_score.py -- House never discloses exact price/shares,
-    so this is a return-based estimate, not exact accounting)."""
+    so this is a return-based estimate, not exact accounting). Returns the ranked
+    list so the caller can offer a detail drill-down after the rest of the
+    report has printed."""
     print(f"Считаю доходность по сделкам за последние {congress_score.LOOKBACK_MONTHS} мес. "
           f"(историческая цена на дату покупки vs текущая) — может занять минуту...")
 
@@ -145,26 +140,20 @@ def show_politicians(conn) -> None:
     top = congress_score.top_politicians(conn, n=10, progress=progress)
     if not top:
         print("Недостаточно данных для рейтинга (нужны покупки с определяемым тикером в базе).")
-        return
+        return []
 
     print()
-    print(f"=== Топ-{len(top)} самых прибыльных (оценка) ===")
+    print(f"Топ-{len(top)} самых прибыльных (оценка):")
     for i, r in enumerate(top, 1):
         print(f"{i:2}. {r['name']} ({r['state_district']})")
         print(f"     прибыль ~${r['total_profit']:,.0f}  ·  {r['num_trades']} сделок  ·  "
               f"средняя доходность {r['avg_return_pct']:+.1f}%  ·  вложено ~${r['total_invested']:,.0f}")
-
-    choice = input("\nПоказать детальный отчёт по номеру (Enter — назад): ").strip()
-    if choice.isdigit() and 1 <= int(choice) <= len(top):
-        picked = top[int(choice) - 1]
-        years_raw = input(f"Годы через запятую (Enter = {politician_report.CURRENT_YEAR}): ").strip()
-        years = [int(y) for y in years_raw.split(",")] if years_raw else [politician_report.CURRENT_YEAR]
-        politician_report.run(picked["name"], years)
+    return top
 
 
-def show_signals(conn) -> None:
-    """Shows every currently-qualifying signal, including ones already sent to
-    Telegram earlier (unlike bot.py, which only alerts on growth since last time)."""
+def _render_signals(conn) -> None:
+    """Every currently-qualifying signal, including ones already sent to Telegram
+    earlier (unlike bot.py, which only alerts on growth since last time)."""
     signals = (
         cluster.find_sec_clusters(conn, ignore_alert_state=True)
         + cluster.find_house_clusters(conn, ignore_alert_state=True)
@@ -188,25 +177,13 @@ def show_signals(conn) -> None:
         print()
 
 
-def show_research(conn) -> None:
-    """Сводка по одному тикеру или ISIN. Намеренно без вердикта «покупать или
-    нет» — см. пояснение в конце самого отчёта и в research.py."""
-    key = input("Тикер или ISIN: ").strip().upper()
-    if not key:
-        return
-    print("Собираю: база бота, цены, отчётность SEC, новости — может занять минуту...")
-    print(research.format_report(research.build(conn, key)))
+def _render_backtest(conn, horizon: int = 21) -> None:
+    """What happened to price after signals and after individual purchases.
 
-
-def show_backtest(conn) -> None:
-    """Что происходило с ценой после сигналов и после отдельных покупок.
-
-    Это диагностика инструмента, а не рекомендация: маленькие выборки здесь
-    ничего не значат, и отчёт прямо помечает такие группы."""
+    Диагностика инструмента, а не рекомендация: маленькие выборки здесь ничего
+    не значат, и отчёт прямо помечает такие группы."""
     print("Считаю доходность после сигналов — нужны цены с Yahoo Finance, "
           "первый раз может занять минуту...")
-    horizon_raw = input("Горизонт в торговых днях (Enter = 21): ").strip()
-    horizon = int(horizon_raw) if horizon_raw.isdigit() else 21
 
     data = backtest.collect_signals(conn, (horizon,))
     if data:
@@ -230,50 +207,80 @@ def show_backtest(conn) -> None:
           f"прогноз, и это не инвестиционный совет.")
 
 
-def show_model_eval(conn) -> None:
+def _render_model_eval(conn, corpus: str = "both", horizon: int = 21) -> None:
     """Walk-forward оценка того, есть ли у признаков предсказательная сила.
     Не прогноз и не рекомендация — см. подпись внизу отчёта."""
-    corpus = (input("Корпус [politicians / insiders / both] (Enter = both): ").strip()
-              or "both")
-    if corpus not in ("politicians", "insiders", "both"):
-        print("Не понял корпус.")
-        return
-    h = input("Горизонт в торговых днях (Enter = 21): ").strip()
-    horizon = int(h) if h.isdigit() else 21
     print("Считаю (нужны исторические цены — политический прогон может занять минуту)...")
     print(model_eval.run(conn, corpus, horizon))
+
+
+def show_full_report(conn) -> None:
+    """Everything the bot knows, one section after another: insiders, top
+    politicians, current signals, historical backtest, and the walk-forward
+    model evaluation -- all with sensible defaults, no prompts in between.
+    The one interactive follow-up (a politician's detail report) is offered
+    once, at the end."""
+    print()
+    print(termstyle.header("DISCLOSURE-BOT — ПОЛНЫЙ ОТЧЁТ"))
+
+    print()
+    print(termstyle.section("Инсайдеры (SEC/BaFin/Осло/Швеция)"))
+    _render_insiders(conn)
+
+    print()
+    print(termstyle.section("Политики (Конгресс) — топ-10"))
+    top = _render_politicians(conn)
+
+    print()
+    print(termstyle.section("Текущие сигналы"))
+    _render_signals(conn)
+
+    print()
+    print(termstyle.section("Проверка сигналов на истории"))
+    _render_backtest(conn)
+
+    print()
+    print(termstyle.section("Оценка предсказательной силы (walk-forward)"))
+    _render_model_eval(conn)
+
+    if top:
+        print()
+        choice = input("Детали по политику из списка выше? (номер, Enter — пропустить): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(top):
+            picked = top[int(choice) - 1]
+            years_raw = input(f"Годы через запятую (Enter = {politician_report.CURRENT_YEAR}): ").strip()
+            years = [int(y) for y in years_raw.split(",")] if years_raw else [politician_report.CURRENT_YEAR]
+            politician_report.run(picked["name"], years)
+
+
+def show_research(conn) -> None:
+    """Сводка по одному тикеру или ISIN. Намеренно без вердикта «покупать или
+    нет» — см. пояснение в конце самого отчёта и в research.py."""
+    key = input("Тикер или ISIN: ").strip().upper()
+    if not key:
+        return
+    print("Собираю: база бота, цены, отчётность SEC, новости — может занять минуту...")
+    print(research.format_report(research.build(conn, key)))
 
 
 def main() -> None:
     conn = db.connect(DB_PATH)
     while True:
         print()
-        print("=== disclosure-bot ===")
-        print("1) Инсайдеры (SEC/BaFin/Осло/Швеция) — сделки из базы")
-        print("2) Политики (Конгресс) — топ-10 самых прибыльных")
-        print("3) Текущие сигналы (кластеры покупок + выходы + крупные доли 13D/G)")
-        print("4) Проверка сигналов на истории (что было с ценой после)")
-        print("5) Досье по тикеру (всё, что известно + новости и отчётность)")
-        print("6) Оценка предсказательной силы (walk-forward модель)")
+        print(termstyle.header("disclosure-bot"))
+        print("1) Полный отчёт — инсайдеры, политики, сигналы, бэктест, оценка модели")
+        print("2) Досье по тикеру")
         print("0) Выход")
         choice = input("Выбор: ").strip()
 
         if choice == "1":
-            show_insiders(conn)
+            show_full_report(conn)
         elif choice == "2":
-            show_politicians(conn)
-        elif choice == "3":
-            show_signals(conn)
-        elif choice == "4":
-            show_backtest(conn)
-        elif choice == "5":
             show_research(conn)
-        elif choice == "6":
-            show_model_eval(conn)
         elif choice == "0":
             break
         else:
-            print("Не понял выбор, введите 0, 1, 2, 3, 4, 5 или 6.")
+            print("Не понял выбор, введите 0, 1 или 2.")
 
 
 if __name__ == "__main__":
