@@ -59,6 +59,7 @@ import db
 import datefmt
 import fx
 import marketcap
+import termstyle
 import tradingview
 
 BASE_DIR = Path(__file__).parent
@@ -363,7 +364,7 @@ def analyst_view(raw: dict, current_price: float | None) -> dict | None:
 
 
 def _format_analyst(view: dict) -> str:
-    L = ["\n-- Аналитики (мнения третьих сторон, не прогноз бота) -------------"]
+    L = ["\n" + termstyle.section("Аналитики (мнения третьих сторон, не прогноз бота)")]
     if view["consensus"]:
         n = view["analyst_count"]
         thin = "  ⚠️ тонкое покрытие" if view["thin"] else ""
@@ -482,7 +483,7 @@ def _trend_arrow(values: list) -> str:
 
 def _format_financials(data: dict) -> str:
     years = list(reversed(data["years"]))
-    L = ["\n-- Финансы (Yahoo Finance, последние годы) ------------------------"]
+    L = ["\n" + termstyle.section("Финансы (Yahoo Finance, последние годы)")]
     L.append("  " + " " * 14 + "".join(f"{y:>12}" for y in years))
     labels = (("revenue", "Выручка"), ("operating_income", "Оп. прибыль"),
               ("net_income", "Чистая приб."), ("fcf", "Своб. ден.поток"),
@@ -535,7 +536,7 @@ def share_count_history(cik: str | None) -> list | None:
 
 
 def _format_dilution(points: list) -> str:
-    L = ["\n-- Акции в обращении / размытие (SEC XBRL) ------------------------"]
+    L = ["\n" + termstyle.section("Акции в обращении / размытие (SEC XBRL)")]
     for pt in points:
         L.append(f"  {pt['end']}   {pt['shares'] / 1e6:>12,.1f} млн")
     first, last = points[0]["shares"], points[-1]["shares"]
@@ -596,7 +597,7 @@ def ownership(ticker: str, info: dict) -> dict | None:
 
 
 def _format_ownership(data: dict) -> str:
-    L = ["\n-- Структура владения (Yahoo Finance) ----------------------------"]
+    L = ["\n" + termstyle.section("Структура владения (Yahoo Finance)")]
     bits = []
     if data["insiders_pct"] is not None:
         bits.append(f"инсайдеры {data['insiders_pct'] * 100:.1f}%")
@@ -626,7 +627,7 @@ def short_interest(info: dict) -> dict | None:
 
 
 def _format_short(data: dict) -> str:
-    L = ["\n-- Короткие позиции (Yahoo Finance / FINRA) -----------------------"]
+    L = ["\n" + termstyle.section("Короткие позиции (Yahoo Finance / FINRA)")]
     if data["pct_of_float"] is not None:
         L.append(f"  {data['pct_of_float'] * 100:.1f}% фри-флоата в шорте")
     if data["shares"] is not None and data["prior"]:
@@ -665,7 +666,7 @@ def earnings_calendar(ticker: str) -> dict | None:
 
 
 def _format_earnings(data: dict) -> str:
-    L = ["\n-- Отчётность (Yahoo Finance) ------------------------------------"]
+    L = ["\n" + termstyle.section("Отчётность (Yahoo Finance)")]
     if data["next"]:
         est = f", прогноз EPS {data['next']['estimate']:.2f}" if data["next"]["estimate"] is not None else ""
         L.append(f"  Следующий отчёт: {data['next']['date']}{est}")
@@ -759,7 +760,8 @@ def build(conn, ticker: str) -> dict:
 
 def format_report(rep: dict) -> str:
     t = rep["ticker"]
-    L = [f"\n{'=' * 72}", f"  {t}" + (f" — {rep['name']}" if rep["name"] else ""), f"{'=' * 72}"]
+    title = t + (f" — {rep['name']}" if rep["name"] else "")
+    L = ["\n" + termstyle.header(title)]
 
     bits = []
     if rep["industry"]:
@@ -783,7 +785,7 @@ def format_report(rep: dict) -> str:
 
     windows = rep["prices"]["windows"] if isinstance(rep["prices"], dict) else rep["prices"]
     if windows:
-        L.append("\n-- Цена ------------------------------------------------------------")
+        L.append("\n" + termstyle.section("Цена"))
         for p in windows:
             rel = f"  ({p['excess']:+.1f} п.п. к {BENCHMARK})" if p["excess"] is not None else ""
             L.append(f"  {p['label']:10} {p['return']:+7.1f}%{rel}")
@@ -805,7 +807,7 @@ def format_report(rep: dict) -> str:
         L.append(_format_earnings(rep["earnings"]))
 
     buys, sells = rep["insiders"]["buys"], rep["insiders"]["sells"]
-    L.append("\n-- Инсайдеры (SEC Form 4) ------------------------------------------")
+    L.append("\n" + termstyle.section("Инсайдеры (SEC Form 4)"))
     if not buys and not sells:
         L.append("  В базе ничего нет по этому тикеру."
                  if not rep["european"] else "  Ничего (это не US-эмитент — см. ниже).")
@@ -818,7 +820,7 @@ def format_report(rep: dict) -> str:
         L.append(f"  🔴 {datefmt.fmt(date)}  {owner} ({title or 'Insider'})  ${value or 0:,.0f}")
 
     if rep["european"]:
-        L.append("\n-- Инсайдеры (BaFin / Осло / Швеция) -------------------------------")
+        L.append("\n" + termstyle.section("Инсайдеры (BaFin / Осло / Швеция)"))
         for (date, person, position, ttype, value, currency, url, source) in rep["european"][:12]:
             icon = "🟢" if ttype == "P" else "🔴" if ttype == "S" else "⚪"
             role = f" ({position})" if position else ""
@@ -826,39 +828,39 @@ def format_report(rep: dict) -> str:
                      f"{value or 0:,.0f} {currency}  [{source}]")
 
     if rep["stakes"]:
-        L.append("\n-- Крупные доли (13D/G) --------------------------------------------")
+        L.append("\n" + termstyle.section("Крупные доли (13D/G)"))
         for (date, person, form, pct, amount, url) in rep["stakes"][:8]:
             kind = "активист" if form.startswith("SCHEDULE 13D") else "пассивный"
             L.append(f"  {datefmt.fmt(date) if date else '?':12} {person}  "
                      f"{pct:.2f}% ({kind}, {form})")
 
     if rep["proposed_sales"]:
-        L.append("\n-- Заявленные намерения продать (Form 144) -------------------------")
+        L.append("\n" + termstyle.section("Заявленные намерения продать (Form 144)"))
         for (date, person, rel, value, units, outstanding, nature, url) in rep["proposed_sales"][:8]:
             pct = f", {units / outstanding * 100:.3f}% класса" if units and outstanding else ""
             L.append(f"  {datefmt.fmt(date) if date else '?':12} {person} ({rel or '?'})  "
                      f"${value or 0:,.0f}{pct}  {nature or ''}")
 
     if rep["political"]:
-        L.append("\n-- Политики (STOCK Act) --------------------------------------------")
+        L.append("\n" + termstyle.section("Политики (STOCK Act)"))
         for (date, member, ttype, amount, url, chamber) in rep["political"][:8]:
             icon = "🟢" if ttype == "P" else "🔴"
             L.append(f"  {icon} {datefmt.fmt(date)}  {member} [{chamber}]  {amount}")
 
     if rep["signals"]:
-        L.append("\n-- Сигналы, которые бот уже присылал -------------------------------")
+        L.append("\n" + termstyle.section("Сигналы, которые бот уже присылал"))
         for (when, source, kind, buyers, value, score) in rep["signals"][:8]:
             L.append(f"  {when[:10]}  {source} {kind}  {buyers} чел.  "
                      f"€{value or 0:,.0f}  {score or 0:.0f} баллов")
 
     if rep["filings"]:
-        L.append("\n-- Что компания сама подавала в SEC --------------------------------")
+        L.append("\n" + termstyle.section("Что компания сама подавала в SEC"))
         for f in rep["filings"]:
             L.append(f"  {f['filed']}  {f['form']:10} {f['description'][:38]}")
             L.append(f"      {f['url']}")
 
     if rep["news"]:
-        L.append("\n-- Новости (агрегатор Yahoo Finance) -------------------------------")
+        L.append("\n" + termstyle.section("Новости (агрегатор Yahoo Finance)"))
         for n in rep["news"]:
             L.append(f"  {n['published']}  [{n['publisher']}]  {n['title'][:70]}")
             if n["url"]:

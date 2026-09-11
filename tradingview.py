@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import requests
 
+import termstyle
+
 SCANNER_URL = "https://scanner.tradingview.com/symbol"
 SEARCH_URL = "https://symbol-search.tradingview.com/symbol_search/"
 _HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://www.tradingview.com"}
@@ -186,7 +188,7 @@ def analyze(raw: dict | None) -> dict | None:
 def format_view(view: dict | None) -> str:
     if not view:
         return ""
-    L = ["\n-- TradingView (технические индикаторы) --------------------------"]
+    L = ["\n" + termstyle.section("TradingView (технические индикаторы)")]
     if view["gauge"] is not None:
         parts = [f"Технический рейтинг TradingView: {view['gauge']:+.2f} "
                  f"по их шкале −1…+1 (они называют это «{view['gauge_label']}»)"]
