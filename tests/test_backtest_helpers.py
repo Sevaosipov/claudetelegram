@@ -96,3 +96,21 @@ def test_collect_purchases_extended_adds_label_and_features(conn, monkeypatch):
     assert rows["Winner"]["trade_date"] == "2026-09-01"
     assert rows["Winner"]["shares"] == 100 and rows["Winner"]["owned_after"] == 1100
     assert rows["Loser"]["owned_after"] == 50
+
+
+def test_collect_purchases_extended_applies_corpus_b_filters(conn, monkeypatch):
+    """Corpus B (model_eval's insider corpus) must match the population cluster.py's
+    live signal path trains on: no derivative transactions, no 10b5-1 scheduled
+    buys, no junk tickers. The base --purchases query must not apply any of this."""
+    add_sec_purchase(conn, "AAA", "Normal", 200_000, "2026-09-01")
+    add_sec_purchase(conn, "BBB", "Derivative", 200_000, "2026-09-01", derivative=1)
+    add_sec_purchase(conn, "NONE", "JunkTicker", 200_000, "2026-09-01")
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 1.0, "excess": 1.0}})
+
+    extended = backtest.collect_purchases(conn, (21,), since_days=100000,
+                                          extended_features=True)
+    assert [r["owner"] for r in extended] == ["Normal"]
+
+    default = backtest.collect_purchases(conn, (21,), since_days=100000)
+    assert {r["owner"] for r in default} == {"Normal", "Derivative", "JunkTicker"}

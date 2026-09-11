@@ -220,16 +220,26 @@ def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365, *,
             "is_ten_pct_owner, derivative, COALESCE(is_10b5_1, 0), filed_date")
     if extended_features:
         cols += ", shares, shares_owned_after"
+    where = "transaction_date >= ? AND ticker IS NOT NULL AND ticker != ''"
+    if extended_features:
+        # Corpus B (model_eval): match the population cluster.py's live signal path
+        # actually trains on -- exclude derivative transactions, 10b5-1 scheduled
+        # buys (arranged months in advance, so they say nothing about what the
+        # insider thinks now), and junk tickers. The base --purchases query is
+        # untouched by this.
+        where += (" AND derivative = 0 AND COALESCE(is_10b5_1, 0) = 0 AND "
+                  + cluster._JUNK_TICKER_SQL)
     rows = conn.execute(
-        f"""SELECT {cols} FROM sec_purchases
-            WHERE transaction_date >= ? AND ticker IS NOT NULL AND ticker != ''
-            ORDER BY transaction_date""",
+        f"SELECT {cols} FROM sec_purchases WHERE {where} ORDER BY transaction_date",
         (since,),
     ).fetchall()
     out = []
     for row in rows:
         (ticker, owner, txn_date, value, officer, director, ten_pct, deriv,
          is_10b5_1, filed) = row[:10]
+        # Enter on the disclosure date, not the trade date: the trade is not public
+        # until it is filed, so measuring from the trade date would credit the
+        # signal with a move nobody could have acted on.
         entry = filed or txn_date
         fr = forward_returns(ticker, entry, horizons)
         if not fr:
