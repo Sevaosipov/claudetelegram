@@ -297,7 +297,15 @@ def run_walk_forward(X, y, dates, folds, corpus: str) -> dict:
 
     for name, (num, cat, kind) in specs.items():
         per_fold, train_aucs, p_true, p_prob = [], [], [], []
+        pipe = None
         for train_idx, test_idx in folds:
+            if len(set(y[train_idx].tolist())) < 2:
+                # A training fold with only one label class can't fit LR/GBT --
+                # sklearn raises ValueError. Record it as unscored, same as any
+                # other fold that can't produce an AUC, and move on.
+                per_fold.append(None)
+                train_aucs.append(None)
+                continue
             pipe = make_pipeline(num, cat, kind)
             pipe.fit(X.iloc[train_idx], y[train_idx])
             prob = pipe.predict_proba(X.iloc[test_idx])[:, 1]
@@ -370,8 +378,12 @@ def format_report(corpus: str, result, horizon: int, folds: int) -> str:
 
     m = result
     L = [_header(corpus, horizon)]
-    L.append(f"  Labelled rows pooled over {folds} test folds: {m['n']}   "
-             f"Base rate (beat SPY): {m['base_rate'] * 100:.0f}%")
+    L.append(f"  Labelled rows pooled over {folds} test folds: {m['n']}")
+    L.append(f"  Base rate across all labelled rows (beat SPY): {m['base_rate'] * 100:.0f}%")
+    if m.get("test_months"):
+        latest = sorted(m["test_months"])[-1]
+        L.append(f"  Test folds: {', '.join(m['test_months'])} "
+                 f"(rows disclosed after {latest} were not evaluated)")
     L.append("")
     L.append(f"  {'':22}{'AUC':>7}{'Brier':>9}{'top-decile':>13}")
     L.append("  " + "-" * 50)
@@ -435,8 +447,11 @@ def run(conn, corpus: str, horizon: int = 21, folds: int = 3,
     # date-based and order-independent, so this is belt-and-braces, not required.
     rows.sort(key=lambda r: r["disclosure_date"])
 
-    X, y, dates = build_feature_frame(conn, rows, corpus, horizon)
-    coverage_start = min(dates)[:7]
+    # Gate on row count and dates alone -- collect -> gate -> evaluate, per spec --
+    # before paying for the feature build, which fetches prices and market caps for
+    # every row over the network.
+    dates = [r["disclosure_date"] for r in rows]
+    coverage_start = dates[0][:7]
     abort = check_sufficiency(dates, folds, min_rows, min_test, corpus, coverage_start)
     if abort:
         return format_report(corpus, abort, horizon, folds)
@@ -445,7 +460,11 @@ def run(conn, corpus: str, horizon: int = 21, folds: int = 3,
     if fold_idx is None:
         return format_report(corpus, f"INSUFFICIENT DATA for {corpus}.\n  "
                              f"Could not build {folds} walk-forward folds.", horizon, folds)
+
+    X, y, dates = build_feature_frame(conn, rows, corpus, horizon)
+    test_months = [dates[test_idx[0]][:7] for _train_idx, test_idx in fold_idx]
     metrics = run_walk_forward(X, y, dates, fold_idx, corpus)
+    metrics["test_months"] = test_months
     return format_report(corpus, metrics, horizon, len(fold_idx))
 
 

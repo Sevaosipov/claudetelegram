@@ -145,6 +145,10 @@ def test_pooled_auc_perfect_and_none():
     assert model_eval.pooled_auc([1, 1, 1], [0.3, 0.6, 0.9]) is None
 
 
+def test_brier_score():
+    assert model_eval.brier([0, 0, 1, 1], [0.05, 0.05, 0.95, 0.95]) == pytest.approx(0.0025)
+
+
 def test_top_decile_precision():
     y = [0] * 18 + [1, 1]
     p = [0.1] * 18 + [0.9, 0.95]        # the two 1s are the top decile
@@ -205,6 +209,24 @@ def test_run_walk_forward_finds_nothing_in_noise():
     assert 0.30 < res["models"]["lr"]["auc"] < 0.70   # ~coin flip
 
 
+def test_run_walk_forward_survives_a_single_class_training_fold():
+    """A training fold with only one label class must not crash pipe.fit --
+    sklearn raises ValueError on that. The fold should come back unscored (None)
+    rather than take the whole run down with it."""
+    X, y, dates = _synthetic_frame(n=90, signal=True)
+    real_folds = model_eval.walk_forward_folds(dates, n_folds=3, min_test=12)
+    # Corrupt the first fold's train_idx so every training label is 0.
+    bad_train_idx = [i for i in real_folds[0][0] if y[i] == 0]
+    folds = [(bad_train_idx, real_folds[0][1])] + real_folds[1:]
+
+    res = model_eval.run_walk_forward(X, y, dates, folds, "politicians")
+
+    assert res["models"]["lr"]["per_fold_auc"][0] is None
+    assert res["models"]["gbt"]["per_fold_auc"][0] is None
+    # Later, healthy folds still scored.
+    assert any(a is not None for a in res["models"]["lr"]["per_fold_auc"][1:])
+
+
 _FAKE_METRICS = {
     "n": 60, "base_rate": 0.48,
     "models": {
@@ -228,6 +250,18 @@ def test_format_report_renders_metrics_and_interpretation():
     assert "Per-fold AUC (LR): 0.49, 0.58, 0.50" in text
     assert "log_amount" in text
     assert "not investment advice" in text.lower()
+
+
+def test_format_report_shows_which_months_were_test_evaluated():
+    with_months = dict(_FAKE_METRICS, test_months=["2025-05", "2025-06", "2025-07"])
+    text = model_eval.format_report("politicians", with_months, horizon=21, folds=3)
+    assert "Test folds:" in text
+    assert "2025-07" in text
+    assert "not evaluated" in text
+
+    # Omitting the key (the existing _FAKE_METRICS shape) must still render fine.
+    text_without = model_eval.format_report("politicians", _FAKE_METRICS, horizon=21, folds=3)
+    assert "Test folds:" not in text_without
 
 
 def test_format_report_passes_through_an_abort_message():
