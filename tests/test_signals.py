@@ -13,7 +13,7 @@ import pytest
 import bot
 import cluster
 import db
-from conftest import add_form_144, add_sec_purchase, add_sec_sale, add_stake
+from conftest import add_form_144, add_house_txn, add_sec_purchase, add_sec_sale, add_stake
 
 TODAY = dt.date.today()
 RECENT = (TODAY - dt.timedelta(days=2)).isoformat()
@@ -368,3 +368,103 @@ def test_commit_signals_marks_every_signal_type(conn):
     assert cluster.find_sec_clusters(conn) == []
     assert cluster.find_stake_signals(conn) == []
     assert cluster.find_sec_exit_signals(conn) == []
+
+
+# ------------------------------------------------- House/Senate cluster tightness
+#
+# HOUSE_WINDOW_DAYS (45) is how far back to scan for source rows at all, kept wide
+# to tolerate the STOCK Act's up-to-45-day filing lag. It used to also be, in
+# effect, how close together a cluster's members had to have bought -- which meant
+# two members buying the same ticker 40 days apart, with no relation to each
+# other, still read as a "cluster" as long as both landed somewhere in the scan.
+# HOUSE_CLUSTER_SPAN_DAYS (14) is the fix: members must buy within that span OF
+# EACH OTHER, not just somewhere within the wider lookback.
+
+def _house_date(days_ago: int) -> str:
+    d = TODAY - dt.timedelta(days=days_ago)
+    return f"{d.month:02d}/{d.day:02d}/{d.year}"
+
+
+def test_tight_purchase_window_finds_the_earliest_qualifying_window():
+    d0 = dt.date(2026, 1, 1)
+    dated = [
+        (d0, "A"),
+        (d0 + dt.timedelta(days=40), "B"),   # far from A -- not a match with A
+        (d0 + dt.timedelta(days=41), "C"),   # within 14 days of B -- B+C qualify
+    ]
+    start, end, names = cluster._tight_purchase_window(dated, span_days=14, min_buyers=2)
+    assert (start, end) == (d0 + dt.timedelta(days=40), d0 + dt.timedelta(days=41))
+    assert names == {"B", "C"}
+
+
+def test_tight_purchase_window_none_when_nothing_qualifies():
+    d0 = dt.date(2026, 1, 1)
+    dated = [(d0, "A"), (d0 + dt.timedelta(days=30), "B")]
+    assert cluster._tight_purchase_window(dated, span_days=14, min_buyers=2) is None
+
+
+def test_house_cluster_within_span_still_fires(conn):
+    add_house_txn(conn, "AAA", "Rep A", "$100,001 - $250,000", date=_house_date(5))
+    add_house_txn(conn, "AAA", "Rep B", "$100,001 - $250,000", date=_house_date(2))
+    signals = cluster.find_house_clusters(conn)
+    assert len(signals) == 1
+    assert signals[0].buyer_count == 2
+    assert signals[0].reason == "cluster"
+
+
+def test_house_members_40_days_apart_no_longer_cluster(conn):
+    """Both land inside the 45-day HOUSE_WINDOW_DAYS scan, but 40 days apart from
+    each other -- this must NOT read as coordinated buying any more."""
+    add_house_txn(conn, "AAA", "Rep A", "$100,001 - $250,000", date=_house_date(44))
+    add_house_txn(conn, "AAA", "Rep B", "$100,001 - $250,000", date=_house_date(2))
+    assert cluster.find_house_clusters(conn) == []
+
+
+def test_house_cluster_excludes_a_stale_third_member_outside_the_span(conn):
+    """Two members cluster tightly; a third member's much older purchase of the
+    same ticker (still inside the 45-day scan) must not be folded into the
+    signal's buyer count or total -- it isn't part of what just happened."""
+    add_house_txn(conn, "AAA", "Rep Old", "$1,000,001 - $5,000,000", date=_house_date(44))
+    add_house_txn(conn, "AAA", "Rep A", "$100,001 - $250,000", date=_house_date(5))
+    add_house_txn(conn, "AAA", "Rep B", "$100,001 - $250,000", date=_house_date(2))
+    signals = cluster.find_house_clusters(conn)
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig.buyer_count == 2
+    assert "Rep Old" not in sig.member_names
+    assert set(sig.member_names) == {"Rep A", "Rep B"}
+
+
+def test_house_solo_whale_still_fires_without_a_tight_cluster(conn):
+    """A single large buyer, no second member anywhere near in time -- the
+    solo-whale path is about one person's size, not about clustering-tightness,
+    and must be unaffected by HOUSE_CLUSTER_SPAN_DAYS."""
+    add_house_txn(conn, "AAA", "Whale", "$1,000,001 - $5,000,000", date=_house_date(2))
+    signals = cluster.find_house_clusters(conn)
+    assert len(signals) == 1
+    assert signals[0].reason == "solo"
+    assert signals[0].buyer_count == 1
+
+
+def test_house_solo_whale_total_excludes_an_unrelated_distant_small_buyer(conn):
+    """A whale purchase plus a small, unrelated purchase by someone else 40 days
+    earlier (too far apart to form a tight cluster): the solo signal must report
+    only the whale's own total, not the two summed together."""
+    add_house_txn(conn, "AAA", "Small Buyer", "$15,001 - $50,000", date=_house_date(44))
+    add_house_txn(conn, "AAA", "Whale", "$1,000,001 - $5,000,000", date=_house_date(2))
+    signals = cluster.find_house_clusters(conn)
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig.reason == "solo"
+    assert sig.member_names == ["Whale"]
+
+
+def test_senate_cluster_also_respects_the_span(conn):
+    """find_senate_clusters shares find_house_clusters -- confirm the span
+    constraint carries through the kwargs.setdefault plumbing, not just the
+    House's own default parameter."""
+    from conftest import add_senate_txn
+    old = (TODAY - dt.timedelta(days=44)).isoformat()
+    add_senate_txn(conn, "AAA", "Senator A", "$100,001 - $250,000", old)
+    add_senate_txn(conn, "AAA", "Senator B", "$100,001 - $250,000", RECENT)
+    assert cluster.find_senate_clusters(conn) == []

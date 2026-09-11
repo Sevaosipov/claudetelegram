@@ -26,8 +26,14 @@ import sweden
 SEC_WINDOW_DAYS = 14
 SEC_MIN_BUYERS = 2
 
-HOUSE_WINDOW_DAYS = 45  # STOCK Act PTRs are due 30-45 days after the trade
+HOUSE_WINDOW_DAYS = 45  # STOCK Act PTRs are due 30-45 days after the trade -- how
+                        # far back to scan for source rows at all, not how close
+                        # together a cluster's members must have bought (see
+                        # HOUSE_CLUSTER_SPAN_DAYS and find_house_clusters).
 HOUSE_MIN_BUYERS = 2
+HOUSE_CLUSTER_SPAN_DAYS = 14  # members must buy within ~2 weeks of EACH OTHER to
+                              # read as coordinated, not just both land somewhere
+                              # in the wider 45-day filing-lag scan above.
 
 BAFIN_WINDOW_DAYS = 14  # same rationale as SEC -- corporate insiders, not politicians
 BAFIN_MIN_BUYERS = 2
@@ -42,6 +48,7 @@ SWEDEN_MIN_BUYERS = 2
 # same window rather than the corporate-insider one.
 SENATE_WINDOW_DAYS = HOUSE_WINDOW_DAYS
 SENATE_MIN_BUYERS = 2
+SENATE_CLUSTER_SPAN_DAYS = HOUSE_CLUSTER_SPAN_DAYS
 
 # Every threshold below, and every amount a signal displays, is in EUR -- source
 # amounts are converted via fx.py before any comparison, so one constant means the
@@ -404,14 +411,47 @@ def _is_first_buy(conn, ticker: str, member_names: list[str], since: str) -> boo
     return prior == 0
 
 
+def _tight_purchase_window(dated_members: list[tuple], span_days: int,
+                            min_buyers: int):
+    """Does some sub-window of width <= span_days contain purchases from at least
+    min_buyers distinct members? `dated_members` is a list of (date, member_name)
+    pairs, one per purchase -- need not be sorted or deduplicated; a member with
+    several purchases in the scan contributes one pair per purchase, which is fine
+    since only the *set* of names in a window is what gets counted.
+
+    Returns (window_start, window_end, member_names) for the earliest such window
+    the scan finds, or None if no window of that width ever reaches min_buyers
+    distinct members. Two members buying 40 days apart inside a wider lookback
+    scan must not qualify -- see find_house_clusters.
+    """
+    items = sorted(dated_members, key=lambda dm: dm[0])
+    span = dt.timedelta(days=span_days)
+    left = 0
+    for right in range(len(items)):
+        while items[right][0] - items[left][0] > span:
+            left += 1
+        names = {name for _, name in items[left:right + 1]}
+        if len(names) >= min_buyers:
+            return items[left][0], items[right][0], names
+    return None
+
+
 def find_house_clusters(conn, window_days: int = HOUSE_WINDOW_DAYS, min_buyers: int = HOUSE_MIN_BUYERS,
                          min_value: float = MIN_CLUSTER_VALUE, solo_threshold: float = HOUSE_SOLO_THRESHOLD,
+                         cluster_span_days: int = HOUSE_CLUSTER_SPAN_DAYS,
                          ignore_alert_state: bool = False, table: str = "house_purchases",
                          source: str = "HOUSE", date_format: str | None = "%m/%d/%Y") -> list[ClusterSignal]:
     """Also serves the Senate, via find_senate_clusters. Both chambers disclose under
     the same STOCK Act rules in the same amount brackets, so the only differences are
     the table, the alert-state source label, and the stored date format -- the Senate
     table keeps ISO dates (date_format=None) rather than the House's M/D/YYYY.
+
+    `window_days` (wide, 45 days) is how far back to scan for source rows at all --
+    a PTR can legally be filed up to 45 days after the trade, so a trade from a
+    month ago can be the first time this scan ever sees it. It is not how close
+    together a cluster's members must have bought: that is `cluster_span_days`
+    (14 by default) -- two members whose purchases both merely land somewhere in
+    the wide scan, weeks apart, do not read as coordinated buying.
     """
     cutoff = dt.date.today() - dt.timedelta(days=window_days)
     rows = conn.execute(
@@ -424,33 +464,58 @@ def find_house_clusters(conn, window_days: int = HOUSE_WINDOW_DAYS, min_buyers: 
     by_ticker: dict[str, list] = {}
     for ticker, asset, member_name, txn_date, amount_range in rows:
         try:
+            # Parsed once, here -- min()/max() on raw "M/D/YYYY" strings sorts
+            # lexicographically, not chronologically ("01/15/2026" < "12/20/2025").
             d = (dt.datetime.strptime(txn_date, date_format).date() if date_format
                  else dt.date.fromisoformat(txn_date))
         except ValueError:
             continue
         if d < cutoff:
             continue
-        by_ticker.setdefault(ticker, []).append((asset, member_name, txn_date, amount_range))
+        by_ticker.setdefault(ticker, []).append((d, asset, member_name, amount_range))
 
     signals = []
     for ticker, group in by_ticker.items():
-        # Aggregate ALL of each member's purchases in the window, not just their
-        # latest one -- needed both for the solo-whale check and the displayed total.
+        # Whole-scan totals, for the solo-whale check only: one member's total
+        # spend across the full window_days lookback, regardless of clustering.
+        by_member_all: dict[str, dict] = {}
+        for d, asset, member_name, amount_range in group:
+            slot = by_member_all.setdefault(member_name, {"asset": asset, "total": 0.0})
+            slot["total"] += parse_amount_low(amount_range)
+        for m in by_member_all.values():
+            m["total"] = fx.to_eur(m["total"], "USD", conn)
+        biggest_member = max(by_member_all.values(), key=lambda m: m["total"])
+        is_solo_whale = biggest_member["total"] >= solo_threshold
+
+        window = _tight_purchase_window(
+            [(d, member_name) for d, _asset, member_name, _amt in group],
+            cluster_span_days, min_buyers)
+        is_cluster = window is not None
+
+        if not is_cluster and not is_solo_whale:
+            continue
+
+        if is_cluster:
+            win_start, win_end, in_window_members = window
+            rows_in_window = [row for row in group
+                              if win_start <= row[0] <= win_end and row[2] in in_window_members]
+        else:
+            # Solo whale, no tight cluster: report just that one member's own
+            # purchases across the full window_days lookback -- not the whole
+            # ticker group, which can hold other members' unrelated small
+            # purchases that merely happened to land in the same wide scan.
+            whale_name = next(name for name, m in by_member_all.items() if m is biggest_member)
+            rows_in_window = [row for row in group if row[2] == whale_name]
+
         by_member: dict[str, dict] = {}
-        for asset, member_name, txn_date, amount_range in group:
+        for d, asset, member_name, amount_range in rows_in_window:
             slot = by_member.setdefault(member_name, {"asset": asset, "total": 0.0})
             slot["total"] += parse_amount_low(amount_range)
-
         # Brackets are USD; signals are shown (and thresholded) in EUR.
         for m in by_member.values():
             m["total"] = fx.to_eur(m["total"], "USD", conn)
 
         total_value = sum(m["total"] for m in by_member.values())
-        biggest_member = max(by_member.values(), key=lambda m: m["total"])
-        is_cluster = len(by_member) >= min_buyers
-        is_solo_whale = biggest_member["total"] >= solo_threshold
-        if not is_cluster and not is_solo_whale:
-            continue
         if total_value < min_value:
             continue
         member_names = list(by_member)
@@ -459,18 +524,12 @@ def find_house_clusters(conn, window_days: int = HOUSE_WINDOW_DAYS, min_buyers: 
 
         company = _clean_asset_name(next(iter(by_member.values()))["asset"])
         members = [f"{name} (от €{m['total']:,.0f})" for name, m in by_member.items()]
-        # min()/max() on raw "M/D/YYYY" strings sorts lexicographically, not
-        # chronologically (e.g. "01/15/2026" < "12/20/2025" as text) -- parse first.
-        parsed_dates = [
-            (dt.datetime.strptime(g[2], date_format).date() if date_format
-             else dt.date.fromisoformat(g[2]))
-            for g in group
-        ]
+        dates_in_window = [row[0] for row in rows_in_window]
 
         signals.append(ClusterSignal(
             source=source, ticker=ticker, company=company, buyer_count=len(by_member),
             total_value=total_value, members=members,
-            window_start=min(parsed_dates), window_end=max(parsed_dates),
+            window_start=min(dates_in_window), window_end=max(dates_in_window),
             reason="cluster" if is_cluster else "solo",
             member_names=member_names,
         ))
@@ -481,6 +540,7 @@ def find_senate_clusters(conn, **kwargs) -> list[ClusterSignal]:
     """Senate PTR buy clusters. Same logic as the House -- see find_house_clusters."""
     kwargs.setdefault("window_days", SENATE_WINDOW_DAYS)
     kwargs.setdefault("min_buyers", SENATE_MIN_BUYERS)
+    kwargs.setdefault("cluster_span_days", SENATE_CLUSTER_SPAN_DAYS)
     return find_house_clusters(conn, table="senate_purchases", source="SENATE",
                                 date_format=None, **kwargs)
 
