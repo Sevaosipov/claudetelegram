@@ -57,6 +57,7 @@ import sec_13dg
 import sec_144
 import sec_edgar
 import senate_efd
+import tradingview
 import sweden
 import universe
 import telegram_notify
@@ -609,6 +610,12 @@ def run_cluster_pass(conn, args) -> list:
                    if getattr(s, "avg_daily_value", None) is None
                    or s.avg_daily_value >= args.min_liquidity]
 
+    if not args.no_market_context:
+        # Deliberately last: runs only on whatever survived every filter above,
+        # so a daily run pays for this once per surviving signal, not once per
+        # signal the finders produced.
+        signals = tradingview.annotate_signals(signals)
+
     for s in signals:
         print(telegram_notify.format_any_signal(s))
     return signals
@@ -775,6 +782,10 @@ def main():
                      help="drop signals in names trading less than this much value per day, in EUR. "
                           "Signals whose liquidity can't be resolved are kept, since unknown is not "
                           "the same as low. Default 0 (no filter)")
+    ap.add_argument("--no-market-context", action="store_true",
+                     help="skip attaching a TradingView technical-gauge line to surviving signals. "
+                          "On by default; runs only on whatever is left after --min-score/"
+                          "--min-liquidity, since it costs a live request per signal")
     ap.add_argument("--insiders-only", action="store_true",
                      help="in SEC clusters, count only officers and directors -- drop filers who are "
                           "purely >10%% holders. An institution adding to a stake is a different event "

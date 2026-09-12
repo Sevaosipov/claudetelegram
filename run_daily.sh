@@ -44,4 +44,9 @@ PY
 }
 trap notify_failure EXIT
 
-python bot.py --once
+# --stake-min-percent/--activist-only/--min-score: raise the attention bar past
+# the SEC's bare 5% filing trigger and cluster.score_signal's default of "any
+# score at all". Tuned against the real backlog measured on 2026-09-12: cut 604
+# stake signals to 219 and 46 insider/political cluster signals to 13. Starting
+# points, not a finding -- same caveat as score_signal's own weights.
+python bot.py --once --stake-min-percent 10 --activist-only --min-score 35
