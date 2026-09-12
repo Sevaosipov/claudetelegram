@@ -250,6 +250,9 @@ def format_signal(sig, *, html: bool = False) -> str:
         lines.append(f"   {_esc(context) if html else context}")
     for m in sig.members:
         lines.append(f"   • {_esc(m) if html else m}")
+    note = getattr(sig, "market_note", None)
+    if note:
+        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     return "\n".join(lines)
 
 
@@ -300,6 +303,9 @@ def format_exit_signal(sig, *, html: bool = False) -> str:
     lines.append(f"   {_esc(sig.company) if html else sig.company}")
     for l in sig.lines:
         lines.append(f"   • {_esc(l) if html else l}")
+    note = getattr(sig, "market_note", None)
+    if note:
+        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     return "\n".join(lines)
 
 
@@ -318,6 +324,9 @@ def format_stake_signal(sig, *, html: bool = False) -> str:
     if sig.event_date:
         detail += f" · событие {datefmt.fmt(sig.event_date)}"
     lines.append(f"   {_esc(detail) if html else detail}")
+    note = getattr(sig, "market_note", None)
+    if note:
+        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     if html:
         lines.append(f'   <a href="{_esc(sig.url)}">источник</a>')
     else:

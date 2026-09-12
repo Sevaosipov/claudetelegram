@@ -109,3 +109,54 @@ def test_resolve_falls_back_to_search_order_when_no_primary(monkeypatch):
         def get(self, *a, **k): return FakeResp()
 
     assert tv.resolve_symbol("X", FakeSession()) == "MUN:X"
+
+
+def test_format_signal_note_is_a_single_compact_line():
+    note = tv.format_signal_note(tv.analyze(_snap(**{"Recommend.All": 0.6})))
+    assert "\n" not in note
+    assert "не мнение бота" in note
+    assert "0.60" in note and "Strong Buy" in note
+
+
+def test_format_signal_note_includes_rsi_state_when_extreme():
+    note = tv.format_signal_note(tv.analyze(_snap(RSI=80.0)))
+    assert "перекуплен" in note
+
+
+def test_format_signal_note_none_on_no_view():
+    assert tv.format_signal_note(None) is None
+    assert tv.format_signal_note(tv.analyze({})) is None
+
+
+def test_annotate_signals_sets_market_note_on_each_signal(monkeypatch):
+    class Sig:
+        def __init__(self, ticker):
+            self.ticker = ticker
+
+    monkeypatch.setattr(tv, "fetch_snapshot", lambda ticker, session=None: _snap(**{"Recommend.All": 0.6}))
+    sigs = [Sig("AAA"), Sig("BBB")]
+    out = tv.annotate_signals(sigs)
+    assert out[0].market_note is not None
+    assert "Strong Buy" in out[0].market_note
+
+
+def test_annotate_signals_sets_none_on_fetch_failure(monkeypatch):
+    class Sig:
+        ticker = "AAA"
+
+    def boom(ticker, session=None):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(tv, "fetch_snapshot", boom)
+    sig = Sig()
+    tv.annotate_signals([sig])
+    assert sig.market_note is None
+
+
+def test_annotate_signals_handles_a_signal_with_no_ticker_attribute():
+    class NoTicker:
+        pass
+
+    sig = NoTicker()
+    tv.annotate_signals([sig])
+    assert sig.market_note is None

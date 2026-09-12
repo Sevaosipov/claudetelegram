@@ -185,6 +185,43 @@ def analyze(raw: dict | None) -> dict | None:
     }
 
 
+def format_signal_note(view: dict | None) -> str | None:
+    """A single compact line for attaching to an already-dense signal message --
+    the short form of format_view(), sized to fit as one extra line rather than
+    stand as its own dossier section. None on no usable reading, same as every
+    other function here."""
+    if not view or view["gauge"] is None:
+        return None
+    bits = [f"{view['gauge']:+.2f} ({view['gauge_label']})"]
+    if view["rsi_state"]:
+        bits.append(view["rsi_state"])
+    return ("TradingView " + " · ".join(bits)
+            + " — механический индикатор, не мнение бота")
+
+
+def annotate_signals(signals: list, session: requests.Session | None = None) -> list:
+    """Attach a compact TradingView read to each signal's `market_note`
+    attribute (None on any failure to resolve or fetch -- a missing note is not
+    an error, same policy as every other network step in this project).
+
+    Meant to run on a short, already-filtered list of signals only: each one
+    costs one or two live requests to TradingView's scanner, so running this
+    over an unfiltered signal list would multiply a daily run's network cost by
+    however many hundred signals came out of the finders.
+    """
+    session = session or requests.Session()
+    for sig in signals:
+        ticker = getattr(sig, "ticker", None)
+        note = None
+        if ticker:
+            try:
+                note = format_signal_note(analyze(fetch_snapshot(ticker, session)))
+            except Exception:
+                note = None
+        sig.market_note = note
+    return signals
+
+
 def format_view(view: dict | None) -> str:
     if not view:
         return ""

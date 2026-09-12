@@ -141,3 +141,47 @@ def test_send_text_still_skips_silently_without_credentials(monkeypatch, capsys)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     assert tn.send_text("hello") is False
+
+
+# ------------------------------------------------------------ market_note
+#
+# tradingview.annotate_signals() sets `.market_note` on a signal after the fact
+# (or leaves it unset/None on failure); the formatters must render it when
+# present and simply omit the line otherwise, in both html and plain mode.
+
+def test_format_signal_renders_a_market_note_in_html_as_italics():
+    sig = _cluster()
+    sig.market_note = "TradingView +0.60 (Strong Buy) — механический индикатор, не мнение бота"
+    text = tn.format_signal(sig, html=True)
+    assert "<i>TradingView +0.60 (Strong Buy)" in text
+    assert text.rstrip().endswith("не мнение бота</i>")
+
+
+def test_format_signal_renders_a_market_note_in_plain_mode_without_tags():
+    sig = _cluster()
+    sig.market_note = "TradingView +0.60 (Strong Buy) — механический индикатор, не мнение бота"
+    text = tn.format_signal(sig)
+    assert "<i>" not in text
+    assert "TradingView +0.60 (Strong Buy)" in text
+
+
+def test_format_signal_omits_the_note_line_when_absent():
+    text = tn.format_signal(_cluster(), html=True)
+    assert "TradingView" not in text
+
+
+def test_format_exit_signal_renders_a_market_note():
+    sig = _exit()
+    sig.market_note = "TradingView -0.30 (Sell) — механический индикатор, не мнение бота"
+    text = tn.format_exit_signal(sig, html=True)
+    assert "<i>TradingView -0.30 (Sell)" in text
+
+
+def test_format_stake_signal_renders_a_market_note_before_the_source_link():
+    sig = _stake()
+    sig.market_note = "TradingView +0.10 (Buy) — механический индикатор, не мнение бота"
+    text = tn.format_stake_signal(sig, html=True)
+    lines = text.splitlines()
+    note_idx = next(i for i, l in enumerate(lines) if "TradingView" in l)
+    link_idx = next(i for i, l in enumerate(lines) if "<a href" in l)
+    assert note_idx < link_idx
