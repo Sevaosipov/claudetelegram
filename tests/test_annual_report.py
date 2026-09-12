@@ -273,3 +273,12 @@ def test_annual_financials_single_point_has_no_yoy():
 
     result = ar.annual_financials("1", session=FakeSession())
     assert result["assets"]["yoy_pct"] is None
+
+
+def test_annual_financials_none_on_invalid_cik():
+    """annual_financials returns None when cik is None, not raises."""
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(json_data=_facts_payload({"NetIncomeLoss": []}))
+
+    assert ar.annual_financials(None, session=FakeSession()) is None

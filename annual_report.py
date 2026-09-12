@@ -146,7 +146,7 @@ def annual_financials(cik: str, form_filter: tuple[str, ...] = _ANNUAL_FORMS,
                             headers=universe.sec_headers(), timeout=30)
         resp.raise_for_status()
         facts = resp.json().get("facts", {})
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError, TypeError, AttributeError):
         return None
 
     out = {}
