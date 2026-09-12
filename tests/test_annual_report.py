@@ -111,3 +111,30 @@ def test_fetch_filing_text_none_on_request_failure():
             return _FakeResp(status=500)
 
     assert ar.fetch_filing_text("1", "0000000000-26-000001", "doc.htm", session=FakeSession()) is None
+
+
+def test_find_latest_annual_filing_none_on_invalid_cik():
+    """find_latest_annual_filing returns None when cik is None, not raises."""
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(json_data=_submissions(["10-K"]))
+
+    assert ar.find_latest_annual_filing(None, session=FakeSession()) is None
+
+
+def test_fetch_filing_text_none_on_non_numeric_cik():
+    """fetch_filing_text returns None for non-numeric cik string, not raises."""
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(text="<p>Text</p>")
+
+    assert ar.fetch_filing_text("not-a-number", "0000000000-26-000001", "doc.htm", session=FakeSession()) is None
+
+
+def test_fetch_filing_text_none_on_none_cik():
+    """fetch_filing_text returns None when cik is None, not raises."""
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(text="<p>Text</p>")
+
+    assert ar.fetch_filing_text(None, "0000000000-26-000001", "doc.htm", session=FakeSession()) is None

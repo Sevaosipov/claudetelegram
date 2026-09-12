@@ -34,7 +34,7 @@ def find_latest_annual_filing(cik: str, session: requests.Session | None = None)
                             headers=universe.sec_headers(), timeout=30)
         resp.raise_for_status()
         data = resp.json()
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError, TypeError):
         return None
 
     recent = data.get("filings", {}).get("recent", {})
@@ -62,13 +62,13 @@ def fetch_filing_text(cik: str, accession: str, primary_document: str,
     text. None on any fetch failure."""
     import universe
     session = session or requests.Session()
-    url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
-           f"{accession.replace('-', '')}/{primary_document}")
     try:
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+               f"{accession.replace('-', '')}/{primary_document}")
         resp = session.get(url, headers=universe.sec_headers(), timeout=30)
         resp.raise_for_status()
         html = resp.text
-    except requests.RequestException:
+    except (requests.RequestException, ValueError, TypeError, AttributeError):
         return None
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"&nbsp;|&amp;|&lt;|&gt;|&#\d+;", " ", text)
