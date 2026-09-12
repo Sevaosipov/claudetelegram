@@ -170,3 +170,39 @@ def test_large_groups_are_not_flagged():
 def test_summarise_ignores_rows_without_a_benchmark():
     rows = [{"return": 5.0, "excess": None}, {"return": 1.0, "excess": 2.0}]
     assert backtest.summarise(rows, 21)["n"] == 1
+
+
+# ------------------------------------------------------- exit signal scoring
+#
+# score_signal special-cases StakeSignal (via hasattr(sig, "percent")) but, until
+# now, nothing special-cased ExitSignal -- it fell through to the general path,
+# which reads sig.buyer_count and other ClusterSignal-only fields. ExitSignal has
+# neither, so enrich_signals() crashed the instant a real exit signal appeared
+# (there just hadn't been one in the recorded data yet).
+
+def _exit(**kw):
+    base = dict(source="SEC", ticker="AAA", company="Test", total_buyers=3,
+                seller_count=1, lines=[])
+    base.update(kw)
+    return cluster.ExitSignal(**base)
+
+
+def test_score_signal_does_not_crash_on_an_exit_signal():
+    cluster.score_signal(_exit())  # must not raise
+
+
+def test_exit_signal_more_sellers_scores_higher():
+    assert cluster.score_signal(_exit(seller_count=2)) > cluster.score_signal(_exit(seller_count=1))
+
+
+def test_exit_signal_full_unwind_scores_above_a_partial_one():
+    partial = cluster.score_signal(_exit(total_buyers=3, seller_count=2))
+    full = cluster.score_signal(_exit(total_buyers=3, seller_count=3))
+    assert full > partial
+
+
+def test_enrich_signals_handles_a_mixed_batch_including_an_exit_signal(conn):
+    """The real crash: enrich_signals() runs over whatever run_cluster_pass
+    assembled, cluster/stake/exit signals together, in one pass."""
+    signals = cluster.enrich_signals(conn, [_signal(), _exit()])
+    assert all(hasattr(s, "score") for s in signals)

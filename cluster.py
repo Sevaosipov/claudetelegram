@@ -183,6 +183,7 @@ FRESH_DECAY_DAYS = 30.0
 P_UNKNOWN_SIZE = -5.0        # size couldn't be resolved: less is known, not less is true
 P_ILLIQUID = -12.0           # trades less than ILLIQUID_BELOW_EUR of value per day
 ILLIQUID_BELOW_EUR = 250_000
+W_FULL_UNWIND = 20.0         # every buyer in the cluster has now sold, not just some
 
 # A single insider cannot buy more of a company than the company is worth. Past
 # this, the market cap or the reported value is wrong -- usually a stale quote on a
@@ -771,6 +772,16 @@ def score_signal(sig) -> float:
             score += 25.0   # 13D means the holder may seek to influence control
         if sig.prev_percent is not None:
             score += min(max(sig.percent - sig.prev_percent, 0.0), 20.0) * 2.0
+        return round(score, 1)
+
+    if hasattr(sig, "seller_count"):   # ExitSignal
+        # Exit signals carry none of the buy-side context (officer status, % of
+        # market cap, freshness) the general path below scores on -- they are a
+        # different kind of event. Score on what they do carry: how many sellers,
+        # and whether every buyer in the cluster has now sold.
+        score = min(W_PER_EXTRA_BUYER * max(0, sig.seller_count - 1), CAP_BUYERS)
+        if sig.total_buyers and sig.seller_count >= sig.total_buyers:
+            score += W_FULL_UNWIND
         return round(score, 1)
 
     score = 0.0
