@@ -113,3 +113,54 @@ def find_red_flags(text: str) -> list[dict]:
                               "quote": _quote_around(text, idx, len(phrase))})
                 break
     return found
+
+
+_FACT_CONCEPTS = (
+    ("revenue", ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"), "Выручка"),
+    ("net_income", ("NetIncomeLoss",), "Чистая прибыль"),
+    ("assets", ("Assets",), "Активы"),
+    ("liabilities", ("Liabilities",), "Обязательства"),
+    ("operating_cf", ("NetCashProvidedByUsedInOperatingActivities",), "Операционный денежный поток"),
+)
+
+
+def _annual_points(facts: dict, concept: str, form_filter: tuple[str, ...]) -> list[dict]:
+    """Annual (fp == "FY", form in form_filter) data points for one us-gaap
+    concept, sorted by period end, most recent last."""
+    units = facts.get("us-gaap", {}).get(concept, {}).get("units", {}).get("USD", [])
+    annual = [u for u in units if u.get("fp") == "FY" and u.get("form") in form_filter]
+    return sorted(annual, key=lambda u: u.get("end", ""))
+
+
+def annual_financials(cik: str, form_filter: tuple[str, ...] = _ANNUAL_FORMS,
+                       session: requests.Session | None = None) -> dict | None:
+    """{key: {"label", "value", "yoy_pct"}} straight from the company's own XBRL
+    facts, scoped to an actual annual filing. None only if the companyfacts fetch
+    itself fails; a concept with no tagged data (common for IFRS-taxonomy 20-F
+    filers, which this pass does not map) is simply absent from the result.
+    """
+    import universe
+    session = session or requests.Session()
+    try:
+        resp = session.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json",
+                            headers=universe.sec_headers(), timeout=30)
+        resp.raise_for_status()
+        facts = resp.json().get("facts", {})
+    except (requests.RequestException, ValueError):
+        return None
+
+    out = {}
+    for key, concepts, label in _FACT_CONCEPTS:
+        points = []
+        for concept in concepts:
+            points = _annual_points(facts, concept, form_filter)
+            if points:
+                break
+        if not points:
+            continue
+        values = [p["val"] for p in points[-2:]]
+        yoy = None
+        if len(values) == 2 and values[0]:
+            yoy = (values[1] - values[0]) / abs(values[0]) * 100
+        out[key] = {"label": label, "value": values[-1], "yoy_pct": yoy}
+    return out

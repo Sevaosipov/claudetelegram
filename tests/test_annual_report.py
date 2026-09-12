@@ -190,3 +190,86 @@ def test_find_red_flags_quote_is_centered_on_the_match():
     # 226 chars after (end clamped at the phrase + 250, well short of the full 300)
     assert 0 < quote.count("#") < 300
     assert 0 < quote.count("@") < 300
+
+
+def _facts_payload(points_by_concept: dict) -> dict:
+    return {"facts": {"us-gaap": {
+        concept: {"units": {"USD": points}} for concept, points in points_by_concept.items()
+    }}}
+
+
+def test_annual_financials_picks_the_most_recent_two_fy_points_and_computes_yoy():
+    data = _facts_payload({
+        "NetIncomeLoss": [
+            {"end": "2023-12-31", "val": 100, "fp": "FY", "form": "10-K"},
+            {"end": "2024-12-31", "val": 150, "fp": "FY", "form": "10-K"},
+        ],
+    })
+
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(json_data=data)
+
+    result = ar.annual_financials("1", session=FakeSession())
+    assert result["net_income"]["value"] == 150
+    assert result["net_income"]["yoy_pct"] == pytest.approx(50.0)
+
+
+def test_annual_financials_excludes_10q_and_non_fy_points():
+    data = _facts_payload({
+        "NetIncomeLoss": [
+            {"end": "2024-03-31", "val": 999, "fp": "Q1", "form": "10-Q"},
+            {"end": "2024-12-31", "val": 150, "fp": "FY", "form": "10-K"},
+        ],
+    })
+
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(json_data=data)
+
+    result = ar.annual_financials("1", session=FakeSession())
+    assert result["net_income"]["value"] == 150
+
+
+def test_annual_financials_falls_back_to_the_older_revenue_tag():
+    data = _facts_payload({
+        "Revenues": [{"end": "2017-12-31", "val": 500, "fp": "FY", "form": "10-K"}],
+    })
+
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(json_data=data)
+
+    result = ar.annual_financials("1", session=FakeSession())
+    assert result["revenue"]["value"] == 500
+
+
+def test_annual_financials_omits_a_concept_with_no_tagged_data():
+    data = _facts_payload({"NetIncomeLoss": [{"end": "2024-12-31", "val": 1, "fp": "FY", "form": "10-K"}]})
+
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(json_data=data)
+
+    result = ar.annual_financials("1", session=FakeSession())
+    assert "revenue" not in result
+    assert "net_income" in result
+
+
+def test_annual_financials_none_on_request_failure():
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(status=500)
+
+    assert ar.annual_financials("1", session=FakeSession()) is None
+
+
+def test_annual_financials_single_point_has_no_yoy():
+    data = _facts_payload({"Assets": [{"end": "2024-12-31", "val": 100, "fp": "FY", "form": "10-K"}]})
+
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            return _FakeResp(json_data=data)
+
+    result = ar.annual_financials("1", session=FakeSession())
+    assert result["assets"]["yoy_pct"] is None
