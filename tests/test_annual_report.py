@@ -182,10 +182,11 @@ def test_find_red_flags_empty_on_a_clean_filing():
 
 
 def test_find_red_flags_quote_is_centered_on_the_match():
-    text = "#" * 200 + "substantial doubt about the ability to continue" + "@" * 200
+    text = "#" * 300 + "substantial doubt about the ability to continue" + "@" * 300
     flags = ar.find_red_flags(text)
     quote = flags[0]["quote"]
     assert "substantial doubt" in quote
-    # roughly centered: some filler before, some after, neither the whole 200
-    assert 0 < quote.count("#") < 200
-    assert 0 < quote.count("@") <= 200
+    # genuinely partial on both sides: 150 chars before (start clamped at idx-150),
+    # 226 chars after (end clamped at the phrase + 250, well short of the full 300)
+    assert 0 < quote.count("#") < 300
+    assert 0 < quote.count("@") < 300
