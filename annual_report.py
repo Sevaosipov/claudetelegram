@@ -164,3 +164,62 @@ def annual_financials(cik: str, form_filter: tuple[str, ...] = _ANNUAL_FORMS,
             yoy = (values[1] - values[0]) / abs(values[0]) * 100
         out[key] = {"label": label, "value": values[-1], "yoy_pct": yoy}
     return out
+
+
+def build(cik: str | None, session: requests.Session | None = None) -> dict | None:
+    """Orchestrator: find the latest annual filing, then its financials and red
+    flags. None if there's no CIK or no annual filing on file at all."""
+    if not cik:
+        return None
+    session = session or requests.Session()
+    filing = find_latest_annual_filing(cik, session)
+    if filing is None:
+        return None
+    text = fetch_filing_text(cik, filing["accession"], filing["primary_document"], session)
+    return {
+        "filing": filing,
+        "financials": annual_financials(cik, session=session) or {},
+        "red_flags": find_red_flags(text) if text else [],
+    }
+
+
+def format_report(rep: dict | None) -> str:
+    if not rep:
+        return ""
+    import termstyle
+
+    filing = rep["filing"]
+    year = f" (отчётный год: {filing['fiscal_year']})" if filing.get("fiscal_year") else ""
+    L = [termstyle.section("Годовой отчёт (SEC 10-K/20-F)")]
+    L.append(f"  Форма {filing['form']} от {filing['filed']}{year}")
+
+    fin = rep["financials"]
+    rows = []
+    for key, _concepts, _label in _FACT_CONCEPTS:
+        if key not in fin:
+            continue
+        f = fin[key]
+        value = f"${f['value']:,.0f}"
+        yoy = f"{f['yoy_pct']:+.1f}% г/г" if f["yoy_pct"] is not None else ""
+        rows.append([f["label"], value, yoy])
+    if rows:
+        L.append("")
+        L.append(termstyle.table(["", "", ""], rows))
+    elif not fin:
+        L.append("  Данные XBRL не найдены для этой компании (возможно, отчётность по IFRS).")
+
+    for f in rep["red_flags"]:
+        L.append("")
+        L.append(f"  ⚠️ {f['label']}:")
+        L.append(f"     «{f['quote']}»")
+        L.append(f"     Полный документ: {filing['url']}")
+
+    found_keys = {f["key"] for f in rep["red_flags"]}
+    missing_labels = [label for key, _phrases, label in _RED_FLAGS if key not in found_keys]
+    if missing_labels:
+        L.append("")
+        L.append("  Текстовый поиск не нашёл упоминаний о " + " или ".join(missing_labels)
+                 + " — это не гарантия их отсутствия, только то, что стандартные"
+                   " формулировки не встретились.")
+
+    return "\n".join(L)

@@ -282,3 +282,95 @@ def test_annual_financials_none_on_invalid_cik():
             return _FakeResp(json_data=_facts_payload({"NetIncomeLoss": []}))
 
     assert ar.annual_financials(None, session=FakeSession()) is None
+
+
+def test_build_none_for_a_falsy_cik():
+    assert ar.build(None) is None
+    assert ar.build("") is None
+
+
+def test_build_none_when_no_annual_filing_found(monkeypatch):
+    monkeypatch.setattr(ar, "find_latest_annual_filing", lambda cik, session=None: None)
+    assert ar.build("1") is None
+
+
+def test_build_assembles_filing_financials_and_red_flags(monkeypatch):
+    filing = {"form": "10-K", "filed": "2026-03-01", "fiscal_year": 2025,
+              "accession": "a1", "primary_document": "d.htm", "url": "https://example.test/d.htm"}
+    monkeypatch.setattr(ar, "find_latest_annual_filing", lambda cik, session=None: filing)
+    monkeypatch.setattr(ar, "fetch_filing_text", lambda *a, **k: "substantial doubt about survival")
+    monkeypatch.setattr(ar, "annual_financials", lambda *a, **k: {
+        "net_income": {"label": "Чистая прибыль", "value": 150, "yoy_pct": 50.0}})
+
+    rep = ar.build("1")
+    assert rep["filing"] == filing
+    assert rep["financials"]["net_income"]["value"] == 150
+    assert rep["red_flags"][0]["key"] == "going_concern"
+
+
+def test_build_survives_a_failed_text_fetch(monkeypatch):
+    filing = {"form": "10-K", "filed": "2026-03-01", "fiscal_year": 2025,
+              "accession": "a1", "primary_document": "d.htm", "url": "https://example.test/d.htm"}
+    monkeypatch.setattr(ar, "find_latest_annual_filing", lambda cik, session=None: filing)
+    monkeypatch.setattr(ar, "fetch_filing_text", lambda *a, **k: None)
+    monkeypatch.setattr(ar, "annual_financials", lambda *a, **k: {})
+    rep = ar.build("1")
+    assert rep["red_flags"] == []
+
+
+_FAKE_REP = {
+    "filing": {"form": "10-K", "filed": "2026-03-01", "fiscal_year": 2025,
+               "url": "https://example.test/filing.htm"},
+    "financials": {"net_income": {"label": "Чистая прибыль", "value": 150.0, "yoy_pct": 50.0},
+                    "assets": {"label": "Активы", "value": 900.0, "yoy_pct": None}},
+    "red_flags": [{"key": "going_concern",
+                    "label": "существенные сомнения в способности продолжать деятельность (going concern)",
+                    "quote": "raise substantial doubt about the Company's ability to continue"}],
+}
+
+
+def test_format_report_empty_on_none():
+    assert ar.format_report(None) == ""
+
+
+def test_format_report_shows_the_filing_header_and_year():
+    text = ar.format_report(_FAKE_REP)
+    assert "10-K" in text and "2026-03-01" in text and "2025" in text
+
+
+def test_format_report_shows_financial_figures_with_yoy():
+    text = ar.format_report(_FAKE_REP)
+    assert "Чистая прибыль" in text
+    assert "150" in text and "+50.0%" in text
+
+
+def test_format_report_shows_a_red_flag_quote_and_link_verbatim():
+    text = ar.format_report(_FAKE_REP)
+    assert "substantial doubt about the Company's ability to continue" in text
+    assert "https://example.test/filing.htm" in text
+
+
+def test_format_report_names_the_flags_not_found():
+    text = ar.format_report(_FAKE_REP)
+    assert "недостаток внутреннего контроля" in text  # material_weakness label, not found here
+    assert "пересчёт" in text  # restatement label, not found here
+
+
+def test_format_report_omits_the_caveat_when_no_flags_are_missing():
+    all_found = dict(_FAKE_REP, red_flags=[
+        {"key": key, "label": label, "quote": "x"} for key, _p, label in ar._RED_FLAGS
+    ])
+    text = ar.format_report(all_found)
+    assert "не нашёл" not in text
+
+
+def test_format_report_notes_missing_xbrl_data_without_crashing():
+    rep = dict(_FAKE_REP, financials={})
+    text = ar.format_report(rep)
+    assert "IFRS" in text or "не найдены" in text
+
+
+def test_format_report_never_renders_a_verdict():
+    text = ar.format_report(_FAKE_REP).lower()
+    for bad in ("buy ", "sell ", "рекомендуем", "стоит купить", "покупайте", "target price"):
+        assert bad not in text
