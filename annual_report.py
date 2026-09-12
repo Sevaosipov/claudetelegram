@@ -74,3 +74,42 @@ def fetch_filing_text(cik: str, accession: str, primary_document: str,
     text = re.sub(r"&nbsp;|&amp;|&lt;|&gt;|&#\d+;", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+_RED_FLAGS = (
+    ("going_concern",
+     ("substantial doubt about", "substantial doubt regarding"),
+     "существенные сомнения в способности продолжать деятельность (going concern)"),
+    ("material_weakness",
+     ("identified a material weakness", "identified one or more material weaknesses",
+      "disclosure controls and procedures were not effective",
+      "internal control over financial reporting was not effective"),
+     "выявленный существенный недостаток внутреннего контроля"),
+    ("restatement",
+     ("restated its previously issued financial statements",
+      "restatement of our previously issued financial statements",
+      "we determined to restate"),
+     "пересчёт (restatement) ранее опубликованной отчётности"),
+)
+
+
+def _quote_around(text: str, idx: int, phrase_len: int) -> str:
+    start = max(0, idx - 150)
+    end = idx + phrase_len + 250
+    return re.sub(r"\s+", " ", text[start:end]).strip()
+
+
+def find_red_flags(text: str) -> list[dict]:
+    """Which of _RED_FLAGS' specific, standardized disclosures appear in `text`
+    (case-insensitive search, original-case quote in the result). [] if none --
+    checked, found nothing, which is different from "could not check"."""
+    lowered = text.lower()
+    found = []
+    for key, phrases, label in _RED_FLAGS:
+        for phrase in phrases:
+            idx = lowered.find(phrase)
+            if idx >= 0:
+                found.append({"key": key, "label": label,
+                              "quote": _quote_around(text, idx, len(phrase))})
+                break
+    return found

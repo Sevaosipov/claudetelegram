@@ -138,3 +138,54 @@ def test_fetch_filing_text_none_on_none_cik():
             return _FakeResp(text="<p>Text</p>")
 
     assert ar.fetch_filing_text(None, "0000000000-26-000001", "doc.htm", session=FakeSession()) is None
+
+
+from conftest import fixture_text
+
+
+def _strip(html: str) -> str:
+    import re
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"&nbsp;|&amp;|&lt;|&gt;|&#\d+;", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def test_find_red_flags_catches_the_real_going_concern_disclosure():
+    text = _strip(fixture_text("annual_report_going_concern.htm"))
+    flags = ar.find_red_flags(text)
+    keys = {f["key"] for f in flags}
+    assert "going_concern" in keys
+    gc = next(f for f in flags if f["key"] == "going_concern")
+    assert "substantial doubt" in gc["quote"].lower()
+
+
+def test_find_red_flags_ignores_hypothetical_material_weakness_boilerplate():
+    """The fixture's Item 1A sentence is generic risk-factor language ('if we
+    experience...'), not an actual disclosed weakness -- this is the exact false
+    positive naive keyword search produced during design validation."""
+    text = _strip(fixture_text("annual_report_going_concern.htm"))
+    keys = {f["key"] for f in ar.find_red_flags(text)}
+    assert "material_weakness" not in keys
+
+
+def test_find_red_flags_ignores_the_universal_restatement_checkbox():
+    """The fixture's checkbox sentence is the boilerplate every post-2023 10-K
+    carries regardless of whether a restatement ever happened."""
+    text = _strip(fixture_text("annual_report_going_concern.htm"))
+    keys = {f["key"] for f in ar.find_red_flags(text)}
+    assert "restatement" not in keys
+
+
+def test_find_red_flags_empty_on_a_clean_filing():
+    text = _strip(fixture_text("annual_report_clean.htm"))
+    assert ar.find_red_flags(text) == []
+
+
+def test_find_red_flags_quote_is_centered_on_the_match():
+    text = "x" * 200 + "substantial doubt about the ability to continue" + "y" * 200
+    flags = ar.find_red_flags(text)
+    quote = flags[0]["quote"]
+    assert "substantial doubt" in quote
+    # roughly centered: some x's before, some y's after, neither the whole 200
+    assert 0 < quote.count("x") < 200
+    assert 0 < quote.count("y") < 200
