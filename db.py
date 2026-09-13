@@ -193,7 +193,8 @@ CREATE TABLE IF NOT EXISTS signal_journal (
     score           REAL,
     window_start    TEXT,
     window_end      TEXT,
-    members         TEXT      -- JSON array of names
+    members         TEXT,     -- JSON array of names
+    corroborated_by TEXT      -- JSON array of other source values active on this ticker within the window
 );
 
 CREATE INDEX IF NOT EXISTS signal_journal_ticker ON signal_journal(ticker, emitted_at);
@@ -364,6 +365,7 @@ _ADDED_COLUMNS = [
     ("sec_sales", "is_10b5_1", "INTEGER"),
     ("sec_sales", "filed_date", "TEXT"),
     ("company_facts", "avg_daily_value", "REAL"),
+    ("signal_journal", "corroborated_by", "TEXT"),
 ]
 
 
@@ -635,7 +637,7 @@ def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
     cols = ("source", "kind", "ticker", "company", "buyer_count", "total_value_eur",
             "holder_only", "has_officer", "position_increase_pct", "first_buy",
             "lag_days", "market_cap_eur", "value_pct_of_mcap", "percent_of_class",
-            "score", "window_start", "window_end", "members")
+            "score", "window_start", "window_end", "members", "corroborated_by")
     conn.execute(
         f"INSERT INTO signal_journal ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
         tuple(row.get(c) for c in cols),

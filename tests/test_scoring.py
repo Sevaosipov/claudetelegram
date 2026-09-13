@@ -6,6 +6,7 @@ plus the machinery that checks whether that ranking means anything.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 
@@ -148,6 +149,17 @@ def test_journalled_signal_round_trips(conn):
     db.journal_signal(conn, bot._signal_features(sig))
     row = conn.execute("SELECT source, kind, ticker, buyer_count FROM signal_journal").fetchone()
     assert row == ("SEC", "cluster", "AAA", 2)
+
+
+def test_corroborated_by_round_trips_through_the_journal(conn):
+    import bot
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    sig = cluster.find_sec_clusters(conn)[0]
+    sig.corroborated_by = ["SENATE", "BAFIN"]
+    db.journal_signal(conn, bot._signal_features(sig))
+    row = conn.execute("SELECT corroborated_by FROM signal_journal").fetchone()
+    assert json.loads(row[0]) == ["SENATE", "BAFIN"]
 
 
 # ------------------------------------------------------------------- backtest

@@ -655,6 +655,7 @@ def _signal_features(sig) -> dict:
         "window_start": str(getattr(sig, "window_start", "") or ""),
         "window_end": str(getattr(sig, "window_end", "") or ""),
         "members": json.dumps(list(members or []), ensure_ascii=False),
+        "corroborated_by": json.dumps(getattr(sig, "corroborated_by", None) or [], ensure_ascii=False),
     }
 
 
