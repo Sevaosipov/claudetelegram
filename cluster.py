@@ -828,6 +828,13 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
     had activity here", nothing about direction. Pure SQL + set logic, no
     network, so it runs before the market-cap/liquidity loop in
     enrich_signals() that does need the network.
+
+    Asymmetric on purpose: the batch half sees every signal enrich_signals was
+    handed, including ones bot.py's --min-score/--min-liquidity will later
+    filter out and never send, while the history half only ever sees signals
+    that were actually journaled (i.e. actually sent) -- "another regime had
+    activity" still holds true either way, so this doesn't change the result,
+    just what counted toward it.
     """
     tickers = sorted({sig.ticker for sig in signals})
     if not tickers:
@@ -872,6 +879,8 @@ def enrich_signals(conn, signals: list) -> list:
                                 if facts.get("avg_daily_value") else None)
         total = getattr(sig, "total_value", None)
         pct = (total / cap * 100) if (cap and total) else None
+        # Keep an implausible ratio out of the score but still visible in the
+        # journal, so backtest.py can see how often the data goes wrong.
         sig.value_pct_of_mcap = pct
         sig.score = score_signal(sig, sig.corroborated_by)
     signals.sort(key=lambda x: getattr(x, "score", 0.0), reverse=True)

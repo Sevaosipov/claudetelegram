@@ -47,6 +47,15 @@ Brainstormed and scoped with the user:
   standing as every other weight in `score_signal` — its docstring already
   says as much for the existing components, and this one is added under the
   same disclaimer, not a special case.
+- **`SEC` and `SEC13DG` are treated as independent sources, even though they
+  sometimes aren't.** `find_corroboration` counts a Form 4 insider cluster
+  (`SEC`) and a 13D/G stake filing (`SEC13DG`) on the same ticker as two
+  corroborating regimes. A >10%-holder's position change can genuinely
+  generate both from the same underlying event, so this specific pair is not
+  always truly independent corroboration. Known and accepted for this feature
+  — flagged by the final whole-branch review and deliberately not changed
+  here; collapsing the pair to one regime would alter scoring semantics and
+  needs its own decision, not a silent fix.
 
 ## Architecture
 

@@ -378,3 +378,26 @@ def test_format_report_shows_recent_sources_subline_when_differs(conn, monkeypat
     assert "Независимые источники по этому тикеру: BAFIN, SEC, SENATE" in text
     # Recent sources sub-line must appear with correct content
     assert "за последние 30 дней: SEC, SENATE" in text
+
+
+def test_corroboration_line_never_renders_a_verdict(conn, monkeypatch):
+    """The dossier's corroboration line says only "another source had activity
+    here" -- same discipline as test_report_never_renders_a_verdict above, but
+    for the corroboration line specifically (the design spec's Testing section
+    calls for extending the forbidden-terms check to this line too).
+
+    Same forbidden-terms list as test_report_never_renders_a_verdict above, not
+    the generic "buy "/"sell "/"target price" one used elsewhere in the project
+    -- research.build() legitimately pulls in an analyst-consensus section that
+    quotes TradingView/analyst ratings verbatim ("Buy", "td cowen -- buy",
+    target prices), always as a caveated third-party quote, never as the bot's
+    own line. Those terms alone are not a defect; the ones below are."""
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
+    db.journal_signal(conn, {"source": "SENATE", "kind": "cluster", "ticker": "AAPL"})
+    monkeypatch.setattr(research, "corroboration_summary",
+                        lambda conn, ticker: {"all_sources": ["SEC", "SENATE"],
+                                                "recent_sources": ["SEC", "SENATE"]})
+    text = research.format_report(research.build(conn, "AAPL")).lower()
+    assert "независимые источники по этому тикеру" in text  # sanity: line actually rendered
+    for bad in ("рекомендуем", "стоит купить", "мы считаем", "наш прогноз", "целевая цена бота"):
+        assert bad not in text

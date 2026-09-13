@@ -13,6 +13,7 @@ import pytest
 import bot
 import cluster
 import db
+import research
 from conftest import add_form_144, add_house_txn, add_sec_purchase, add_sec_sale, add_senate_txn, add_stake
 
 TODAY = dt.date.today()
@@ -545,3 +546,27 @@ def test_corroboration_includes_exit_signals(conn):
     signals = cluster.find_sec_clusters(conn)
     cluster.find_corroboration(conn, signals)
     assert signals[0].corroborated_by == ["HOUSE"]
+
+
+def test_corroboration_survives_the_full_chain_to_the_dossier(conn):
+    """find_corroboration -> score_signal -> _signal_features -> journal_signal ->
+    corroboration_summary, wired together for real. Every other test in this
+    file either checks find_corroboration alone or hand-assigns
+    .corroborated_by directly -- this is the one place the whole chain runs
+    end to end, with .corroborated_by actually DERIVED from a real
+    find_corroboration call (via enrich_signals) before journaling, not set by
+    hand."""
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    add_senate_txn(conn, "AAA", "Sen. One", "$60,001 - $100,000", RECENT)
+    add_senate_txn(conn, "AAA", "Sen. Two", "$60,001 - $100,000", RECENT)
+    signals = cluster.find_sec_clusters(conn) + cluster.find_senate_clusters(conn)
+    assert {s.source for s in signals} == {"SEC", "SENATE"}   # sanity: both regimes fired
+
+    enriched = cluster.enrich_signals(conn, signals)
+    for sig in enriched:
+        db.journal_signal(conn, bot._signal_features(sig))
+
+    summary = research.corroboration_summary(conn, "AAA")
+    assert summary["all_sources"] == ["SEC", "SENATE"]
+    assert summary["recent_sources"] == ["SEC", "SENATE"]

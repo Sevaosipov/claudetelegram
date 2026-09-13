@@ -249,7 +249,7 @@ def test_corroboration_bonus_applies_to_stake_and_exit_signals_too():
             > cluster.score_signal(_exit()))
 
 
-def test_corroboration_bonus_stays_within_the_existing_bound(conn):
+def test_corroboration_bonus_stays_within_the_existing_bound():
     """test_every_component_is_bounded's <250 ceiling, plus the capped
     corroboration bonus (30) on top, must still be a sane, bounded number."""
     extreme = _signal(buyer_count=500, value_pct_of_mcap=99.0, position_increase_pct=1000.0,
