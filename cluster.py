@@ -191,6 +191,14 @@ W_FULL_UNWIND = 20.0         # every buyer in the cluster has now sold, not just
 # way sweden.py discards an implausible notional.
 MAX_CREDIBLE_PCT_OF_MCAP = 100.0
 
+# Corroboration: does another, independent disclosure regime also show activity
+# on this ticker recently? Not a claim that sources agree -- an exit on one
+# regime and a buy on another both count, see find_corroboration below and the
+# README's "Ранжирование сигналов" section.
+CORROBORATION_WINDOW_DAYS = 30
+W_PER_CORROBORATING_SOURCE = 15.0   # per distinct other source active on this ticker
+CAP_CORROBORATION = 30.0            # caps at 2 corroborating sources' worth
+
 
 @dataclass
 class ClusterSignal:
@@ -220,6 +228,7 @@ class ClusterSignal:
     value_pct_of_mcap: float | None = None
     avg_daily_value: float | None = None
     score: float = 0.0
+    corroborated_by: list[str] = field(default_factory=list)
 
 
 def _clean_asset_name(asset: str) -> str:
@@ -677,6 +686,7 @@ class StakeSignal:
     amount_owned: float | None
     event_date: str
     url: str
+    corroborated_by: list[str] = field(default_factory=list)
 
     @property
     def is_activist(self) -> bool:
@@ -802,6 +812,43 @@ def score_signal(sig) -> float:
     if sig.avg_daily_value is not None and sig.avg_daily_value < ILLIQUID_BELOW_EUR:
         score += P_ILLIQUID
     return round(score, 1)
+
+
+def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WINDOW_DAYS) -> None:
+    """Which OTHER disclosure-source regimes also show activity on each
+    signal's ticker within `window_days` -- this run's own batch, plus
+    signal_journal history. Sets `.corroborated_by` on every signal in place
+    to the sorted list of those other sources ([] when there are none).
+
+    Not a claim the sources agree: any signal kind counts on either side, so a
+    buy-side cluster and an exit signal on the same ticker corroborate each
+    other just as two buy-side clusters would -- "another independent regime
+    had activity here", nothing about direction. Pure SQL + set logic, no
+    network, so it runs before the market-cap/liquidity loop in
+    enrich_signals() that does need the network.
+    """
+    tickers = sorted({sig.ticker for sig in signals})
+    if not tickers:
+        return
+
+    batch_sources: dict[str, set[str]] = {t: set() for t in tickers}
+    for sig in signals:
+        batch_sources[sig.ticker].add(sig.source)
+
+    since = (dt.date.today() - dt.timedelta(days=window_days)).isoformat()
+    placeholders = ",".join("?" * len(tickers))
+    rows = conn.execute(
+        f"SELECT DISTINCT ticker, source FROM signal_journal "
+        f"WHERE ticker IN ({placeholders}) AND emitted_at >= ?",
+        (*tickers, since),
+    ).fetchall()
+    journal_sources: dict[str, set[str]] = {t: set() for t in tickers}
+    for ticker, source in rows:
+        journal_sources[ticker].add(source)
+
+    for sig in signals:
+        others = (batch_sources[sig.ticker] | journal_sources[sig.ticker]) - {sig.source}
+        sig.corroborated_by = sorted(others)
 
 
 def enrich_signals(conn, signals: list) -> list:
@@ -952,6 +999,7 @@ class ExitSignal:
     lines: list[str]  # already-formatted "Name: bought $X D1 -> sold $Y D2 (url)" lines
     # Plain seller names, for the same reason ClusterSignal carries member_names.
     seller_names: list[str] = field(default_factory=list)
+    corroborated_by: list[str] = field(default_factory=list)
 
 
 def find_sec_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,

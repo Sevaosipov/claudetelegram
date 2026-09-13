@@ -13,7 +13,7 @@ import pytest
 import bot
 import cluster
 import db
-from conftest import add_form_144, add_house_txn, add_sec_purchase, add_sec_sale, add_stake
+from conftest import add_form_144, add_house_txn, add_sec_purchase, add_sec_sale, add_senate_txn, add_stake
 
 TODAY = dt.date.today()
 RECENT = (TODAY - dt.timedelta(days=2)).isoformat()
@@ -468,3 +468,80 @@ def test_senate_cluster_also_respects_the_span(conn):
     add_senate_txn(conn, "AAA", "Senator A", "$100,001 - $250,000", old)
     add_senate_txn(conn, "AAA", "Senator B", "$100,001 - $250,000", RECENT)
     assert cluster.find_senate_clusters(conn) == []
+
+
+# --------------------------------------------------------- corroboration
+def _journal_row(conn, ticker, source, days_ago=0, kind="cluster"):
+    """Insert a signal_journal row with a controlled age, for testing the
+    corroboration window boundary -- db.journal_signal() always stamps
+    emitted_at as "now", so a backdated row needs raw SQL."""
+    when = (TODAY - dt.timedelta(days=days_ago)).isoformat()
+    conn.execute(
+        "INSERT INTO signal_journal (source, ticker, kind, emitted_at) VALUES (?, ?, ?, ?)",
+        (source, ticker, kind, when),
+    )
+    conn.commit()
+
+
+def test_corroboration_handles_an_empty_signal_list(conn):
+    cluster.find_corroboration(conn, [])  # must not raise
+
+
+def test_corroboration_matches_another_source_in_the_same_batch(conn):
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    add_senate_txn(conn, "AAA", "Sen. One", "$60,001 - $100,000", RECENT)
+    add_senate_txn(conn, "AAA", "Sen. Two", "$60,001 - $100,000", RECENT)
+    signals = cluster.find_sec_clusters(conn) + cluster.find_senate_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    by_source = {s.source: s.corroborated_by for s in signals}
+    assert by_source["SEC"] == ["SENATE"]
+    assert by_source["SENATE"] == ["SEC"]
+
+
+def test_corroboration_matches_journal_history_within_the_window(conn):
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    _journal_row(conn, "AAA", "BAFIN", days_ago=10)
+    signals = cluster.find_sec_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == ["BAFIN"]
+
+
+def test_corroboration_ignores_journal_history_outside_the_window(conn):
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    _journal_row(conn, "AAA", "BAFIN", days_ago=cluster.CORROBORATION_WINDOW_DAYS + 5)
+    signals = cluster.find_sec_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == []
+
+
+def test_corroboration_is_empty_with_no_other_activity(conn):
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    signals = cluster.find_sec_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == []
+
+
+def test_corroboration_deduplicates_repeated_sources(conn):
+    """A second SEC-sourced journal row must not make SEC corroborate itself --
+    same disclosure regime, not another one."""
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    _journal_row(conn, "AAA", "SEC", days_ago=5)
+    signals = cluster.find_sec_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == []
+
+
+def test_corroboration_includes_exit_signals(conn):
+    """Exits count on either side -- co-occurrence, not agreement. See
+    cluster.find_corroboration's docstring."""
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    _journal_row(conn, "AAA", "HOUSE", days_ago=3, kind="exit")
+    signals = cluster.find_sec_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == ["HOUSE"]
