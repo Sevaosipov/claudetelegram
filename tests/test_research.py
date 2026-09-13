@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+import db
 import research
 from conftest import (add_bafin_txn, add_sec_purchase, add_sec_sale, add_stake,
                       add_sweden_txn)
@@ -320,3 +321,44 @@ def test_format_report_omits_the_annual_report_section_when_absent(conn, monkeyp
     text = research.format_report(research.build(conn, "AAPL"))
     assert "ANNUAL-REPORT-MARKER-TEXT" not in text
     assert "Годовой отчёт" not in text
+
+
+def test_corroboration_summary_none_with_fewer_than_two_sources(conn):
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAA"})
+    assert research.corroboration_summary(conn, "AAA") is None
+
+
+def test_corroboration_summary_lists_distinct_sources(conn):
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAA"})
+    db.journal_signal(conn, {"source": "SENATE", "kind": "cluster", "ticker": "AAA"})
+    summary = research.corroboration_summary(conn, "AAA")
+    assert summary["all_sources"] == ["SEC", "SENATE"]
+    assert summary["recent_sources"] == ["SEC", "SENATE"]
+
+
+def test_corroboration_summary_excludes_aged_out_sources_from_recent(conn):
+    conn.execute(
+        "INSERT INTO signal_journal (source, ticker, kind, emitted_at) VALUES (?, ?, ?, ?)",
+        ("BAFIN", "AAA", "cluster", "2020-01-01"),
+    )
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAA"})
+    summary = research.corroboration_summary(conn, "AAA")
+    assert summary["all_sources"] == ["BAFIN", "SEC"]
+    assert summary["recent_sources"] == ["SEC"]
+
+
+def test_format_report_shows_the_corroboration_summary_when_present(conn, monkeypatch):
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
+    monkeypatch.setattr(research, "corroboration_summary",
+                        lambda conn, ticker: {"all_sources": ["SEC", "SENATE"],
+                                                "recent_sources": ["SEC", "SENATE"]})
+    text = research.format_report(research.build(conn, "AAPL"))
+    assert "Независимые источники по этому тикеру: SEC, SENATE" in text
+
+
+def test_format_report_omits_the_corroboration_summary_when_absent(conn, monkeypatch):
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
+    monkeypatch.setattr(research, "corroboration_summary", lambda conn, ticker: None)
+    text = research.format_report(research.build(conn, "AAPL"))
+    assert "Независимые источники" not in text
+    assert "Сигналы, которые бот уже присылал" in text

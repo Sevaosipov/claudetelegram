@@ -56,6 +56,7 @@ warnings.filterwarnings("ignore")
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 import annual_report
+import cluster
 import db
 import datefmt
 import fx
@@ -159,6 +160,24 @@ def european_activity(conn, key: str) -> list:
         d = row[0] or ""
         return f"{d[6:10]}-{d[3:5]}-{d[0:2]}" if "." in d else d
     return sorted(rows, key=sort_key, reverse=True)
+
+
+def corroboration_summary(conn, ticker: str,
+                           window_days: int = cluster.CORROBORATION_WINDOW_DAYS) -> dict | None:
+    """Distinct disclosure-source regimes that have recorded a signal on this
+    ticker, all-time and within the trailing `window_days`. None when fewer
+    than 2 distinct sources exist all-time -- nothing to report."""
+    all_sources = sorted({r[0] for r in conn.execute(
+        "SELECT DISTINCT source FROM signal_journal WHERE ticker = ?", (ticker,),
+    ).fetchall()})
+    if len(all_sources) < 2:
+        return None
+    since = (dt.date.today() - dt.timedelta(days=window_days)).isoformat()
+    recent_sources = sorted({r[0] for r in conn.execute(
+        "SELECT DISTINCT source FROM signal_journal WHERE ticker = ? AND emitted_at >= ?",
+        (ticker, since),
+    ).fetchall()})
+    return {"all_sources": all_sources, "recent_sources": recent_sources}
 
 
 def past_signals(conn, ticker: str) -> list:
@@ -747,6 +766,7 @@ def build(conn, ticker: str) -> dict:
         "proposed_sales": proposed_sales(conn, ticker),
         "political": political_trades(conn, ticker),
         "signals": past_signals(conn, ticker),
+        "corroboration": corroboration_summary(conn, ticker),
         "prices": prices,
         "analyst": analyst,
         "tradingview": tv,
@@ -854,6 +874,13 @@ def format_report(rep: dict) -> str:
 
     if rep["signals"]:
         L.append("\n" + termstyle.section("Сигналы, которые бот уже присылал"))
+        corr = rep.get("corroboration")
+        if corr:
+            line = "Независимые источники по этому тикеру: " + ", ".join(corr["all_sources"])
+            if corr["recent_sources"] and corr["recent_sources"] != corr["all_sources"]:
+                line += (f" (за последние {cluster.CORROBORATION_WINDOW_DAYS} дней: "
+                         + ", ".join(corr["recent_sources"]) + ")")
+            L.append(f"  {line}")
         for (when, source, kind, buyers, value, score) in rep["signals"][:8]:
             L.append(f"  {when[:10]}  {source} {kind}  {buyers} чел.  "
                      f"€{value or 0:,.0f}  {score or 0:.0f} баллов")
