@@ -55,6 +55,7 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+import annual_report
 import db
 import datefmt
 import fx
@@ -704,7 +705,7 @@ def build(conn, ticker: str) -> dict:
     # TradingView resolves ISINs, so it runs either way. The rest are US-ticker only.
     tv = tradingview.analyze(tradingview.fetch_snapshot(ticker))
     if is_isin:
-        fin = dilution = own = short = earnings = None
+        fin = dilution = own = short = earnings = annual = None
     else:
         info = _yf_info(ticker)
         fin = financials(ticker)
@@ -712,6 +713,7 @@ def build(conn, ticker: str) -> dict:
         own = ownership(ticker, info)
         short = short_interest(info)
         earnings = earnings_calendar(ticker)
+        annual = annual_report.build(cik)
     filings, sec_name, industry = (filings_result if isinstance(filings_result, tuple)
                                     else (filings_result, None, None))
     facts = marketcap.facts(conn, ticker) or {}
@@ -749,6 +751,7 @@ def build(conn, ticker: str) -> dict:
         "analyst": analyst,
         "tradingview": tv,
         "financials": fin,
+        "annual_report": annual,
         "dilution": dilution,
         "ownership": own,
         "short": short,
@@ -797,6 +800,8 @@ def format_report(rep: dict) -> str:
         L.append(tradingview.format_view(rep["tradingview"]))
     if rep.get("financials"):
         L.append(_format_financials(rep["financials"]))
+    if rep.get("annual_report"):
+        L.append(annual_report.format_report(rep["annual_report"]))
     if rep.get("dilution"):
         L.append(_format_dilution(rep["dilution"]))
     if rep.get("ownership"):

@@ -291,3 +291,32 @@ def test_new_sections_absent_from_isin_report(conn):
     # TradingView is the one new source that runs for an ISIN (it resolves them);
     # whether it returns data depends on TV coverage, so only assert the key exists.
     assert "tradingview" in rep
+
+
+def test_build_includes_annual_report_for_a_us_ticker(conn, monkeypatch):
+    monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: {"marker": True})
+    rep = research.build(conn, "AAPL")
+    assert rep["annual_report"] == {"marker": True}
+
+
+def test_build_skips_annual_report_for_an_isin(conn, monkeypatch):
+    """ISINs already skip every other CIK-dependent section for the same
+    reason (no confirmed CIK to key the lookup on)."""
+    add_bafin_txn(conn, "DE0007190001", "Someone", 1_000_000)
+    rep = research.build(conn, "DE0007190001")
+    assert rep["annual_report"] is None
+
+
+def test_format_report_includes_the_annual_report_section_when_present(conn, monkeypatch):
+    monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: {"marker": True})
+    monkeypatch.setattr(research.annual_report, "format_report",
+                        lambda rep: "ANNUAL-REPORT-MARKER-TEXT" if rep else "")
+    text = research.format_report(research.build(conn, "AAPL"))
+    assert "ANNUAL-REPORT-MARKER-TEXT" in text
+
+
+def test_format_report_omits_the_annual_report_section_when_absent(conn, monkeypatch):
+    monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: None)
+    text = research.format_report(research.build(conn, "AAPL"))
+    assert "ANNUAL-REPORT-MARKER-TEXT" not in text
+    assert "Годовой отчёт" not in text
