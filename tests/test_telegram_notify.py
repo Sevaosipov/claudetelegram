@@ -185,3 +185,46 @@ def test_format_stake_signal_renders_a_market_note_before_the_source_link():
     note_idx = next(i for i, l in enumerate(lines) if "TradingView" in l)
     link_idx = next(i for i, l in enumerate(lines) if "<a href" in l)
     assert note_idx < link_idx
+
+
+# ------------------------------------------------------ corroborated_by
+#
+# cluster.find_corroboration() sets `.corroborated_by` on a signal after the
+# fact (empty list when nothing else has fired on that ticker); the formatters
+# must render it plainly -- not italicized, unlike market_note, since this is
+# the bot's own data rather than a third party's read -- and simply omit the
+# line when the list is empty.
+
+def test_format_signal_renders_corroborated_by():
+    sig = _cluster()
+    sig.corroborated_by = ["SENATE", "BAFIN"]
+    text = tn.format_signal(sig, html=True)
+    assert "SENATE, BAFIN" in text
+    assert "<i>SENATE" not in text
+
+
+def test_format_signal_omits_corroboration_line_when_empty():
+    text = tn.format_signal(_cluster(), html=True)
+    assert "🔗" not in text
+
+
+def test_format_exit_signal_renders_corroborated_by():
+    sig = _exit()
+    sig.corroborated_by = ["SEC"]
+    text = tn.format_exit_signal(sig, html=True)
+    assert "🔗" in text and "SEC" in text
+
+
+def test_format_stake_signal_renders_corroborated_by():
+    sig = _stake()
+    sig.corroborated_by = ["SEC"]
+    text = tn.format_stake_signal(sig, html=True)
+    assert "🔗" in text and "SEC" in text
+
+
+def test_corroboration_line_never_claims_agreement():
+    sig = _cluster()
+    sig.corroborated_by = ["SENATE"]
+    text = tn.format_signal(sig, html=True).lower()
+    for bad in ("подтверждают", "согласны", "confirms", "agrees"):
+        assert bad not in text
