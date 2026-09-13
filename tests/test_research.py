@@ -354,6 +354,8 @@ def test_format_report_shows_the_corroboration_summary_when_present(conn, monkey
                                                 "recent_sources": ["SEC", "SENATE"]})
     text = research.format_report(research.build(conn, "AAPL"))
     assert "Независимые источники по этому тикеру: SEC, SENATE" in text
+    # When recent_sources == all_sources, the sub-line must be suppressed (no redundancy)
+    assert "за последние" not in text
 
 
 def test_format_report_omits_the_corroboration_summary_when_absent(conn, monkeypatch):
@@ -362,3 +364,17 @@ def test_format_report_omits_the_corroboration_summary_when_absent(conn, monkeyp
     text = research.format_report(research.build(conn, "AAPL"))
     assert "Независимые источники" not in text
     assert "Сигналы, которые бот уже присылал" in text
+
+
+def test_format_report_shows_recent_sources_subline_when_differs(conn, monkeypatch):
+    """When recent_sources != all_sources, the '(за последние N дней: ...)'
+    sub-line must appear with the recent sources list."""
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
+    monkeypatch.setattr(research, "corroboration_summary",
+                        lambda conn, ticker: {"all_sources": ["BAFIN", "SEC", "SENATE"],
+                                                "recent_sources": ["SEC", "SENATE"]})
+    text = research.format_report(research.build(conn, "AAPL"))
+    # All-time sources line must appear
+    assert "Независимые источники по этому тикеру: BAFIN, SEC, SENATE" in text
+    # Recent sources sub-line must appear with correct content
+    assert "за последние 30 дней: SEC, SENATE" in text
