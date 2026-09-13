@@ -206,3 +206,52 @@ def test_enrich_signals_handles_a_mixed_batch_including_an_exit_signal(conn):
     assembled, cluster/stake/exit signals together, in one pass."""
     signals = cluster.enrich_signals(conn, [_signal(), _exit()])
     assert all(hasattr(s, "score") for s in signals)
+
+
+# ----------------------------------------------------------- corroboration
+def test_corroboration_bonus_is_added_to_the_base_score():
+    plain = cluster.score_signal(_signal())
+    corroborated = cluster.score_signal(_signal(), corroborated_by=["SENATE"])
+    assert corroborated > plain
+
+
+def test_corroboration_bonus_scales_with_distinct_sources_then_caps():
+    one = cluster.score_signal(_signal(), corroborated_by=["SENATE"])
+    two = cluster.score_signal(_signal(), corroborated_by=["SENATE", "BAFIN"])
+    many = cluster.score_signal(_signal(), corroborated_by=["SENATE", "BAFIN", "NORWAY", "SWEDEN"])
+    assert one < two
+    assert two == many  # capped
+
+
+def test_corroboration_defaults_to_no_bonus():
+    assert cluster.score_signal(_signal()) == cluster.score_signal(_signal(), corroborated_by=None)
+    assert cluster.score_signal(_signal()) == cluster.score_signal(_signal(), corroborated_by=[])
+
+
+def test_corroboration_bonus_applies_to_stake_and_exit_signals_too():
+    stake = cluster.StakeSignal(source="SEC13DG", ticker="A", company="C", person="P",
+                                form_type="SCHEDULE 13D", percent=9.0, prev_percent=None,
+                                amount_owned=1, event_date="", url="")
+    assert cluster.score_signal(stake, corroborated_by=["SENATE"]) > cluster.score_signal(stake)
+    assert (cluster.score_signal(_exit(), corroborated_by=["SENATE"])
+            > cluster.score_signal(_exit()))
+
+
+def test_corroboration_bonus_stays_within_the_existing_bound(conn):
+    """test_every_component_is_bounded's <250 ceiling, plus the capped
+    corroboration bonus (30) on top, must still be a sane, bounded number."""
+    extreme = _signal(buyer_count=500, value_pct_of_mcap=99.0, position_increase_pct=1000.0,
+                      first_buy=True, lag_days=0, market_cap_eur=1e9, avg_daily_value=1e9)
+    score = cluster.score_signal(extreme, corroborated_by=["SEC", "SENATE", "HOUSE", "BAFIN", "NORWAY"])
+    assert score < 280
+
+
+def test_enrich_signals_sets_corroboration_and_bonus_score(conn):
+    a = _signal(ticker="AAA", source="SEC")
+    b = cluster.ClusterSignal(source="SENATE", ticker="AAA", company="Test", buyer_count=1,
+                              total_value=100_000, members=[], window_start="", window_end="")
+    signals = cluster.enrich_signals(conn, [a, b])
+    by_source = {s.source: s for s in signals}
+    assert by_source["SEC"].corroborated_by == ["SENATE"]
+    assert by_source["SENATE"].corroborated_by == ["SEC"]
+    assert by_source["SEC"].score > cluster.score_signal(_signal(ticker="AAA", source="SEC"))

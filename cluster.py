@@ -760,7 +760,7 @@ def commit_stake_alert(conn, signal: StakeSignal) -> None:
                                  1, [signal.person], signal.percent)
 
 
-def score_signal(sig) -> float:
+def score_signal(sig, corroborated_by: list[str] | None = None) -> float:
     """A number for ORDERING signals by how much attention they deserve.
 
     This is emphatically not a prediction of return, and a higher score is not a
@@ -771,8 +771,10 @@ def score_signal(sig) -> float:
     The components restate the reasoning the tool was built on -- several unrelated
     insiders converging beats one; the people who run a company know more about it
     than a passive holder does; a given sum means more against a small company than
-    a large one; a stale disclosure is worth less than a fresh one -- and the
-    weights are a starting point, not a finding. backtest.py exists to check them.
+    a large one; a stale disclosure is worth less than a fresh one; an independent
+    disclosure regime noticing the same ticker is more than that regime noticing it
+    twice (see find_corroboration) -- and the weights are a starting point, not a
+    finding. backtest.py exists to check them.
     """
     if hasattr(sig, "percent"):   # StakeSignal
         # For a 13D/G the share of the company IS the headline, so it carries the
@@ -782,9 +784,7 @@ def score_signal(sig) -> float:
             score += 25.0   # 13D means the holder may seek to influence control
         if sig.prev_percent is not None:
             score += min(max(sig.percent - sig.prev_percent, 0.0), 20.0) * 2.0
-        return round(score, 1)
-
-    if hasattr(sig, "seller_count"):   # ExitSignal
+    elif hasattr(sig, "seller_count"):   # ExitSignal
         # Exit signals carry none of the buy-side context (officer status, % of
         # market cap, freshness) the general path below scores on -- they are a
         # different kind of event. Score on what they do carry: how many sellers,
@@ -792,25 +792,27 @@ def score_signal(sig) -> float:
         score = min(W_PER_EXTRA_BUYER * max(0, sig.seller_count - 1), CAP_BUYERS)
         if sig.total_buyers and sig.seller_count >= sig.total_buyers:
             score += W_FULL_UNWIND
-        return round(score, 1)
+    else:
+        score = 0.0
+        score += min(W_PER_EXTRA_BUYER * max(0, (sig.buyer_count or 1) - 1), CAP_BUYERS)
+        if not getattr(sig, "holder_only", False):
+            score += W_HAS_OFFICER
+        pct_mcap = sig.value_pct_of_mcap
+        if pct_mcap and pct_mcap <= MAX_CREDIBLE_PCT_OF_MCAP:
+            score += min(W_PCT_OF_MARKET_CAP * (pct_mcap / 0.1), CAP_MARKET_CAP)
+        if sig.position_increase_pct:
+            score += min(W_POSITION_INCREASE * (sig.position_increase_pct / 25.0), CAP_POSITION)
+        if getattr(sig, "first_buy", False):
+            score += W_FIRST_BUY
+        if sig.lag_days is not None:
+            score += W_FRESH * max(0.0, 1.0 - sig.lag_days / FRESH_DECAY_DAYS)
+        if sig.market_cap_eur is None:
+            score += P_UNKNOWN_SIZE
+        if sig.avg_daily_value is not None and sig.avg_daily_value < ILLIQUID_BELOW_EUR:
+            score += P_ILLIQUID
 
-    score = 0.0
-    score += min(W_PER_EXTRA_BUYER * max(0, (sig.buyer_count or 1) - 1), CAP_BUYERS)
-    if not getattr(sig, "holder_only", False):
-        score += W_HAS_OFFICER
-    pct_mcap = sig.value_pct_of_mcap
-    if pct_mcap and pct_mcap <= MAX_CREDIBLE_PCT_OF_MCAP:
-        score += min(W_PCT_OF_MARKET_CAP * (pct_mcap / 0.1), CAP_MARKET_CAP)
-    if sig.position_increase_pct:
-        score += min(W_POSITION_INCREASE * (sig.position_increase_pct / 25.0), CAP_POSITION)
-    if getattr(sig, "first_buy", False):
-        score += W_FIRST_BUY
-    if sig.lag_days is not None:
-        score += W_FRESH * max(0.0, 1.0 - sig.lag_days / FRESH_DECAY_DAYS)
-    if sig.market_cap_eur is None:
-        score += P_UNKNOWN_SIZE
-    if sig.avg_daily_value is not None and sig.avg_daily_value < ILLIQUID_BELOW_EUR:
-        score += P_ILLIQUID
+    if corroborated_by:
+        score += min(W_PER_CORROBORATING_SOURCE * len(corroborated_by), CAP_CORROBORATION)
     return round(score, 1)
 
 
@@ -860,6 +862,8 @@ def enrich_signals(conn, signals: list) -> list:
     """
     import marketcap
 
+    find_corroboration(conn, signals)
+
     for sig in signals:
         cap = marketcap.market_cap_eur(conn, sig.ticker)
         facts = marketcap.facts(conn, sig.ticker) or {}
@@ -868,10 +872,8 @@ def enrich_signals(conn, signals: list) -> list:
                                 if facts.get("avg_daily_value") else None)
         total = getattr(sig, "total_value", None)
         pct = (total / cap * 100) if (cap and total) else None
-        # Keep an implausible ratio out of the score but still visible in the
-        # journal, so backtest.py can see how often the data goes wrong.
         sig.value_pct_of_mcap = pct
-        sig.score = score_signal(sig)
+        sig.score = score_signal(sig, sig.corroborated_by)
     signals.sort(key=lambda x: getattr(x, "score", 0.0), reverse=True)
     return signals
 
