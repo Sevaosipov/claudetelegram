@@ -713,6 +713,7 @@ class StakeSignal:
 def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
                         min_increase_pp: float = STAKE_MIN_INCREASE_PP,
                         activist_only: bool = False,
+                        max_age_days: int | None = None,
                         ignore_alert_state: bool = False) -> list[StakeSignal]:
     """Newly declared or materially increased 5%+ stakes.
 
@@ -736,6 +737,13 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
     all of them, not just the one shown. Two different filing groups on the
     same ticker (different accessions) stay separate signals -- those are
     genuinely different holders.
+
+    `max_age_days` drops a candidate whose own event_date is older than that
+    many days. Unlike this file's other finders, which scope to `window_days`
+    back from today by construction, sec_stakes has no natural recency window
+    -- without this a stake signal can resurface a filing that's years old.
+    None (the default) keeps every filing regardless of age, matching every
+    other parameter here: off unless asked for.
     """
     rows = conn.execute(
         """SELECT ticker, issuer_cik, issuer_name, person_name, form_type, event_date,
@@ -763,6 +771,13 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
             continue
         if activist_only and not form_type.startswith("SCHEDULE 13D"):
             continue
+        if max_age_days is not None:
+            try:
+                age_days = (dt.date.today() - dt.date.fromisoformat(event_date)).days
+            except (TypeError, ValueError):
+                age_days = None
+            if age_days is not None and age_days > max_age_days:
+                continue
 
         prev_pct = filings[-2][6] if len(filings) > 1 else None
         if prev_pct is not None and pct - prev_pct < min_increase_pp:

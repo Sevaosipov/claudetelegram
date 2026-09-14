@@ -264,6 +264,27 @@ def test_find_stake_signals_keeps_different_filings_separate(conn):
     assert all(s.co_filer_names == [] for s in signals)
 
 
+def test_find_stake_signals_drops_filings_older_than_max_age_days(conn):
+    """Unlike the cluster finders (which scope to window_days back from today
+    by construction), sec_stakes has no natural recency window -- without
+    max_age_days a stake signal can resurface a filing that's years old."""
+    old = (TODAY - dt.timedelta(days=100)).isoformat()
+    add_stake(conn, "AAA", "Old Fund", 12.5, event_date=old)
+    assert cluster.find_stake_signals(conn, max_age_days=30) == []
+
+
+def test_find_stake_signals_keeps_filings_within_max_age_days(conn):
+    add_stake(conn, "AAA", "Recent Fund", 12.5, event_date=RECENT)
+    signals = cluster.find_stake_signals(conn, max_age_days=30)
+    assert len(signals) == 1
+
+
+def test_find_stake_signals_max_age_days_defaults_to_no_filtering(conn):
+    old = (TODAY - dt.timedelta(days=400)).isoformat()
+    add_stake(conn, "AAA", "Old Fund", 12.5, event_date=old)
+    assert len(cluster.find_stake_signals(conn)) == 1
+
+
 def test_find_stake_signals_merged_group_does_not_refire_after_commit(conn):
     """Committing a merged signal must record alert-state for every co-filer,
     not just the one shown -- otherwise an un-recorded co-filer looks 'new'

@@ -165,6 +165,12 @@ def _render_signals(conn) -> None:
     notable signals surface first instead of printing in arbitrary finder
     order -- this does reach the network (market cap/liquidity), unlike the
     finders above, which is why it's a separate step.
+
+    Stake signals also get a 30-day freshness cutoff (max_age_days), matching
+    CORROBORATION_WINDOW_DAYS's existing "recent enough to matter" convention.
+    Unlike the cluster finders below, which are inherently scoped to recent
+    activity by their own window_days, sec_stakes has no such window -- without
+    this a filing years old could resurface here just for still crossing 10%.
     """
     signals = (
         cluster.find_sec_clusters(conn, ignore_alert_state=True)
@@ -174,7 +180,7 @@ def _render_signals(conn) -> None:
         + cluster.find_norway_clusters(conn, ignore_alert_state=True)
         + cluster.find_sweden_clusters(conn, ignore_alert_state=True)
         + cluster.find_stake_signals(conn, min_percent=10.0, activist_only=True,
-                                      ignore_alert_state=True)
+                                      max_age_days=30, ignore_alert_state=True)
         + cluster.find_sec_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_house_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_senate_exit_signals(conn, ignore_alert_state=True)
