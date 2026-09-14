@@ -201,8 +201,11 @@ CAP_CORROBORATION = 30.0            # caps at 2 corroborating sources' worth
 
 # SEC13DG (a 13D/G stake filing) and SEC (a Form 4 insider cluster) can both
 # come from the same >10%-holder's single position change, so they don't count
-# as independent corroboration of each other -- everything else maps to itself.
-_REGIME = {"SEC13DG": "SEC"}
+# as independent corroboration of each other. HOUSE and SENATE are both
+# STOCK Act PTR filings -- different chambers, same regulatory framework --
+# so they're collapsed too, a weaker case (genuinely different filers) but
+# the same regime for this purpose. Everything else maps to itself.
+_REGIME = {"SEC13DG": "SEC", "SENATE": "HOUSE"}
 
 
 def _regime(source: str) -> str:
@@ -846,10 +849,11 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
     just what counted toward it.
 
     "Source" and "regime" aren't always the same thing -- see _REGIME: SEC and
-    SEC13DG collapse to one regime, so a Form 4 cluster and a 13D/G stake from
-    the same underlying position change don't corroborate each other. The
-    stored/displayed source name is still the real one (e.g. "SEC13DG"), only
-    the independence check is regime-based.
+    SEC13DG collapse to one regime, and HOUSE/SENATE collapse to another, so
+    e.g. a Form 4 cluster and a same-ticker 13D/G stake, or a House PTR and a
+    Senate PTR, don't corroborate each other. The stored/displayed source name
+    is still the real one (e.g. "SEC13DG", "SENATE"), only the independence
+    check is regime-based.
     """
     tickers = sorted({sig.ticker for sig in signals})
     if not tickers:

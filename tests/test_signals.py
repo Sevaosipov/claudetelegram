@@ -574,6 +574,30 @@ def test_corroboration_still_fires_across_genuinely_different_regimes(conn):
     assert signals[0].corroborated_by == ["SENATE"]
 
 
+def test_corroboration_treats_house_and_senate_as_the_same_regime(conn):
+    """House and Senate PTRs are both STOCK Act filings -- different chambers
+    of the same regulatory framework, not independent regimes. Weaker case
+    than SEC/SEC13DG (genuinely different filers, unlike a single >10%-holder
+    generating both an SEC filing pair), but the same collapse applies."""
+    add_house_txn(conn, "AAA", "Rep A", "$100,001 - $250,000", date=_house_date(5))
+    add_house_txn(conn, "AAA", "Rep B", "$100,001 - $250,000", date=_house_date(2))
+    _journal_row(conn, "AAA", "SENATE", days_ago=5)
+    signals = cluster.find_house_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == []
+
+
+def test_corroboration_house_senate_regime_is_symmetric(conn):
+    """The House/Senate regime collapse has to work from the Senate side too,
+    not just the House side."""
+    add_senate_txn(conn, "AAA", "Sen. One", "$60,001 - $100,000", date=RECENT)
+    add_senate_txn(conn, "AAA", "Sen. Two", "$60,001 - $100,000", date=RECENT)
+    _journal_row(conn, "AAA", "HOUSE", days_ago=5)
+    signals = cluster.find_senate_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == []
+
+
 def test_corroboration_includes_exit_signals(conn):
     """Exits count on either side -- co-occurrence, not agreement. See
     cluster.find_corroboration's docstring."""

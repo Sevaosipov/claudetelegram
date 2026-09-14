@@ -47,18 +47,19 @@ Brainstormed and scoped with the user:
   standing as every other weight in `score_signal` — its docstring already
   says as much for the existing components, and this one is added under the
   same disclaimer, not a special case.
-- **Resolved 2026-09-14: `SEC` and `SEC13DG` are mapped to one regime.**
-  A Form 4 insider cluster (`SEC`) and a 13D/G stake filing (`SEC13DG`) on the
-  same ticker can both come from the same >10%-holder's single position
-  change, so `find_corroboration` no longer treats them as independent —
-  see `cluster._REGIME`. Flagged by the final whole-branch review as a known
-  limitation, initially left unfixed pending the user's explicit decision
-  (changing it alters scoring semantics); the user then asked for the fix.
-  The displayed/journaled source name is still the real one (`SEC13DG`, not
-  a generic regime label) — only the independence check is regime-based.
-  House and Senate PTRs are a weaker version of the same issue (both are
-  STOCK Act filings, different chambers) and remain separate sources; not
-  addressed here since it wasn't asked for.
+- **Resolved 2026-09-14: `SEC`/`SEC13DG` and `HOUSE`/`SENATE` are each mapped
+  to one regime.** A Form 4 insider cluster (`SEC`) and a 13D/G stake filing
+  (`SEC13DG`) on the same ticker can both come from the same >10%-holder's
+  single position change, so `find_corroboration` no longer treats them as
+  independent — see `cluster._REGIME`. Flagged by the final whole-branch
+  review as a known limitation, initially left unfixed pending the user's
+  explicit decision (changing it alters scoring semantics); the user then
+  asked for the fix, and asked for the same treatment for House and Senate
+  PTRs — both STOCK Act filings, different chambers of the same regulatory
+  framework, a weaker case (genuinely different filers) than SEC/SEC13DG but
+  collapsed the same way. The displayed/journaled source name is still the
+  real one (`SEC13DG`, `SENATE`, not a generic regime label) — only the
+  independence check is regime-based.
 
 ## Architecture
 
