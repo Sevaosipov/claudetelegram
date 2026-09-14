@@ -714,6 +714,7 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
                         min_increase_pp: float = STAKE_MIN_INCREASE_PP,
                         activist_only: bool = False,
                         max_age_days: int | None = None,
+                        new_positions_only: bool = False,
                         ignore_alert_state: bool = False) -> list[StakeSignal]:
     """Newly declared or materially increased 5%+ stakes.
 
@@ -744,6 +745,20 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
     -- without this a stake signal can resurface a filing that's years old.
     None (the default) keeps every filing regardless of age, matching every
     other parameter here: off unless asked for.
+
+    `new_positions_only` drops every amendment outright, however large --
+    a holder already at 20% jumping to 40% is still the same holder, not a
+    new activist showing up. This is a stricter, different bar than
+    `min_increase_pp` (which still requires an amendment be material), not a
+    bigger version of it; the two are mutually exclusive in effect since
+    `new_positions_only` skips the amendment path entirely.
+
+    Checked via `form_type` ("SCHEDULE 13D"/"13G" vs "...{D,G}/A"), the SEC's
+    own designation for an original filing vs. an amendment -- deliberately
+    NOT via "is this the first row we've seen for this holder", which this
+    project's own scan history cannot answer reliably yet: 13D/G tracking is
+    young, so for most holders the first row we HAVE is already an amendment
+    to a long-standing real position. form_type has no such blind spot.
     """
     rows = conn.execute(
         """SELECT ticker, issuer_cik, issuer_name, person_name, form_type, event_date,
@@ -780,7 +795,10 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
                 continue
 
         prev_pct = filings[-2][6] if len(filings) > 1 else None
-        if prev_pct is not None and pct - prev_pct < min_increase_pp:
+        if new_positions_only:
+            if form_type.endswith("/A"):
+                continue
+        elif prev_pct is not None and pct - prev_pct < min_increase_pp:
             continue
 
         state_key = f"{key}|{person}"

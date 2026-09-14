@@ -171,6 +171,11 @@ def _render_signals(conn) -> None:
     Unlike the cluster finders below, which are inherently scoped to recent
     activity by their own window_days, sec_stakes has no such window -- without
     this a filing years old could resurface here just for still crossing 10%.
+
+    new_positions_only=True as well: a measured week showed 20 qualifying
+    stake filings but only 1 was a genuine first-ever activist position, the
+    other 19 were 13D/A amendments to already-known holders -- dropped
+    entirely here, matching run_daily.sh's scheduled digest.
     """
     signals = (
         cluster.find_sec_clusters(conn, ignore_alert_state=True)
@@ -180,7 +185,8 @@ def _render_signals(conn) -> None:
         + cluster.find_norway_clusters(conn, ignore_alert_state=True)
         + cluster.find_sweden_clusters(conn, ignore_alert_state=True)
         + cluster.find_stake_signals(conn, min_percent=10.0, activist_only=True,
-                                      max_age_days=30, ignore_alert_state=True)
+                                      max_age_days=30, new_positions_only=True,
+                                      ignore_alert_state=True)
         + cluster.find_sec_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_house_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_senate_exit_signals(conn, ignore_alert_state=True)

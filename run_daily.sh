@@ -49,4 +49,9 @@ trap notify_failure EXIT
 # score at all". Tuned against the real backlog measured on 2026-09-12: cut 604
 # stake signals to 219 and 46 insider/political cluster signals to 13. Starting
 # points, not a finding -- same caveat as score_signal's own weights.
-python bot.py --once --stake-min-percent 10 --activist-only --min-score 35
+#
+# --new-positions-only added 2026-09-14: most of that 219 turned out to be
+# 13D/A amendments (an already-known holder's stake shifting), not new
+# activists -- one measured week had 20 qualifying stake filings but only 1
+# was a genuine first-ever filing. This drops amendments entirely.
+python bot.py --once --stake-min-percent 10 --activist-only --new-positions-only --min-score 35

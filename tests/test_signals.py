@@ -221,6 +221,33 @@ def test_material_stake_increase_is_news(conn):
     assert len(signals) == 1 and signals[0].prev_percent == 6.0
 
 
+def test_new_positions_only_drops_amendments_however_large(conn):
+    """An existing holder's stake jumping is still an amendment, not a new
+    activist showing up -- new_positions_only is a stricter bar than
+    min_increase_pp, not a bigger version of the same check."""
+    add_stake(conn, "AAA", "Activist Fund", 6.0, event_date="2026-08-01")
+    add_stake(conn, "AAA", "Activist Fund", 40.0, form_type="SCHEDULE 13D/A",
+              event_date="2026-09-01")
+    assert cluster.find_stake_signals(conn, new_positions_only=True) == []
+
+
+def test_new_positions_only_keeps_a_genuine_first_filing(conn):
+    add_stake(conn, "AAA", "Brand New Activist", 12.5)
+    signals = cluster.find_stake_signals(conn, new_positions_only=True)
+    assert len(signals) == 1 and signals[0].prev_percent is None
+
+
+def test_new_positions_only_drops_an_amendment_with_no_prior_local_history(conn):
+    """The database only recently started tracking 13D/G filings, so for most
+    holders the very first row WE have is already an amendment to a
+    long-standing real position -- prev_pct being None (nothing seen before
+    in our own history) must not be mistaken for "this is a new position".
+    The SEC's own form_type ("SCHEDULE 13D" vs "...13D/A") is the actual
+    signal, independent of how much scan history we happen to have."""
+    add_stake(conn, "AAA", "Long-Standing Holder", 12.5, form_type="SCHEDULE 13D/A")
+    assert cluster.find_stake_signals(conn, new_positions_only=True) == []
+
+
 def test_stake_alert_state_is_per_holder(conn):
     """Two unrelated funds building stakes in the same company are two separate
     pieces of news; one must not mask the other."""

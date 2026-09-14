@@ -583,7 +583,8 @@ def run_cluster_pass(conn, args) -> list:
     if sources["sec"] and ("13D" in _sec_forms(args) or "13G" in _sec_forms(args)):
         signals += cluster.find_stake_signals(conn, min_percent=args.stake_min_percent,
                                                min_increase_pp=args.stake_min_increase,
-                                               activist_only=args.activist_only)
+                                               activist_only=args.activist_only,
+                                               new_positions_only=args.new_positions_only)
     if not args.no_exit_signals:
         if sources["sec"]:
             signals += cluster.find_sec_exit_signals(conn)
@@ -846,6 +847,10 @@ def main():
     ap.add_argument("--activist-only", action="store_true",
                      help="only alert on Schedule 13D stakes (holders who may seek to influence "
                           "control), skipping passive 13G filers like index funds")
+    ap.add_argument("--new-positions-only", action="store_true",
+                     help="only alert on a holder's first-ever stake filing on a ticker -- drops "
+                          "13D/G amendments entirely, however large the increase, since an "
+                          "already-known holder growing their stake is not a new activist showing up")
     ap.add_argument("--sweden-only", action="store_true")
     ap.add_argument("--no-sweden", action="store_true",
                      help="skip Sweden (Finansinspektionen's insider register)")
