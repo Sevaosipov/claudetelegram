@@ -199,6 +199,15 @@ CORROBORATION_WINDOW_DAYS = 30
 W_PER_CORROBORATING_SOURCE = 15.0   # per distinct other source active on this ticker
 CAP_CORROBORATION = 30.0            # caps at 2 corroborating sources' worth
 
+# SEC13DG (a 13D/G stake filing) and SEC (a Form 4 insider cluster) can both
+# come from the same >10%-holder's single position change, so they don't count
+# as independent corroboration of each other -- everything else maps to itself.
+_REGIME = {"SEC13DG": "SEC"}
+
+
+def _regime(source: str) -> str:
+    return _REGIME.get(source, source)
+
 
 @dataclass
 class ClusterSignal:
@@ -835,6 +844,12 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
     that were actually journaled (i.e. actually sent) -- "another regime had
     activity" still holds true either way, so this doesn't change the result,
     just what counted toward it.
+
+    "Source" and "regime" aren't always the same thing -- see _REGIME: SEC and
+    SEC13DG collapse to one regime, so a Form 4 cluster and a 13D/G stake from
+    the same underlying position change don't corroborate each other. The
+    stored/displayed source name is still the real one (e.g. "SEC13DG"), only
+    the independence check is regime-based.
     """
     tickers = sorted({sig.ticker for sig in signals})
     if not tickers:
@@ -856,8 +871,9 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
         journal_sources[ticker].add(source)
 
     for sig in signals:
-        others = (batch_sources[sig.ticker] | journal_sources[sig.ticker]) - {sig.source}
-        sig.corroborated_by = sorted(others)
+        all_sources = batch_sources[sig.ticker] | journal_sources[sig.ticker]
+        own_regime = _regime(sig.source)
+        sig.corroborated_by = sorted(s for s in all_sources if _regime(s) != own_regime)
 
 
 def enrich_signals(conn, signals: list) -> list:

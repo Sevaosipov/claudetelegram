@@ -537,6 +537,43 @@ def test_corroboration_deduplicates_repeated_sources(conn):
     assert signals[0].corroborated_by == []
 
 
+def test_corroboration_treats_sec_and_sec13dg_as_the_same_regime(conn):
+    """A Form 4 insider cluster and a 13D/G stake filing can both come from the
+    same >10%-holder's single position change -- not independent corroboration,
+    even though they're two different source labels. See the design spec's
+    Non-goals for why this pairing specifically, unlike e.g. SEC vs SENATE."""
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    _journal_row(conn, "AAA", "SEC13DG", days_ago=5)
+    signals = cluster.find_sec_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == []
+
+
+def test_corroboration_regime_mapping_is_symmetric(conn):
+    """The SEC/SEC13DG regime collapse has to work from the stake-signal side
+    too, not just the cluster side."""
+    stake = cluster.StakeSignal(source="SEC13DG", ticker="AAA", company="Test",
+                                 person="Big Fund", form_type="SCHEDULE 13D",
+                                 percent=9.0, prev_percent=None, amount_owned=1,
+                                 event_date="", url="")
+    _journal_row(conn, "AAA", "SEC", days_ago=5)
+    cluster.find_corroboration(conn, [stake])
+    assert stake.corroborated_by == []
+
+
+def test_corroboration_still_fires_across_genuinely_different_regimes(conn):
+    """The regime collapse must not swallow real cross-source corroboration --
+    SEC and SENATE are unrelated regulatory regimes, not a collapsed pair."""
+    add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
+    add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
+    _journal_row(conn, "AAA", "SEC13DG", days_ago=5)
+    _journal_row(conn, "AAA", "SENATE", days_ago=5)
+    signals = cluster.find_sec_clusters(conn)
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == ["SENATE"]
+
+
 def test_corroboration_includes_exit_signals(conn):
     """Exits count on either side -- co-occurrence, not agreement. See
     cluster.find_corroboration's docstring."""
