@@ -105,6 +105,23 @@ def test_format_stake_signal_plain_mode_keeps_a_bare_url_line():
     assert "https://sec.gov/x?a=1&b=2" in text.splitlines()[-1]
 
 
+def test_format_stake_signal_shows_co_filer_count():
+    sig = _stake(co_filer_names=["Fund GP LLC", "Individual Manager"])
+    text = tn.format_stake_signal(sig)
+    assert "(+2 содокладчика)" in text
+
+
+def test_format_stake_signal_singular_co_filer():
+    sig = _stake(co_filer_names=["Fund GP LLC"])
+    text = tn.format_stake_signal(sig)
+    assert "(+1 содокладчик)" in text and "содокладчика" not in text
+
+
+def test_format_stake_signal_omits_co_filer_tag_when_solo():
+    text = tn.format_stake_signal(_stake())
+    assert "содокладчик" not in text
+
+
 def test_format_any_signal_dispatches_html_flag_to_the_right_formatter():
     assert tn.format_any_signal(_cluster(), html=True) == tn.format_signal(_cluster(), html=True)
     assert tn.format_any_signal(_exit(), html=True) == tn.format_exit_signal(_exit(), html=True)

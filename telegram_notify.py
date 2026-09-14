@@ -323,7 +323,13 @@ def format_stake_signal(sig, *, html: bool = False) -> str:
     holder may seek to influence control -- so they're labelled differently."""
     kind = "🐋 АКТИВИСТ" if sig.is_activist else "📊 КРУПНЫЙ ДЕРЖАТЕЛЬ"
     delta = f" (было {sig.prev_percent:.2f}%)" if sig.prev_percent is not None else ""
-    headline = f"{kind}: {sig.ticker} — {sig.person} {sig.percent:.2f}% компании{delta}"
+    co_filers = getattr(sig, "co_filer_names", None) or []
+    # Same underlying filing, other required reporting persons (GP/LP/individual
+    # managers) -- shown as a count, not every name, so the headline stays one line.
+    co_filer_tag = (f" (+{len(co_filers)} "
+                     f"{_plural(len(co_filers), 'содокладчик', 'содокладчика', 'содокладчиков')})"
+                     if co_filers else "")
+    headline = f"{kind}: {sig.ticker} — {sig.person}{co_filer_tag} {sig.percent:.2f}% компании{delta}"
     lines = [_b(headline, html)]
     lines.append(f"   {_esc(sig.company) if html else sig.company}")
     detail = sig.form_type

@@ -240,6 +240,41 @@ def test_activist_only_skips_passive_filers(conn):
     assert tickers == {"BBB"}
 
 
+def test_find_stake_signals_merges_co_filers_of_the_same_filing(conn):
+    """SEC rules require every control person in a fund's ownership chain (GP,
+    LP, individual managers) to be listed as its own 'reporting person' on ONE
+    filing -- without merging, one filing with N co-filers becomes N
+    near-identical signals, which is exactly what flooded the digest."""
+    add_stake(conn, "AAA", "Fund GP LLC", 12.5, accession="acc-1")
+    add_stake(conn, "AAA", "Fund LP", 12.5, accession="acc-1")
+    add_stake(conn, "AAA", "Individual Manager", 12.5, accession="acc-1")
+    signals = cluster.find_stake_signals(conn)
+    assert len(signals) == 1
+    assert signals[0].person == "Fund GP LLC"
+    assert signals[0].co_filer_names == ["Fund LP", "Individual Manager"]
+
+
+def test_find_stake_signals_keeps_different_filings_separate(conn):
+    """Two different filing groups on the same ticker are genuinely different
+    holders, not co-filers of the same position -- must not be merged."""
+    add_stake(conn, "AAA", "Fund One GP", 12.5, accession="acc-1")
+    add_stake(conn, "AAA", "Fund Two GP", 9.0, accession="acc-2")
+    signals = cluster.find_stake_signals(conn)
+    assert len(signals) == 2
+    assert all(s.co_filer_names == [] for s in signals)
+
+
+def test_find_stake_signals_merged_group_does_not_refire_after_commit(conn):
+    """Committing a merged signal must record alert-state for every co-filer,
+    not just the one shown -- otherwise an un-recorded co-filer looks 'new'
+    again on the very next run and the whole group re-fires anyway."""
+    add_stake(conn, "AAA", "Fund GP LLC", 12.5, accession="acc-1")
+    add_stake(conn, "AAA", "Fund LP", 12.5, accession="acc-1")
+    signals = cluster.find_stake_signals(conn)
+    cluster.commit_stake_alert(conn, signals[0])
+    assert cluster.find_stake_signals(conn) == []
+
+
 # ------------------------------------------------------- scanned-days ledger
 def test_unscanned_days_are_returned_and_today_is_always_included(conn):
     days = bot._days_to_scan(conn, "SEC", lookback_days=4, max_new_days=5)

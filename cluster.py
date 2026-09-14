@@ -699,6 +699,11 @@ class StakeSignal:
     event_date: str
     url: str
     corroborated_by: list[str] = field(default_factory=list)
+    # Other reporting persons on the SAME filing (accession) as `person` -- SEC
+    # rules require every control person in a fund's ownership chain (GP, LP,
+    # individual managers) to be listed separately, even though they're one
+    # economic position. See find_stake_signals.
+    co_filer_names: list[str] = field(default_factory=list)
 
     @property
     def is_activist(self) -> bool:
@@ -721,6 +726,16 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
     Alert state is keyed per (issuer, holder) rather than per issuer -- two
     unrelated funds building stakes in the same company are two separate pieces of
     news, and one must not mask the other.
+
+    Co-filers of the SAME accession (SEC requires every control person in a
+    fund's ownership chain -- the GP, the LP, individual managers -- to be
+    listed as its own "reporting person" on one filing) are merged into a
+    single signal: one economic position, not N near-identical ones. The
+    first-listed filer becomes the signal's `person`; the rest land in
+    `co_filer_names`, which commit_stake_alert uses to suppress re-firing for
+    all of them, not just the one shown. Two different filing groups on the
+    same ticker (different accessions) stay separate signals -- those are
+    genuinely different holders.
     """
     rows = conn.execute(
         """SELECT ticker, issuer_cik, issuer_name, person_name, form_type, event_date,
@@ -737,7 +752,9 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
         ticker, issuer_cik, issuer_name, person, form_type, event_date, pct, amount, url, acc, found = r
         history.setdefault((ticker or issuer_cik, person), []).append(r)
 
-    signals = []
+    # Filers that qualify individually, kept with the accession their qualifying
+    # filing was on so co-filers of ONE filing can be merged in the next pass.
+    candidates = []
     for (key, person), filings in history.items():
         latest = filings[-1]
         (ticker, issuer_cik, issuer_name, person_name, form_type, event_date,
@@ -759,17 +776,33 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
                 if last_pct is not None and pct - last_pct < min_increase_pp:
                     continue
 
+        candidates.append((ticker or issuer_cik, acc, latest, prev_pct))
+
+    by_filing: dict[tuple, list] = {}
+    for ticker, acc, row, prev_pct in candidates:
+        by_filing.setdefault((ticker, acc), []).append((row, prev_pct))
+
+    signals = []
+    for (ticker, acc), entries in by_filing.items():
+        (_t, _cik, issuer_name, person_name, form_type, event_date,
+         pct, amount, url, _acc, _found), prev_pct = entries[0]
+        co_filer_names = [row[3] for row, _ in entries[1:]]
         signals.append(StakeSignal(
-            source="SEC13DG", ticker=ticker or issuer_cik, company=issuer_name,
+            source="SEC13DG", ticker=ticker, company=issuer_name,
             person=person_name, form_type=form_type, percent=pct, prev_percent=prev_pct,
             amount_owned=amount, event_date=event_date, url=url,
+            co_filer_names=co_filer_names,
         ))
     return signals
 
 
 def commit_stake_alert(conn, signal: StakeSignal) -> None:
-    db.save_cluster_alert_state(conn, "SEC13DG", f"{signal.ticker}|{signal.person}",
-                                 1, [signal.person], signal.percent)
+    """Records alert-state for `signal.person` AND every name in
+    co_filer_names -- a merged signal's un-recorded co-filer would otherwise
+    look "new" again on the very next run and re-fire the whole group."""
+    for person in [signal.person] + signal.co_filer_names:
+        db.save_cluster_alert_state(conn, "SEC13DG", f"{signal.ticker}|{person}",
+                                     1, [person], signal.percent)
 
 
 def score_signal(sig, corroborated_by: list[str] | None = None) -> float:
