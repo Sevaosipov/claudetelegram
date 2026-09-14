@@ -151,10 +151,17 @@ def _render_politicians(conn) -> list:
     return top
 
 
+SIGNALS_MIN_SCORE = 50.0  # tuned 2026-09-14 against real data: at this bar, the
+# roughly 4-6 weeks of signal history in the database at the time measured ~21
+# signals, close to a 2-5/week target -- a starting point, not a finding, same
+# caveat every other threshold in this project carries.
+
+
 def _render_signals(conn) -> None:
-    """Every currently-qualifying signal, including ones already sent to Telegram
-    earlier (unlike bot.py, which only alerts on growth since last time) -- this
-    view is a browse, not a digest, so nothing here is deduplicated across runs.
+    """Every currently-qualifying signal at or above SIGNALS_MIN_SCORE, including
+    ones already sent to Telegram earlier (unlike bot.py, which only alerts on
+    growth since last time) -- this view is a browse, not a digest, so nothing
+    here is deduplicated across runs.
 
     Stake signals use the same tuning as run_daily.sh's scheduled digest
     (--stake-min-percent 10 --activist-only) rather than find_stake_signals's
@@ -198,6 +205,10 @@ def _render_signals(conn) -> None:
         print("Сейчас нет ни одного сигнала, удовлетворяющего порогам (см. cluster.py).")
         return
     signals = cluster.enrich_signals(conn, signals)
+    signals = [s for s in signals if getattr(s, "score", 0.0) >= SIGNALS_MIN_SCORE]
+    if not signals:
+        print(f"Сейчас нет сигналов с баллом >= {SIGNALS_MIN_SCORE:.0f} (см. cluster.py).")
+        return
     for s in signals:
         print(telegram_notify.format_any_signal(s))
         print()
