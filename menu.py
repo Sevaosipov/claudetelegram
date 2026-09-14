@@ -153,7 +153,19 @@ def _render_politicians(conn) -> list:
 
 def _render_signals(conn) -> None:
     """Every currently-qualifying signal, including ones already sent to Telegram
-    earlier (unlike bot.py, which only alerts on growth since last time)."""
+    earlier (unlike bot.py, which only alerts on growth since last time) -- this
+    view is a browse, not a digest, so nothing here is deduplicated across runs.
+
+    Stake signals use the same tuning as run_daily.sh's scheduled digest
+    (--stake-min-percent 10 --activist-only) rather than find_stake_signals's
+    bare 5%/include-13G defaults, for the same reason that tuning exists there:
+    the SEC's bare 5% filing trigger is mostly routine 13G ownership crossings,
+    not the activist/insider-adjacent activity this report is for. Ranked by
+    score (enrich_signals, same ranking bot.py's alerts use) so the most
+    notable signals surface first instead of printing in arbitrary finder
+    order -- this does reach the network (market cap/liquidity), unlike the
+    finders above, which is why it's a separate step.
+    """
     signals = (
         cluster.find_sec_clusters(conn, ignore_alert_state=True)
         + cluster.find_house_clusters(conn, ignore_alert_state=True)
@@ -161,7 +173,8 @@ def _render_signals(conn) -> None:
         + cluster.find_bafin_clusters(conn, ignore_alert_state=True)
         + cluster.find_norway_clusters(conn, ignore_alert_state=True)
         + cluster.find_sweden_clusters(conn, ignore_alert_state=True)
-        + cluster.find_stake_signals(conn, ignore_alert_state=True)
+        + cluster.find_stake_signals(conn, min_percent=10.0, activist_only=True,
+                                      ignore_alert_state=True)
         + cluster.find_sec_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_house_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_senate_exit_signals(conn, ignore_alert_state=True)
@@ -172,6 +185,7 @@ def _render_signals(conn) -> None:
     if not signals:
         print("Сейчас нет ни одного сигнала, удовлетворяющего порогам (см. cluster.py).")
         return
+    signals = cluster.enrich_signals(conn, signals)
     for s in signals:
         print(telegram_notify.format_any_signal(s))
         print()
