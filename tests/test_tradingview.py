@@ -64,9 +64,12 @@ def test_analyze_survives_missing_fundamentals():
 
 
 def test_format_view_labels_the_gauge_as_tradingviews_not_the_bots():
+    """The methodology hedge (mechanical, no predictive value) was removed at
+    the user's explicit request; the attribution -- whose number this is --
+    stays, since opinion.py now has its own real bot opinion elsewhere and
+    conflating the two would be a genuine mix-up, not just boilerplate."""
     text = tv.format_view(tv.analyze(_snap(**{"Recommend.All": 0.6})))
     assert "они называют это «Strong Buy»" in text
-    assert "не имеет доказанной предсказательной" in text
     assert "а не мнение бота" in text
 
 

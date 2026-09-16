@@ -247,7 +247,7 @@ def _news_component(news: list) -> tuple[float, str | None]:
         return 0.0, None
     net = bull - bear
     pts = max(-CAP_NEWS, min(CAP_NEWS, net * W_NEWS_PER_NET_HEADLINE))
-    return pts, f"Новости (keyword): {bull} бычьих, {bear} медвежьих из {len(news)} — грубо"
+    return pts, f"Новости (keyword): {bull} бычьих, {bear} медвежьих из {len(news)}"
 
 
 _COMPONENTS = (
@@ -289,6 +289,5 @@ def format_opinion(op: dict | None) -> str:
     L = [f"\n💡 ОПИНИОН: {op['label']}  (score {op['score']:+.0f})"]
     for pts, note in op["factors"]:
         L.append(f"  {pts:+5.1f}  {note}")
-    L.append("  • Веса — рассуждение, не бэктест")
-    L.append("  • Новости выше — грубый keyword-счёт; разбор от Claude придёт отдельным сообщением")
+    L.append("  Разбор новостей от Claude — отдельным сообщением.")
     return "\n".join(L)

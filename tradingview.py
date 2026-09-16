@@ -255,7 +255,5 @@ def format_view(view: dict | None) -> str:
         fund.append(f"дневная волатильность {view['volatility_d']:.1f}%")
     if fund:
         L.append("  " + " · ".join(fund))
-    L.append("  ⚠️ Рейтинг TradingView — механическая свёртка ~26 индикаторов, меняется")
-    L.append("     внутри дня, смотрит только назад и не имеет доказанной предсказательной")
-    L.append("     силы. Это то, что видит любой пользователь TradingView, а не мнение бота.")
+    L.append("  Технический рейтинг TradingView, а не мнение бота.")
     return "\n".join(L)

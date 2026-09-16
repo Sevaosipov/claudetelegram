@@ -247,14 +247,17 @@ def test_isin_report_has_no_analyst_section(conn):
     assert rep["analyst"] is None
 
 
-def test_analyst_section_carries_the_caveat_and_no_bot_verdict(conn):
+def test_analyst_section_carries_the_attribution_and_no_bot_verdict(conn):
+    """The "targets run optimistic" methodology hedge was removed at the
+    user's explicit request; the attribution -- this is sell-side's number,
+    not the bot's -- stays, same reasoning as the TradingView section (see
+    test_tradingview.py), since opinion.py has its own real bot opinion now."""
     view = {"consensus": "Buy", "analyst_count": 20, "thin": False,
             "counts": {"sb": 5, "b": 10, "h": 4, "s": 1, "ss": 0}, "trend": "позитивнее",
             "target_mean": 130.0, "target_high": 160.0, "target_low": 100.0,
             "target_stale": False, "implied_upside_pct": 30.0, "recent_actions": []}
     text = research._format_analyst(view)
     assert "не прогноз бота" in text
-    assert "завышен" in text          # the "targets run optimistic" caveat
     for verdict in ("РЕКОМЕНДУЕМ", "СТОИТ КУПИТЬ", "покупайте", "наш прогноз"):
         assert verdict not in text
 

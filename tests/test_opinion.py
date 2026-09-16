@@ -91,11 +91,12 @@ def test_labels_follow_score_thresholds():
     assert label(-50) == "Избегать"
 
 
-def test_format_opinion_includes_every_factor_and_the_methodology_note():
-    """No "not investment advice" framing (removed at the user's explicit
-    request -- they said they already know), but the methodology caveat
-    (weights are reasoned, not backtested) stays: that's not a disclaimer
-    about advice, it's honesty about how reliable the number is."""
+def test_format_opinion_includes_every_factor_no_disclaimer_or_methodology_hedge():
+    """No "not investment advice" framing and no methodology hedges ("not
+    backtested", "crude keyword count", "mechanical not predictive", etc.) --
+    all removed at the user's explicit, repeated request. Only the pointer to
+    the follow-up Claude analysis stays, since that's operational information
+    (another message is coming), not a caveat about this one's reliability."""
     rep = _rep(
         insiders={"buys": [(TODAY, "A", "CEO", 1, 1, 0, 1, 0, 0, "u")], "sells": []},
         analyst={"consensus": "Strong Buy", "implied_upside_pct": 15.0, "target_stale": False},
@@ -105,8 +106,9 @@ def test_format_opinion_includes_every_factor_and_the_methodology_note():
     assert op["label"] in text
     for _, note in op["factors"]:
         assert note in text
-    assert "не бэктест" in text
-    assert "лицензированная" not in text.lower()
+    for hedge in ("не бэктест", "грубо", "лицензированная"):
+        assert hedge not in text.lower()
+    assert "Claude" in text  # the operational follow-up note stays
 
 
 def test_format_opinion_empty_on_none():
@@ -150,7 +152,6 @@ def test_news_feeds_into_overall_score():
     op = opinion.score(rep)
     note = next(n for _, n in op["factors"] if "Новости" in n)
     assert "0 бычьих, 2 медвежьих" in note
-    assert "грубо" in note  # the crudeness caveat travels with every news line, not just the disclaimer
 
 
 def test_technicals_detail_all_bullish_with_strong_trend_gets_full_weight():

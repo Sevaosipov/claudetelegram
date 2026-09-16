@@ -245,8 +245,7 @@ def format_condensed(rep: dict) -> str:
         # filer-supplied free text -- safe to embed unescaped.
         L.append(tradingview.format_view(rep["tradingview"]))
 
-    L.append(f"\nСводка публичных раскрытий, не рекомендация. Полный отчёт: "
-             f"python research.py {_esc(t)}")
+    L.append(f"\nПолный отчёт: python research.py {_esc(t)}")
     return "\n".join(L)
 
 
@@ -271,8 +270,6 @@ def format_ticker_backtest(result: dict) -> str:
         flag = "" if stats["meaningful"] else " ⚠️ n меньше 30 — недостаточно, чтобы это что-то значило"
         L.append(f"• {label}: медиана {stats['median_return']:+.1f}% "
                  f"({stats['median_excess']:+.1f}pp к SPY), hit-rate {stats['hit_rate']:.0f}%{p}{flag}")
-    L.append("Прошлое поведение этого тикера, не прогноз — на уровне одного "
-             "тикера n почти всегда слишком мал (см. backtest.py).")
     return "\n".join(L)
 
 
@@ -296,8 +293,8 @@ def format_carry_signal(from_state: str, to_state: str, s: dict, *, reason: str,
                       f"broker-side ATR trailing stop at this distance if you take it")
     elif level is not None:
         lines.append(f"   exit ~{level:.4f}")
-    lines.append("   Manual execution, not investment advice — backtested OOS "
-                 "PF 1.92 on 15 trades (small sample, see ~/forex-daytrader)")
+    lines.append("   Manual execution — backtested OOS PF 1.92 on 15 trades "
+                 "(small sample, see ~/forex-daytrader)")
     return "\n".join(lines)
 
 

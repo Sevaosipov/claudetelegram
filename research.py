@@ -411,8 +411,7 @@ def _format_analyst(view: dict) -> str:
     for a in view["recent_actions"]:
         grade = f" — {a['to_grade']}" if a["to_grade"] else ""
         L.append(f"    {a['date']}  {a['firm']}{grade}")
-    L.append("  ⚠️ Целевые цены аналитиков систематически завышены и часто не сбываются;")
-    L.append("     это то, что публикует sell-side, а не прогноз этого бота.")
+    L.append("  Это то, что публикует sell-side, а не прогноз этого бота.")
     return "\n".join(L)
 
 
