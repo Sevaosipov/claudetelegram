@@ -267,9 +267,8 @@ def format_ticker_backtest(result: dict) -> str:
         stats = result["by_horizon"][h]
         label = _HORIZON_LABELS.get(h, f"{h} дн.")
         p = f", p={stats['p']:.2f}" if stats["p"] is not None else ""
-        flag = "" if stats["meaningful"] else " ⚠️ n меньше 30 — недостаточно, чтобы это что-то значило"
         L.append(f"• {label}: медиана {stats['median_return']:+.1f}% "
-                 f"({stats['median_excess']:+.1f}pp к SPY), hit-rate {stats['hit_rate']:.0f}%{p}{flag}")
+                 f"({stats['median_excess']:+.1f}pp к SPY), hit-rate {stats['hit_rate']:.0f}%{p}")
     return "\n".join(L)
 
 

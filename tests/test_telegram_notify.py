@@ -247,27 +247,29 @@ def test_corroboration_line_never_claims_agreement():
         assert bad not in text
 
 
-def test_format_ticker_backtest_flags_small_n():
-    result = {"ticker": "AAA", "n_purchases": 2,
-              "by_horizon": {21: {"n": 2, "median_return": 3.0, "median_excess": 1.5,
-                                   "hit_rate": 100.0, "p": 0.5, "meaningful": False}}}
-    text = tn.format_ticker_backtest(result)
-    assert "AAA" in text and "меньше 30" in text
-
-
-def test_format_ticker_backtest_no_flag_when_meaningful():
-    result = {"ticker": "AAA", "n_purchases": 40,
-              "by_horizon": {21: {"n": 40, "median_return": 3.0, "median_excess": 1.5,
-                                   "hit_rate": 60.0, "p": 0.03, "meaningful": True}}}
-    text = tn.format_ticker_backtest(result)
-    assert "меньше 30" not in text
+def test_format_ticker_backtest_shows_numbers_without_a_small_n_flag():
+    """The n<30 "too few to mean anything" flag was removed at the user's
+    explicit request (after asking what it meant) -- the raw purchase count
+    is still shown ("Покупок в базе: N"), so the reader can judge for
+    themselves, but there's no automatic caveat line attached anymore,
+    meaningful or not."""
+    small = {"ticker": "AAA", "n_purchases": 2,
+             "by_horizon": {21: {"n": 2, "median_return": 3.0, "median_excess": 1.5,
+                                  "hit_rate": 100.0, "p": 0.5, "meaningful": False}}}
+    large = {"ticker": "AAA", "n_purchases": 40,
+             "by_horizon": {21: {"n": 40, "median_return": 3.0, "median_excess": 1.5,
+                                  "hit_rate": 60.0, "p": 0.03, "meaningful": True}}}
+    for result in (small, large):
+        text = tn.format_ticker_backtest(result)
+        assert "AAA" in text
+        assert "меньше 30" not in text and "⚠" not in text
 
 
 def test_format_ticker_backtest_has_no_unescaped_angle_brackets():
     """send_text() always uses parse_mode HTML -- a stray '<' or '>' outside a
-    real tag breaks Telegram's parser with a 400, as happened here once before
-    the 'n<30' flag text was rewritten to words. Guard against it regressing:
-    strip the one legitimate <b>...</b> pair and check nothing else remains."""
+    real tag breaks Telegram's parser with a 400, as happened here once
+    before. Guard against it regressing: strip the one legitimate <b>...</b>
+    pair and check nothing else remains."""
     result = {"ticker": "AAA", "n_purchases": 2,
               "by_horizon": {21: {"n": 2, "median_return": 3.0, "median_excess": 1.5,
                                    "hit_rate": 100.0, "p": 0.5, "meaningful": False}}}
