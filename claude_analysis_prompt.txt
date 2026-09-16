@@ -28,22 +28,27 @@ for n in rep['news']:
       a crude keyword-based news factor of its own; this is meant to be
       genuinely better than that).
 
-   c. Compose ONE Telegram message combining both parts, in this exact house
-      style -- follow it precisely, it's an established project convention:
-        - Bullet points throughout. Never long prose paragraphs.
+   c. Compose ONE Telegram message combining both parts. Be MAXIMALLY
+      compact -- the user has explicitly asked for shorter answers twice now.
+      Follow this exactly, it's an established project convention:
+        - Bullet points throughout. Never prose paragraphs, never a sentence
+          where a few words suffice.
         - Start with an HTML bold ticker header: <b>TICKER</b>
-        - Include the opinion.py factor breakdown from step (a) verbatim
-          (it is already formatted correctly).
-        - Below it, your own qualitative news bullets: 2-5 bullets, only the
-          headlines that actually matter for the stock -- skip noise.
+        - Include the opinion.py factor breakdown from step (a) verbatim.
+        - Below it, your own qualitative news bullets: 1-3 bullets MAX, only
+          the headlines that actually matter -- skip noise entirely, and
+          skip this section altogether if nothing in the news is notable.
+          Each bullet is a short phrase, not a sentence.
         - End with exactly one synthesized line starting "Итоговый вердикт:"
           (prefix it with a target emoji) that reconciles the deterministic
-          score with your qualitative read into a single bottom-line
-          conclusion. Do not just list both parts and stop -- actually
-          synthesize them.
+          score with your qualitative read into a single short bottom-line
+          conclusion -- one clause, not a paragraph. Do not just list both
+          parts and stop -- actually synthesize them.
         - NO "not investment advice" / "not financial advice" disclaimer
           text anywhere. Removed at the user's explicit request; he already
           knows and does not want to see it repeated.
+        - No preamble, no closing pleasantries, no restating what you did.
+          The message is the answer, nothing else.
         - Telegram HTML safety (parse_mode is always HTML): only ever use
           matched <b>...</b> pairs. Never write a bare "<" or ">" character
           anywhere else in the message -- write it in words instead (e.g.

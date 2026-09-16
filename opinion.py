@@ -106,8 +106,7 @@ def _insider_component(insiders: dict) -> tuple[float, str | None]:
         return 0.0, None
     net = len(buyers) - len(sellers)
     pts = max(-CAP_INSIDER, min(CAP_INSIDER, net * W_INSIDER_PER_NET_BUYER))
-    return pts, (f"Инсайдеры (SEC, {RECENCY_DAYS} дн.): {len(buyers)} покупали, "
-                 f"{len(sellers)} продавали")
+    return pts, f"Инсайдеры: {len(buyers)} покупок, {len(sellers)} продаж (год)"
 
 
 def _political_component(political: list) -> tuple[float, str | None]:
@@ -119,7 +118,7 @@ def _political_component(political: list) -> tuple[float, str | None]:
     sellers = {p[1] for p in recent if p[2] == "S"}
     net = len(buyers) - len(sellers)
     pts = max(-CAP_POLITICAL, min(CAP_POLITICAL, net * W_POLITICAL_PER_NET_BUYER))
-    return pts, f"Политики ({RECENCY_DAYS} дн.): {len(buyers)} покупали, {len(sellers)} продавали"
+    return pts, f"Политики: {len(buyers)} покупок, {len(sellers)} продаж (год)"
 
 
 def _stakes_component(stakes: list) -> tuple[float, str | None]:
@@ -131,7 +130,7 @@ def _stakes_component(stakes: list) -> tuple[float, str | None]:
     activist = sum(1 for s in recent if s[2].startswith("SCHEDULE 13D"))
     passive = sum(1 for s in recent if s[2].startswith("SCHEDULE 13G"))
     pts = min(CAP_STAKES, activist * W_STAKE_ACTIVIST + passive * W_STAKE_PASSIVE)
-    return pts, f"Крупные доли (13D/G, {RECENCY_DAYS} дн.): {activist} активист(ов), {passive} пассивных"
+    return pts, f"Доли 13D/G: {activist} активист., {passive} пассивн. (год)"
 
 
 def _red_flags_component(annual: dict | None) -> tuple[float, str | None]:
@@ -153,18 +152,18 @@ def _financials_component(annual: dict | None) -> tuple[float, str | None]:
     up = sum(1 for v in metrics if v > 0)
     down = sum(1 for v in metrics if v < 0)
     pts = max(-CAP_FIN_TREND, min(CAP_FIN_TREND, (up - down) * W_FIN_TREND_PER_METRIC))
-    return pts, f"Годовая отчётность SEC: {up} метрики(и) г/г вверх, {down} вниз (из {len(metrics)})"
+    return pts, f"Финансы SEC: {up}↑/{down}↓ г/г из {len(metrics)}"
 
 
 def _analyst_component(analyst: dict | None) -> tuple[float, str | None]:
     if not analyst or not analyst.get("consensus"):
         return 0.0, None
     pts = _ANALYST_CONSENSUS_POINTS.get(analyst["consensus"], 0.0)
-    note = f"Аналитики: консенсус {analyst['consensus']}"
+    note = f"Аналитики: {analyst['consensus']}"
     if analyst.get("implied_upside_pct") is not None and not analyst.get("target_stale"):
         up = analyst["implied_upside_pct"]
         pts += max(-CAP_ANALYST_UPSIDE, min(CAP_ANALYST_UPSIDE, up / 10.0 * W_ANALYST_UPSIDE_PER_10PCT))
-        note += f", подразумеваемый потенциал {up:+.0f}%"
+        note += f", потенциал {up:+.0f}%"
     return pts, note
 
 
@@ -177,7 +176,7 @@ def _ownership_component(ownership: dict | None) -> tuple[float, str | None]:
     avg = sum(changes) / len(changes)
     pts = W_OWNERSHIP_TREND if avg > 0 else -W_OWNERSHIP_TREND if avg < 0 else 0.0
     direction = "наращивают" if avg > 0 else "сокращают" if avg < 0 else "без изменений"
-    return pts, f"Институционалы (топ-5): в среднем {direction} позиции"
+    return pts, f"Институционалы: {direction}"
 
 
 def _momentum_component(prices: dict | None) -> tuple[float, str | None]:
@@ -188,14 +187,14 @@ def _momentum_component(prices: dict | None) -> tuple[float, str | None]:
     positive = sum(1 for w in scored if w["excess"] > 0)
     negative = sum(1 for w in scored if w["excess"] < 0)
     pts = max(-CAP_MOMENTUM, min(CAP_MOMENTUM, (positive - negative) * W_MOMENTUM_PER_WINDOW))
-    return pts, f"Динамика цены к SPY: {positive} из {len(scored)} окон опережают бенчмарк"
+    return pts, f"Моментум vs SPY: {positive}/{len(scored)} окон"
 
 
 def _tradingview_component(tv: dict | None) -> tuple[float, str | None]:
     if not tv or tv.get("gauge") is None:
         return 0.0, None
     pts = tv["gauge"] * W_TV_GAUGE
-    return pts, f"TradingView: {tv['gauge']:+.2f} ({tv['gauge_label']}) — механический, справочно"
+    return pts, f"TradingView: {tv['gauge']:+.2f} ({tv['gauge_label']})"
 
 
 def _technicals_detail_component(tv: dict | None) -> tuple[float, str | None]:
@@ -248,8 +247,7 @@ def _news_component(news: list) -> tuple[float, str | None]:
         return 0.0, None
     net = bull - bear
     pts = max(-CAP_NEWS, min(CAP_NEWS, net * W_NEWS_PER_NET_HEADLINE))
-    return pts, (f"Новости (keyword-эвристика по заголовкам): {bull} бычьих, {bear} медвежьих "
-                 f"из {len(news)} — грубо, без учёта контекста и отрицаний")
+    return pts, f"Новости (keyword): {bull} бычьих, {bear} медвежьих из {len(news)} — грубо"
 
 
 _COMPONENTS = (
@@ -291,7 +289,6 @@ def format_opinion(op: dict | None) -> str:
     L = [f"\n💡 ОПИНИОН: {op['label']}  (score {op['score']:+.0f})"]
     for pts, note in op["factors"]:
         L.append(f"  {pts:+5.1f}  {note}")
-    L.append("  • Веса — рассуждение (как в cluster.score_signal), не бэктест")
-    L.append("  • Новости — грубый keyword-подсчёт, не понимает контекст/отрицания")
-    L.append("  • Для настоящего разбора новостей спросите Claude напрямую")
+    L.append("  • Веса — рассуждение, не бэктест")
+    L.append("  • Новости выше — грубый keyword-счёт; разбор от Claude придёт отдельным сообщением")
     return "\n".join(L)
