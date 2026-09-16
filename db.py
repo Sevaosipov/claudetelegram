@@ -199,6 +199,24 @@ CREATE TABLE IF NOT EXISTS signal_journal (
 
 CREATE INDEX IF NOT EXISTS signal_journal_ticker ON signal_journal(ticker, emitted_at);
 
+-- One row per (ticker, day): every opinion.score() computed, so there's a real
+-- record to check months from now -- same reasoning as signal_journal, applied
+-- to opinion.py (which didn't exist historically, so there is nothing to
+-- retroactively backtest it against; this starts the clock instead). Deduped
+-- by day on purpose: re-checking the same ticker three times in one afternoon
+-- (dev testing, or someone just asking again) must not inflate n -- what
+-- matters for a later evaluation is distinct (ticker, day) observations, not
+-- how many times someone happened to ask.
+CREATE TABLE IF NOT EXISTS opinion_journal (
+    ticker      TEXT NOT NULL,
+    date        TEXT NOT NULL,   -- ISO date
+    score       REAL,
+    label       TEXT,
+    factors     TEXT,            -- JSON [[points, note], ...], as shown at the time
+    computed_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (ticker, date)
+);
+
 -- Shares outstanding / market cap / listing venue per ticker. Cached because it
 -- moves slowly and every signal needs it: EUR 500,000 is a controlling interest in a
 -- shell company and a rounding error in a mega-cap, and until now the bot ranked
@@ -641,6 +659,22 @@ def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         f"INSERT INTO signal_journal ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
         tuple(row.get(c) for c in cols),
+    )
+    conn.commit()
+
+
+def journal_opinion(conn: sqlite3.Connection, ticker: str, op: dict) -> None:
+    """Record today's opinion.score() for `ticker` -- one row per (ticker, day),
+    a later computation the same day replaces the earlier one (REPLACE, not
+    IGNORE: the last opinion computed that day is the more complete/current one,
+    e.g. if data was briefly unavailable on an earlier check)."""
+    import datetime as _dt
+    import json
+    conn.execute(
+        """INSERT OR REPLACE INTO opinion_journal (ticker, date, score, label, factors)
+           VALUES (?,?,?,?,?)""",
+        (ticker, _dt.date.today().isoformat(), op["score"], op["label"],
+         json.dumps(op["factors"], ensure_ascii=False)),
     )
     conn.commit()
 

@@ -245,3 +245,25 @@ def test_corroboration_line_never_claims_agreement():
     text = tn.format_signal(sig, html=True).lower()
     for bad in ("подтверждают", "согласны", "confirms", "agrees"):
         assert bad not in text
+
+
+def test_format_ticker_backtest_flags_small_n():
+    result = {"ticker": "AAA", "n_purchases": 2,
+              "by_horizon": {21: {"n": 2, "median_return": 3.0, "median_excess": 1.5,
+                                   "hit_rate": 100.0, "p": 0.5, "meaningful": False}}}
+    text = tn.format_ticker_backtest(result)
+    assert "AAA" in text and "n<30" in text
+
+
+def test_format_ticker_backtest_no_flag_when_meaningful():
+    result = {"ticker": "AAA", "n_purchases": 40,
+              "by_horizon": {21: {"n": 40, "median_return": 3.0, "median_excess": 1.5,
+                                   "hit_rate": 60.0, "p": 0.03, "meaningful": True}}}
+    text = tn.format_ticker_backtest(result)
+    assert "n<30" not in text
+
+
+def test_format_ticker_backtest_empty_when_no_price_history():
+    result = {"ticker": "ZZZZ", "n_purchases": 0, "by_horizon": {}}
+    text = tn.format_ticker_backtest(result)
+    assert "Недостаточно" in text

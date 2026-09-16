@@ -250,6 +250,32 @@ def format_condensed(rep: dict) -> str:
     return "\n".join(L)
 
 
+_HORIZON_LABELS = {1: "1 день", 5: "1 неделя", 21: "1 месяц", 63: "1 квартал"}
+
+
+def format_ticker_backtest(result: dict) -> str:
+    """Telegram-safe rendering of backtest.backtest_ticker()'s output for the
+    /backtest command in telegram_bot.py. All bot-authored numbers/labels, no
+    filer-supplied free text -- no escaping needed, same reasoning as
+    format_carry_signal above."""
+    t, n = result["ticker"], result["n_purchases"]
+    L = [f"📉 {_b(t, True)} — бэктест по собственным инсайдерским покупкам (окно 10 лет)"]
+    L.append(f"Покупок в базе: {n}")
+    if not result["by_horizon"]:
+        L.append("Недостаточно ценовой истории для расчёта.")
+        return "\n".join(L)
+    for h in sorted(result["by_horizon"]):
+        stats = result["by_horizon"][h]
+        label = _HORIZON_LABELS.get(h, f"{h} дн.")
+        p = f", p={stats['p']:.2f}" if stats["p"] is not None else ""
+        flag = "" if stats["meaningful"] else " ⚠️ n<30 — недостаточно, чтобы это что-то значило"
+        L.append(f"• {label}: медиана {stats['median_return']:+.1f}% "
+                 f"({stats['median_excess']:+.1f}pp к SPY), hit-rate {stats['hit_rate']:.0f}%{p}{flag}")
+    L.append("Прошлое поведение этого тикера, не прогноз — на уровне одного "
+             "тикера n почти всегда слишком мал (см. backtest.py).")
+    return "\n".join(L)
+
+
 def format_carry_signal(from_state: str, to_state: str, s: dict, *, reason: str,
                          level: float | None) -> str:
     """A EURUSD carry-gated-strategy state change, from carry_strategy.py.

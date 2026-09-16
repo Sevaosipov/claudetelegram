@@ -4,6 +4,13 @@ news, annual report, financials, analyst view, TradingView) reduced to its
 opinion section plus key supporting facts. Built on top of research.build()
 and telegram_notify.format_condensed()/send_text().
 
+/backtest TICKER answers a different question: how did this ticker trade
+after its OWN past SEC insider purchases (backtest.backtest_ticker(), a
+10-year window). Not a backtest of opinion.py's score itself -- that didn't
+exist historically, so there's nothing to check it against yet; see
+db.journal_opinion() / backtest.py's --opinions mode, which starts
+accumulating a real record from whenever a ticker first gets checked.
+
 Only ever responds to TELEGRAM_CHAT_ID -- the same chat the rest of
 disclosure-bot already alerts into. Any message from a different chat is
 logged and dropped without a reply, so a stranger who finds the bot's
@@ -32,6 +39,7 @@ from pathlib import Path
 
 import requests
 
+import backtest
 import db
 import research
 import telegram_notify
@@ -46,9 +54,10 @@ PERSIST_SECONDS = 30 * 365 * 24 * 3600
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 
-HELP_TEXT = ("Пришлите тикер (например, AAPL) — в ответ сводка инсайдерских/"
-             "политических сделок из базы disclosure-bot и технический "
-             "рейтинг TradingView. Не инвестсовет.")
+HELP_TEXT = ("Пришлите тикер (например, AAPL) — в ответ опинион и сводка по нему.\n"
+             "/backtest TICKER — как этот тикер торговался после своих же "
+             "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
+             "что-то значить на уровне одного тикера).")
 
 
 def _get_updates(token: str, offset: int | None, session: requests.Session) -> list:
@@ -70,8 +79,28 @@ def _extract_ticker(text: str) -> str | None:
     return candidate if _TICKER_RE.match(candidate) else None
 
 
+def _handle_backtest(conn, text: str) -> None:
+    arg = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+    ticker = _extract_ticker(arg)
+    if not ticker:
+        telegram_notify.send_text("Использование: /backtest TICKER (например /backtest AAPL)")
+        return
+    try:
+        result = backtest.backtest_ticker(conn, ticker)
+        sent = telegram_notify.send_text(telegram_notify.format_ticker_backtest(result))
+        print(f"[telegram_bot] backtest for {ticker} (sent={sent}, n={result['n_purchases']})")
+    except Exception as e:
+        print(f"[telegram_bot] backtest failed for {ticker}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось посчитать бэктест по {ticker} "
+                                   f"({type(e).__name__}). Попробуйте позже.")
+
+
 def _handle_message(conn, text: str) -> None:
     text = (text or "").strip()
+    if text.lower().startswith("/backtest"):
+        _handle_backtest(conn, text)
+        return
     if not text or text.startswith("/"):
         telegram_notify.send_text(HELP_TEXT)
         return

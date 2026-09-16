@@ -114,3 +114,63 @@ def test_collect_purchases_extended_applies_corpus_b_filters(conn, monkeypatch):
 
     default = backtest.collect_purchases(conn, (21,), since_days=100000)
     assert {r["owner"] for r in default} == {"Normal", "Derivative", "JunkTicker"}
+
+
+def test_collect_purchases_ticker_filter_scopes_to_one_name(conn, monkeypatch):
+    add_sec_purchase(conn, "AAA", "Buyer1", 200_000, "2026-09-01")
+    add_sec_purchase(conn, "BBB", "Buyer2", 200_000, "2026-09-01")
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 1.0, "excess": 1.0}})
+    rows = backtest.collect_purchases(conn, (21,), since_days=100000, ticker="AAA")
+    assert [r["ticker"] for r in rows] == ["AAA"]
+
+
+def test_collect_purchases_no_ticker_filter_is_unchanged(conn, monkeypatch):
+    add_sec_purchase(conn, "AAA", "Buyer1", 200_000, "2026-09-01")
+    add_sec_purchase(conn, "BBB", "Buyer2", 200_000, "2026-09-01")
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 1.0, "excess": 1.0}})
+    rows = backtest.collect_purchases(conn, (21,), since_days=100000)
+    assert {r["ticker"] for r in rows} == {"AAA", "BBB"}
+
+
+def test_backtest_ticker_reports_n_and_per_horizon_stats(conn, monkeypatch):
+    add_sec_purchase(conn, "AAA", "Buyer1", 200_000, "2026-09-01")
+    add_sec_purchase(conn, "AAA", "Buyer2", 200_000, "2026-08-01")
+    add_sec_purchase(conn, "BBB", "Other", 200_000, "2026-09-01")  # different ticker, excluded
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {1: {"return": 2.0, "excess": 1.0},
+                                          21: {"return": 5.0, "excess": 3.0}})
+    result = backtest.backtest_ticker(conn, "AAA")
+    assert result["ticker"] == "AAA"
+    assert result["n_purchases"] == 2
+    assert result["by_horizon"][21]["n"] == 2
+    assert result["by_horizon"][21]["meaningful"] is False  # n=2 << MIN_MEANINGFUL_N
+
+
+def test_backtest_ticker_empty_when_no_purchases(conn, monkeypatch):
+    monkeypatch.setattr(backtest, "forward_returns", lambda t, s, h: None)
+    result = backtest.backtest_ticker(conn, "ZZZZ")
+    assert result == {"ticker": "ZZZZ", "n_purchases": 0, "by_horizon": {}}
+
+
+def test_collect_opinions_reads_journal_and_attaches_returns(conn, monkeypatch):
+    import db
+    db.journal_opinion(conn, "AAA", {"score": 24.0, "label": "Скорее покупать",
+                                      "factors": [[9.0, "note"]]})
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 4.0, "excess": 2.0}})
+    rows = backtest.collect_opinions(conn, (21,))
+    assert len(rows) == 1
+    assert rows[0]["ticker"] == "AAA"
+    assert rows[0]["label"] == "Скорее покупать"
+    assert rows[0]["returns"][21]["excess"] == 2.0
+
+
+def test_journal_opinion_dedupes_by_ticker_and_day(conn):
+    import db
+    db.journal_opinion(conn, "AAA", {"score": 10.0, "label": "Держать", "factors": []})
+    db.journal_opinion(conn, "AAA", {"score": 20.0, "label": "Покупать", "factors": []})
+    rows = conn.execute("SELECT score, label FROM opinion_journal WHERE ticker='AAA'").fetchall()
+    assert len(rows) == 1              # same (ticker, day) -> one row
+    assert rows[0] == (20.0, "Покупать")  # the later computation wins

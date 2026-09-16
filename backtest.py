@@ -26,11 +26,21 @@ good together. The sign test assumes independent trials and therefore overstates
 its confidence here. It becomes trustworthy only across many months and many
 distinct names, and even then it is a hint about the past.
 
-Two modes:
-    python backtest.py              measure recorded signals (signal_journal)
-    python backtest.py --purchases  measure individual SEC insider purchases,
-                                    sliced by the same features -- useful before
-                                    the journal has accumulated anything
+Four modes:
+    python backtest.py                  measure recorded signals (signal_journal)
+    python backtest.py --purchases      measure individual SEC insider purchases,
+                                        sliced by the same features -- useful before
+                                        the journal has accumulated anything
+    python backtest.py --ticker TICKER  scope --purchases to one name's own history
+                                        (10-year window; see backtest_ticker(), used
+                                        by the Telegram bot's /backtest command) --
+                                        almost always too few events to mean anything
+                                        at this level, and says so rather than hiding it
+    python backtest.py --opinions       measure journaled opinion.score() outputs
+                                        (opinion_journal) -- whether the score itself
+                                        predicts anything; empty/near-empty until real
+                                        time has passed since it started journaling
+                                        (see db.journal_opinion, research.build)
 """
 from __future__ import annotations
 
@@ -208,13 +218,17 @@ def collect_signals(conn, horizons=HORIZONS) -> list[dict]:
 
 
 def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365, *,
-                       extended_features: bool = False) -> list[dict]:
+                       extended_features: bool = False, ticker: str | None = None) -> list[dict]:
     """Individual SEC insider purchases with their outcomes.
 
     `extended_features=True` is for model_eval: it additionally selects the raw
     fields the model features need (shares / shares_owned_after), attaches a single
     binary `label` from `horizons[0]`, and an ISO `disclosure_date`. It does not
     change the default (`--purchases`) output at all.
+
+    `ticker` scopes to one name (for a per-ticker backtest, see backtest_ticker())
+    -- everything else about the query is unchanged, callers that don't pass it
+    get exactly the prior population-wide behavior.
     """
     since = (dt.date.today() - dt.timedelta(days=since_days)).isoformat()
     cols = ("ticker, owner_name, transaction_date, value, is_officer, is_director, "
@@ -222,6 +236,10 @@ def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365, *,
     if extended_features:
         cols += ", shares, shares_owned_after"
     where = "transaction_date >= ? AND ticker IS NOT NULL AND ticker != ''"
+    params = [since]
+    if ticker:
+        where += " AND ticker = ?"
+        params.append(ticker)
     if extended_features:
         # Corpus B (model_eval): match the population cluster.py's live signal path
         # actually trains on -- exclude derivative transactions, 10b5-1 scheduled
@@ -232,7 +250,7 @@ def collect_purchases(conn, horizons=HORIZONS, since_days: int = 365, *,
                   + cluster._JUNK_TICKER_SQL)
     rows = conn.execute(
         f"SELECT {cols} FROM sec_purchases WHERE {where} ORDER BY transaction_date",
-        (since,),
+        params,
     ).fetchall()
     out = []
     for row in rows:
@@ -311,6 +329,48 @@ def collect_political_trades(conn, horizon: int = 21, since_days: int = 1200) ->
     return out
 
 
+def backtest_ticker(conn, ticker: str, horizons=HORIZONS) -> dict:
+    """What happened after THIS ticker's own past SEC insider purchases --
+    for an on-demand Telegram/CLI answer, not the population-wide --purchases
+    report above. 10-year window (not the 365-day default): a single name's
+    own history is sparse, so every event counts.
+
+    This is a DIFFERENT question from "does opinion.py's score predict
+    anything" (see collect_opinions/--opinions) -- opinion.py didn't exist
+    historically, so there's nothing to backtest it against yet. This
+    function only ever answers "how did THIS ticker trade after ITS insiders
+    bought before," which is almost always too few events to read anything
+    into (MIN_MEANINGFUL_N=30) -- the result says so explicitly rather than
+    printing a number that looks like a finding.
+    """
+    rows = collect_purchases(conn, horizons, since_days=3650, ticker=ticker)
+    by_horizon = {}
+    for h in horizons:
+        stats = summarise([r["returns"].get(h, {}) for r in rows], h)
+        if stats:
+            by_horizon[h] = stats
+    return {"ticker": ticker, "n_purchases": len(rows), "by_horizon": by_horizon}
+
+
+def collect_opinions(conn, horizons=HORIZONS) -> list[dict]:
+    """Every journaled opinion.score() (db.journal_opinion, one row per
+    ticker/day) with its outcome attached. This is the eventual read-out for
+    whether opinion.py's score predicts anything -- empty or near-empty for a
+    long while, since journaling only started when opinion.py shipped and
+    there is no way to retroactively reconstruct what it would have said
+    before that (see opinion.py's own module docstring)."""
+    rows = conn.execute(
+        "SELECT ticker, date, score, label FROM opinion_journal ORDER BY date"
+    ).fetchall()
+    out = []
+    for ticker, date, score, label in rows:
+        fr = forward_returns(ticker, date, horizons)
+        if not fr:
+            continue
+        out.append({"ticker": ticker, "date": date, "score": score, "label": label, "returns": fr})
+    return out
+
+
 def _report(title: str, groups: dict, horizon: int) -> None:
     print()
     print(termstyle.section(f"{title} — {horizon} trading day(s) after disclosure"))
@@ -334,6 +394,13 @@ def main() -> None:
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--purchases", action="store_true",
                      help="measure individual SEC purchases instead of recorded signals")
+    ap.add_argument("--opinions", action="store_true",
+                     help="measure journaled opinion.score() outputs (opinion_journal) -- "
+                          "the eventual read on whether the score predicts anything; near-"
+                          "empty until enough time has passed since it started journaling")
+    ap.add_argument("--ticker", type=str, default=None,
+                     help="scope --purchases to one ticker's own history (10-year window) "
+                          "-- what backtest_ticker()/the Telegram bot's /backtest uses")
     ap.add_argument("--horizon", type=int, default=21,
                      help="trading days after disclosure to measure (default 21, ~1 month)")
     ap.add_argument("--days", type=int, default=365,
@@ -343,11 +410,28 @@ def main() -> None:
     conn = db.connect(DB_PATH)
     horizons = tuple(sorted({args.horizon, *HORIZONS}))
 
-    if args.purchases:
+    if args.opinions:
+        print(termstyle.header("BACKTEST -- journaled opinion.score() outputs",
+                               f"{args.horizon} trading day(s) after computed"))
+        data = collect_opinions(conn, horizons)
+        print(f"\n{len(data)} journaled opinions with usable price history")
+        if not data:
+            print("opinion_journal is empty or too new -- it only fills as tickers get "
+                  "checked from now on (research.build() journals automatically).")
+            return
+        _report("all opinions", {"all": data}, args.horizon)
+        _report("by label", _group(data, lambda r: r["label"]), args.horizon)
+    elif args.purchases or args.ticker:
         print(termstyle.header("BACKTEST -- individual SEC purchases",
                                f"{args.horizon} trading day(s) after disclosure"))
-        data = collect_purchases(conn, horizons, since_days=args.days)
-        print(f"\n{len(data)} SEC purchases with usable price history")
+        # --ticker gets a 10-year window by default rather than --days' 365:
+        # a single name's own history is sparse, so every event counts (same
+        # reasoning as backtest_ticker(), which this mirrors for the CLI) --
+        # unless --days was explicitly given too, which wins either way.
+        since_days = 3650 if (args.ticker and args.days == 365) else args.days
+        data = collect_purchases(conn, horizons, since_days=since_days, ticker=args.ticker)
+        print(f"\n{len(data)} SEC purchases with usable price history"
+              + (f" for {args.ticker}" if args.ticker else ""))
         if not data:
             print("Nothing to measure yet. Collect some data first: python bot.py --once")
             return

@@ -781,6 +781,8 @@ def build(conn, ticker: str) -> dict:
         "news": [] if is_isin else recent_news(ticker),
     }
     rep["opinion"] = opinion.score(rep)
+    if rep["opinion"]:
+        db.journal_opinion(conn, ticker, rep["opinion"])
     return rep
 
 
