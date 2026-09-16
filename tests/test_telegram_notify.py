@@ -252,7 +252,7 @@ def test_format_ticker_backtest_flags_small_n():
               "by_horizon": {21: {"n": 2, "median_return": 3.0, "median_excess": 1.5,
                                    "hit_rate": 100.0, "p": 0.5, "meaningful": False}}}
     text = tn.format_ticker_backtest(result)
-    assert "AAA" in text and "n<30" in text
+    assert "AAA" in text and "меньше 30" in text
 
 
 def test_format_ticker_backtest_no_flag_when_meaningful():
@@ -260,7 +260,20 @@ def test_format_ticker_backtest_no_flag_when_meaningful():
               "by_horizon": {21: {"n": 40, "median_return": 3.0, "median_excess": 1.5,
                                    "hit_rate": 60.0, "p": 0.03, "meaningful": True}}}
     text = tn.format_ticker_backtest(result)
-    assert "n<30" not in text
+    assert "меньше 30" not in text
+
+
+def test_format_ticker_backtest_has_no_unescaped_angle_brackets():
+    """send_text() always uses parse_mode HTML -- a stray '<' or '>' outside a
+    real tag breaks Telegram's parser with a 400, as happened here once before
+    the 'n<30' flag text was rewritten to words. Guard against it regressing:
+    strip the one legitimate <b>...</b> pair and check nothing else remains."""
+    result = {"ticker": "AAA", "n_purchases": 2,
+              "by_horizon": {21: {"n": 2, "median_return": 3.0, "median_excess": 1.5,
+                                   "hit_rate": 100.0, "p": 0.5, "meaningful": False}}}
+    text = tn.format_ticker_backtest(result)
+    stripped = text.replace("<b>", "").replace("</b>", "")
+    assert "<" not in stripped and ">" not in stripped
 
 
 def test_format_ticker_backtest_empty_when_no_price_history():
