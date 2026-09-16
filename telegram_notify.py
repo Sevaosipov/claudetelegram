@@ -195,6 +195,86 @@ def format_sweden_line(t: dict) -> str:
     )
 
 
+def format_condensed(rep: dict) -> str:
+    """Telegram-safe rendering of a research.build() report for the inbound
+    ticker-analysis reply in telegram_bot.py: the opinion section (when present)
+    plus a few key supporting facts, not the entire dossier -- research.py's
+    CLI is the place for the full deep-dive. opinion.format_opinion()'s own
+    text is entirely bot-authored fixed strings and numbers, no filer-supplied
+    free text, so it needs no escaping here. send_text() always sends with
+    parse_mode HTML, so every field that ultimately comes from a filing
+    (owner/person/member names, form types) goes through _esc() below -- the
+    same rule the disclosure-signal formatters above follow, and the reason
+    format_sec_line & co. (print-only, never sent to Telegram) don't need to.
+    """
+    import opinion
+    import tradingview
+    t = rep["ticker"]
+    L = [_b(t, True)]
+
+    if rep.get("opinion"):
+        L.append(opinion.format_opinion(rep["opinion"]))
+
+    buys, sells = rep["insiders"]["buys"], rep["insiders"]["sells"]
+    if buys or sells:
+        L.append("\n" + _b("Инсайдеры (SEC Form 4)", True))
+        for (date, owner, title, is_dir, is_off, is_ten, value, deriv, plan, url) in buys[:3]:
+            role = title or ("Director" if is_dir else "Officer" if is_off
+                              else "10%+ Owner" if is_ten else "Insider")
+            L.append(f"🟢 {datefmt.fmt(date)} {_esc(owner)} ({_esc(role)}) ${value or 0:,.0f}")
+        for (date, owner, title, value, url) in sells[:2]:
+            L.append(f"🔴 {datefmt.fmt(date)} {_esc(owner)} ({_esc(title or 'Insider')}) "
+                     f"${value or 0:,.0f}")
+    else:
+        L.append("\nИнсайдеров (SEC Form 4) в базе нет.")
+
+    if rep["stakes"]:
+        L.append("\n" + _b("Крупные доли (13D/G)", True))
+        for (date, person, form, pct, amount, url) in rep["stakes"][:3]:
+            L.append(f"{datefmt.fmt(date) if date else '?'} {_esc(person)} "
+                     f"{pct:.2f}% ({_esc(form)})")
+
+    if rep["political"]:
+        L.append("\n" + _b("Политики (STOCK Act)", True))
+        for (date, member, ttype, amount, url, chamber) in rep["political"][:3]:
+            icon = "🟢" if ttype == "P" else "🔴"
+            L.append(f"{icon} {datefmt.fmt(date)} {_esc(member)} [{chamber}] {_esc(amount)}")
+
+    if rep.get("tradingview"):
+        # tradingview.format_view()'s own text is all fixed internal labels, no
+        # filer-supplied free text -- safe to embed unescaped.
+        L.append(tradingview.format_view(rep["tradingview"]))
+
+    L.append(f"\nСводка публичных раскрытий, не рекомендация. Полный отчёт: "
+             f"python research.py {_esc(t)}")
+    return "\n".join(L)
+
+
+def format_carry_signal(from_state: str, to_state: str, s: dict, *, reason: str,
+                         level: float | None) -> str:
+    """A EURUSD carry-gated-strategy state change, from carry_strategy.py.
+
+    Deliberately not styled like the disclosure signals above (no score, no
+    buyer list) -- this is a different kind of thing, a price/rate-driven
+    trading rule rather than a disclosed transaction. States facts (today's
+    price, MA, rate spread, and the stop level) and says explicitly that
+    execution is manual, matching this project's stance everywhere else: no
+    verdict, no advice, no order placed on the user's behalf.
+    """
+    icon = {"LONG": "📈", "SHORT": "📉", "FLAT": "⚪️"}[to_state]
+    lines = [f"{icon} EURUSD carry-gated: {from_state} → {to_state} ({reason})"]
+    lines.append(f"   price {s['close']:.4f} · 200d MA {s['ma']:.4f} · "
+                 f"DE-US 2y spread {s['diff']:+.2f}pp")
+    if to_state in ("LONG", "SHORT") and level is not None:
+        lines.append(f"   initial stop ~{level:.4f} (6×ATR={s['atr']:.4f}) — set a "
+                      f"broker-side ATR trailing stop at this distance if you take it")
+    elif level is not None:
+        lines.append(f"   exit ~{level:.4f}")
+    lines.append("   Manual execution, not investment advice — backtested OOS "
+                 "PF 1.92 on 15 trades (small sample, see ~/forex-daytrader)")
+    return "\n".join(lines)
+
+
 def _plural(n: int, one: str, few: str, many: str) -> str:
     """Russian noun pluralization: 1 -> one, 2-4 -> few, 0/5-20 -> many (with the
     usual 11-14 exception)."""

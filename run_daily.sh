@@ -55,3 +55,8 @@ trap notify_failure EXIT
 # activists -- one measured week had 20 qualifying stake filings but only 1
 # was a genuine first-ever filing. This drops amendments entirely.
 python bot.py --once --stake-min-percent 10 --activist-only --new-positions-only --min-score 35
+
+# Separate feature, unrelated to the disclosure sources above: a daily check of
+# the EURUSD carry-gated trend strategy (see carry_strategy.py), alerting over
+# the same Telegram bot only when its position state changes.
+python carry_strategy.py --once
