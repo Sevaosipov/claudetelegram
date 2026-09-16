@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 import db
+import opinion
 import research
 from conftest import (add_bafin_txn, add_sec_purchase, add_sec_sale, add_stake,
                       add_sweden_txn)
@@ -80,16 +81,64 @@ def test_isin_report_renders_the_european_rows(conn):
     assert "ISIN, а не тикер" in text
 
 
-def test_report_never_renders_a_verdict(conn):
-    """The dossier assembles evidence and stops there. If a recommendation line ever
-    appears in this output it is a defect, not a feature -- see research.py."""
+def test_isin_report_has_no_opinion_and_says_why(conn):
+    """opinion.score() refuses an ISIN report outright (build() skips financials/
+    annual-report/analyst for one entirely -- see research.build). The dossier
+    should say plainly why no opinion appears, not just silently omit it."""
     add_bafin_txn(conn, "DE0007190001", "Someone", 1_000_000)
-    text = research.format_report(research.build(conn, "DE0007190001"))
-    assert "не рекомендация" in text
-    assert "покупать / не покупать" in text
+    rep = research.build(conn, "DE0007190001")
+    assert rep["opinion"] is None
+    text = research.format_report(rep)
+    assert "опиниона нет" in text
     # Case-insensitive: the TradingView section legitimately relays TV's own
     # "Strong Buy" label, but only ever as a quoted third-party term with its
-    # caveat -- never as the bot's own line.
+    # caveat -- never as the bot's own marketing-style line.
+    low = text.lower()
+    for verdict in ("рекомендуем", "стоит купить", "мы считаем", "наш прогноз", "целевая цена бота"):
+        assert verdict not in low
+
+
+def _minimal_rep(**overrides) -> dict:
+    """A synthetic build()-shaped dict, bypassing build() itself -- build() makes
+    several live network calls (price, financials, annual report, filings,
+    news) even for a non-ISIN ticker, and this test file's own policy (see its
+    module docstring) is to keep network-dependent code out of the test suite.
+    format_report() and opinion.score() are both pure functions over this
+    shape, so constructing it directly is the offline-testable path."""
+    base = {
+        "ticker": "AAPL", "cik": None, "is_isin": False, "name": None,
+        "industry": None, "market_cap_eur": None, "size": None,
+        "avg_daily_value": None, "exchange": None,
+        "insiders": {"buys": [], "sells": []}, "european": [], "stakes": [],
+        "proposed_sales": [], "political": [], "signals": [], "corroboration": None,
+        "prices": {"windows": [], "current": None}, "analyst": None,
+        "tradingview": None, "financials": None, "annual_report": None,
+        "dilution": None, "ownership": None, "short": None, "earnings": None,
+        "filings": [], "news": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_report_with_an_opinion_shows_the_disclaimer_not_marketing_language():
+    """When there IS enough to score, the opinion section renders -- but the
+    surrounding disclaimer must still avoid marketing-style verdict phrasing,
+    same forbidden list as the no-opinion case above."""
+    rep = _minimal_rep(
+        insiders={"buys": [("2026-09-01", "Buyer One", "CEO", 1, 1, 0, 500000, 0, 0, "u"),
+                            ("2026-09-02", "Buyer Two", "CFO", 0, 1, 0, 500000, 0, 0, "u")],
+                   "sells": []},
+        analyst={"consensus": "Buy", "analyst_count": 10, "thin": False,
+                 "counts": {"sb": 2, "b": 5, "h": 2, "s": 1, "ss": 0}, "trend": None,
+                 "target_mean": 200.0, "target_high": 220.0, "target_low": 180.0,
+                 "target_stale": False, "implied_upside_pct": 20.0,
+                 "implied_upside_wide": False, "recent_actions": []},
+    )
+    rep["opinion"] = opinion.score(rep)
+    assert rep["opinion"] is not None
+    assert rep["opinion"]["label"] in dict(opinion.LABELS).values()
+    text = research.format_report(rep)
+    assert "ОПИНИОН" in text
     low = text.lower()
     for verdict in ("рекомендуем", "стоит купить", "мы считаем", "наш прогноз", "целевая цена бота"):
         assert verdict not in low

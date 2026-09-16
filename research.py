@@ -61,6 +61,7 @@ import db
 import datefmt
 import fx
 import marketcap
+import opinion
 import termstyle
 import tradingview
 
@@ -750,7 +751,7 @@ def build(conn, ticker: str) -> dict:
         ).fetchone()
         sec_name = sec_name[0] if sec_name else None
 
-    return {
+    rep = {
         "ticker": ticker,
         "cik": cik,
         "is_isin": is_isin,
@@ -779,6 +780,8 @@ def build(conn, ticker: str) -> dict:
         "filings": filings,
         "news": [] if is_isin else recent_news(ticker),
     }
+    rep["opinion"] = opinion.score(rep)
+    return rep
 
 
 def format_report(rep: dict) -> str:
@@ -798,6 +801,9 @@ def format_report(rep: dict) -> str:
         bits.append(rep["exchange"])
     if bits:
         L.append("  " + " · ".join(bits))
+
+    if rep.get("opinion"):
+        L.append(opinion.format_opinion(rep["opinion"]))
 
     if rep.get("is_isin"):
         L.append("\n  ISIN, а не тикер: цена, новости, отчётность SEC, финансы, владение,"
@@ -899,11 +905,17 @@ def format_report(rep: dict) -> str:
                 L.append(f"      {n['url']}")
 
     L.append("\n" + "-" * 72)
-    L.append("  Это сводка публичных раскрытий, а не рекомендация. Здесь намеренно нет")
-    L.append("  вердикта «покупать / не покупать»: превращать факты в такой ответ —")
-    L.append("  это инвестиционный совет, для которого нужен лицензированный")
-    L.append("  консультант и знание ваших обстоятельств. Источники выше кликабельны")
-    L.append("  именно для того, чтобы решение принимали вы, видя, на чём оно стоит.")
+    if rep.get("opinion"):
+        L.append("  «ОПИНИОН» вверху — детерминированная свёртка фактов ниже по заранее")
+        L.append("  заданным весам (opinion.py), не лицензированная инвестиционная")
+        L.append("  консультация и не бэктестированный прогноз доходности. Источники")
+        L.append("  ниже кликабельны именно для того, чтобы можно было проверить, на")
+        L.append("  чём стоит каждый балл, а не просто поверить итоговой строке.")
+    else:
+        L.append("  Это сводка публичных раскрытий. По этому тикеру опиниона нет —")
+        L.append("  недостаточно данных (см. opinion.py: ISIN, либо меньше двух")
+        L.append("  значимых факторов). Источники ниже кликабельны, чтобы решение")
+        L.append("  принимали вы, видя, на чём оно стоит.")
     L.append("-" * 72)
     return "\n".join(L)
 
