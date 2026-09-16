@@ -13,7 +13,7 @@ def _rep(**overrides) -> dict:
     base = {
         "is_isin": False, "insiders": {"buys": [], "sells": []}, "political": [],
         "stakes": [], "annual_report": None, "analyst": None, "ownership": None,
-        "prices": {"windows": []}, "tradingview": None,
+        "prices": {"windows": []}, "tradingview": None, "news": [],
     }
     base.update(overrides)
     return base
@@ -104,3 +104,43 @@ def test_format_opinion_includes_every_factor_and_the_disclaimer():
 
 def test_format_opinion_empty_on_none():
     assert opinion.format_opinion(None) == ""
+
+
+def test_news_component_counts_bullish_and_bearish_headlines():
+    news = [
+        {"title": "Company beats estimates and raises guidance"},
+        {"title": "Shares rally on record high demand"},
+        {"title": "Regulator opens investigation into pricing"},
+        {"title": "Totally unrelated headline about the weather"},
+    ]
+    pts, note = opinion._news_component(news)
+    assert pts > 0  # 2 bullish (beats estimates, raises guidance) vs 1 bearish (investigation)
+    assert "бычьих" in note and "медвежьих" in note
+
+
+def test_news_component_is_naive_about_negation():
+    """Documented limitation, not a bug: 'doesn't disappoint' still counts as
+    bearish because the heuristic is a plain substring match on 'disappoint'."""
+    pts, _ = opinion._news_component([{"title": "Product launch doesn't disappoint fans"}])
+    assert pts < 0
+
+
+def test_news_component_no_matches_returns_none():
+    pts, note = opinion._news_component([{"title": "A perfectly neutral headline"}])
+    assert pts == 0.0 and note is None
+
+
+def test_news_component_empty_list_returns_none():
+    assert opinion._news_component([]) == (0.0, None)
+
+
+def test_news_feeds_into_overall_score():
+    rep = _rep(
+        insiders={"buys": [(TODAY, "A", "CEO", 1, 1, 0, 1, 0, 0, "u")], "sells": []},
+        analyst={"consensus": "Hold", "implied_upside_pct": None, "target_stale": False},
+        news=[{"title": "Stock plunges after downgrade"}, {"title": "Company warns on outlook"}],
+    )
+    op = opinion.score(rep)
+    note = next(n for _, n in op["factors"] if "Новости" in n)
+    assert "0 бычьих, 2 медвежьих" in note
+    assert "грубо" in note  # the crudeness caveat travels with every news line, not just the disclaimer

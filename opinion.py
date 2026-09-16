@@ -1,8 +1,18 @@
 """A deterministic Buy/Hold/Avoid opinion, synthesized from everything
 research.py already assembles for one ticker: recent insider and political
 trading, annual-report red flags, the SEC XBRL financials trend, analyst
-consensus, 13D/G stakes, ownership trend, price momentum vs a benchmark, and
-TradingView's technical gauge.
+consensus, 13D/G stakes, ownership trend, price momentum vs a benchmark,
+TradingView's technical gauge, and recent news headlines.
+
+NEWS SCORING IS A NAIVE KEYWORD MATCH, NOT SENTIMENT ANALYSIS. It counts
+headlines containing a bullish or bearish term from a short fixed list and
+nets the counts -- no negation handling ("shares don't disappoint" scores as
+bearish), no context, no source weighting. Kept deliberately small (CAP_NEWS)
+for exactly that reason -- same treatment as TradingView's gauge, which this
+module already scores lightly for the same "mechanical, not deeply
+validated" reason. A genuine sentiment read needs an LLM reading the actual
+text, which this deterministic, no-API pipeline doesn't have; ask Claude
+directly for that (see format_opinion()'s own note).
 
 This is the one place in the project that crosses the line every other module
 deliberately stays behind -- see research.py's own module docstring and
@@ -53,9 +63,22 @@ W_OWNERSHIP_TREND = 6.0
 W_MOMENTUM_PER_WINDOW = 3.0
 CAP_MOMENTUM = 9.0
 W_TV_GAUGE = 8.0
+W_NEWS_PER_NET_HEADLINE = 2.5
+CAP_NEWS = 10.0
 
 LABELS = ((35.0, "Покупать"), (12.0, "Скорее покупать"), (-12.0, "Держать"),
           (-35.0, "Скорее избегать"), (None, "Избегать"))
+
+# Short and fixed on purpose -- longer lists just mean more false positives on
+# words used in unrelated senses ("guidance" in a governance headline, "beat"
+# in a music-streaming story). Lowercase, checked as plain substrings.
+_BULLISH_TERMS = ("beats estimates", "tops estimates", "beat expectations", "surge", "soars",
+                   "record high", "upgrade", "outperform", "raises guidance", "raises forecast",
+                   "all-time high", "rally", "jumps", "bullish", "strong demand", "buyback")
+_BEARISH_TERMS = ("misses estimates", "miss expectations", "plunges", "tumbles", "downgrade",
+                   "underperform", "cuts guidance", "cuts forecast", "lawsuit", "investigation",
+                   "recall", "layoffs", "bearish", "weak demand", "sinks", "slumps", "warns",
+                   "disappoint", "lukewarm", "probe")
 
 
 def _cutoff() -> str:
@@ -162,6 +185,24 @@ def _tradingview_component(tv: dict | None) -> tuple[float, str | None]:
     return pts, f"TradingView: {tv['gauge']:+.2f} ({tv['gauge_label']}) — механический, справочно"
 
 
+def _news_component(news: list) -> tuple[float, str | None]:
+    if not news:
+        return 0.0, None
+    bull = bear = 0
+    for item in news:
+        title = (item.get("title") or "").lower()
+        if any(term in title for term in _BULLISH_TERMS):
+            bull += 1
+        if any(term in title for term in _BEARISH_TERMS):
+            bear += 1
+    if bull == 0 and bear == 0:
+        return 0.0, None
+    net = bull - bear
+    pts = max(-CAP_NEWS, min(CAP_NEWS, net * W_NEWS_PER_NET_HEADLINE))
+    return pts, (f"Новости (keyword-эвристика по заголовкам): {bull} бычьих, {bear} медвежьих "
+                 f"из {len(news)} — грубо, без учёта контекста и отрицаний")
+
+
 _COMPONENTS = (
     ("insiders", _insider_component),
     ("political", _political_component),
@@ -172,6 +213,7 @@ _COMPONENTS = (
     ("ownership", _ownership_component),
     ("prices", _momentum_component),
     ("tradingview", _tradingview_component),
+    ("news", _news_component),
 )
 
 
@@ -200,5 +242,6 @@ def format_opinion(op: dict | None) -> str:
     for pts, note in op["factors"]:
         L.append(f"  {pts:+5.1f}  {note}")
     L.append("  • Веса — рассуждение (как в cluster.score_signal), не бэктест и не лицензированная консультация")
-    L.append("  • Новости не скорятся — для разбора с новостями спросите Claude напрямую")
+    L.append("  • Новости — грубый keyword-подсчёт, не понимает контекст/отрицания")
+    L.append("  • Для настоящего разбора новостей спросите Claude напрямую")
     return "\n".join(L)
