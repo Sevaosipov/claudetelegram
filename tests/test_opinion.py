@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 import opinion
 
 TODAY = dt.date.today().isoformat()
@@ -89,7 +91,11 @@ def test_labels_follow_score_thresholds():
     assert label(-50) == "Избегать"
 
 
-def test_format_opinion_includes_every_factor_and_the_disclaimer():
+def test_format_opinion_includes_every_factor_and_the_methodology_note():
+    """No "not investment advice" framing (removed at the user's explicit
+    request -- they said they already know), but the methodology caveat
+    (weights are reasoned, not backtested) stays: that's not a disclaimer
+    about advice, it's honesty about how reliable the number is."""
     rep = _rep(
         insiders={"buys": [(TODAY, "A", "CEO", 1, 1, 0, 1, 0, 0, "u")], "sells": []},
         analyst={"consensus": "Strong Buy", "implied_upside_pct": 15.0, "target_stale": False},
@@ -99,7 +105,8 @@ def test_format_opinion_includes_every_factor_and_the_disclaimer():
     assert op["label"] in text
     for _, note in op["factors"]:
         assert note in text
-    assert "не лицензированная" in text
+    assert "не бэктест" in text
+    assert "лицензированная" not in text.lower()
 
 
 def test_format_opinion_empty_on_none():
@@ -144,3 +151,45 @@ def test_news_feeds_into_overall_score():
     note = next(n for _, n in op["factors"] if "Новости" in n)
     assert "0 бычьих, 2 медвежьих" in note
     assert "грубо" in note  # the crudeness caveat travels with every news line, not just the disclaimer
+
+
+def test_technicals_detail_all_bullish_with_strong_trend_gets_full_weight():
+    tv = {"macd_state": "MACD выше сигнальной",
+          "ma_state": "цена выше и 50-, и 200-дневной средней",
+          "rsi": 65.0, "adx": 30.0}
+    pts, note = opinion._technicals_detail_component(tv)
+    expected = min(opinion.CAP_TECHNICALS,
+                    opinion.W_MACD + opinion.W_MA_TREND + opinion.W_RSI_MOMENTUM)
+    assert pts == pytest.approx(expected)  # ADX >= 25 -> scale 1.0, no haircut
+    assert "сильный тренд" in note
+
+
+def test_technicals_detail_weak_adx_scales_down_the_same_signals():
+    strong = {"macd_state": "MACD выше сигнальной", "ma_state": None, "rsi": None, "adx": 30.0}
+    weak = {"macd_state": "MACD выше сигнальной", "ma_state": None, "rsi": None, "adx": 10.0}
+    pts_strong, _ = opinion._technicals_detail_component(strong)
+    pts_weak, note_weak = opinion._technicals_detail_component(weak)
+    assert pts_weak < pts_strong  # same directional signal, less trusted under a weak trend
+    assert pts_weak == pytest.approx(opinion.W_MACD * 0.4)
+    assert "слабый тренд" in note_weak
+
+
+def test_technicals_detail_mixed_signals_can_net_to_near_zero():
+    tv = {"macd_state": "MACD выше сигнальной",       # +W_MACD
+          "ma_state": "цена ниже и 50-, и 200-дневной средней",  # -W_MA_TREND
+          "rsi": None, "adx": 25.0}
+    pts, note = opinion._technicals_detail_component(tv)
+    assert pts == pytest.approx(opinion.W_MACD - opinion.W_MA_TREND)
+    assert "MACD бычий" in note and "цена ниже обеих MA" in note
+
+
+def test_technicals_detail_no_usable_fields_returns_none():
+    assert opinion._technicals_detail_component({"macd_state": None, "ma_state": None, "rsi": None}) == (0.0, None)
+    assert opinion._technicals_detail_component(None) == (0.0, None)
+
+
+def test_technicals_detail_missing_adx_does_not_scale_down():
+    tv = {"macd_state": "MACD выше сигнальной", "ma_state": None, "rsi": None, "adx": None}
+    pts, note = opinion._technicals_detail_component(tv)
+    assert pts == pytest.approx(opinion.W_MACD)  # no ADX data -> scale 1.0, not penalized
+    assert "н/д" in note

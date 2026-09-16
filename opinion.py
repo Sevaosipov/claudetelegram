@@ -2,7 +2,8 @@
 research.py already assembles for one ticker: recent insider and political
 trading, annual-report red flags, the SEC XBRL financials trend, analyst
 consensus, 13D/G stakes, ownership trend, price momentum vs a benchmark,
-TradingView's technical gauge, and recent news headlines.
+TradingView's aggregate technical gauge plus its individual RSI/MACD/moving-
+average/ADX readings, and recent news headlines.
 
 NEWS SCORING IS A NAIVE KEYWORD MATCH, NOT SENTIMENT ANALYSIS. It counts
 headlines containing a bullish or bearish term from a short fixed list and
@@ -65,6 +66,18 @@ CAP_MOMENTUM = 9.0
 W_TV_GAUGE = 8.0
 W_NEWS_PER_NET_HEADLINE = 2.5
 CAP_NEWS = 10.0
+W_MACD = 5.0
+W_MA_TREND = 5.0
+W_RSI_MOMENTUM = 3.0
+CAP_TECHNICALS = 15.0
+# ADX measures trend STRENGTH, not direction, so it can't be its own +/- factor
+# the way everything else here is -- it scales how much the other technical
+# signals above are trusted instead (a MACD cross in a directionless market is
+# noisier than the same cross in a strongly trending one). Three bands, not a
+# continuous curve, for the same reason every other threshold in this project
+# is a round number: legible over precisely fitted.
+_ADX_BANDS = ((25.0, 1.0, "сильный тренд"), (15.0, 0.7, "умеренный тренд"),
+              (0.0, 0.4, "слабый тренд — вес урезан"))
 
 LABELS = ((35.0, "Покупать"), (12.0, "Скорее покупать"), (-12.0, "Держать"),
           (-35.0, "Скорее избегать"), (None, "Избегать"))
@@ -185,6 +198,42 @@ def _tradingview_component(tv: dict | None) -> tuple[float, str | None]:
     return pts, f"TradingView: {tv['gauge']:+.2f} ({tv['gauge_label']}) — механический, справочно"
 
 
+def _technicals_detail_component(tv: dict | None) -> tuple[float, str | None]:
+    """RSI momentum, MACD cross, and price-vs-moving-average trend -- scored
+    separately from the aggregate gauge above, since that gauge is a 26-way
+    mechanical blend the reader can't decompose. These three are standard,
+    named TA signals, individually attributable. ADX scales the total rather
+    than scoring its own direction (it has none) -- see _ADX_BANDS."""
+    if not tv:
+        return 0.0, None
+    raw = 0.0
+    bits = []
+    if tv.get("macd_state") == "MACD выше сигнальной":
+        raw += W_MACD
+        bits.append("MACD бычий")
+    elif tv.get("macd_state") == "MACD ниже сигнальной":
+        raw -= W_MACD
+        bits.append("MACD медвежий")
+    ma_state = tv.get("ma_state")
+    if ma_state == "цена выше и 50-, и 200-дневной средней":
+        raw += W_MA_TREND
+        bits.append("цена выше обеих MA")
+    elif ma_state == "цена ниже и 50-, и 200-дневной средней":
+        raw -= W_MA_TREND
+        bits.append("цена ниже обеих MA")
+    rsi = tv.get("rsi")
+    if rsi is not None and rsi != 50:
+        raw += W_RSI_MOMENTUM if rsi > 50 else -W_RSI_MOMENTUM
+        bits.append(f"RSI {rsi:.0f}")
+    if not bits:
+        return 0.0, None
+    adx = tv.get("adx")
+    scale, adx_label = next(((s, label) for cut, s, label in _ADX_BANDS
+                              if adx is not None and adx >= cut), (1.0, "ADX н/д"))
+    pts = max(-CAP_TECHNICALS, min(CAP_TECHNICALS, raw * scale))
+    return pts, f"ТА-детали: {', '.join(bits)} · {adx_label}"
+
+
 def _news_component(news: list) -> tuple[float, str | None]:
     if not news:
         return 0.0, None
@@ -213,6 +262,7 @@ _COMPONENTS = (
     ("ownership", _ownership_component),
     ("prices", _momentum_component),
     ("tradingview", _tradingview_component),
+    ("tradingview", _technicals_detail_component),
     ("news", _news_component),
 )
 
@@ -241,7 +291,7 @@ def format_opinion(op: dict | None) -> str:
     L = [f"\n💡 ОПИНИОН: {op['label']}  (score {op['score']:+.0f})"]
     for pts, note in op["factors"]:
         L.append(f"  {pts:+5.1f}  {note}")
-    L.append("  • Веса — рассуждение (как в cluster.score_signal), не бэктест и не лицензированная консультация")
+    L.append("  • Веса — рассуждение (как в cluster.score_signal), не бэктест")
     L.append("  • Новости — грубый keyword-подсчёт, не понимает контекст/отрицания")
     L.append("  • Для настоящего разбора новостей спросите Claude напрямую")
     return "\n".join(L)
