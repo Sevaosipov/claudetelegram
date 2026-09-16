@@ -24,4 +24,9 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-claude -p "$(cat claude_analysis_prompt.txt)" --allowedTools "Bash" --permission-mode acceptEdits
+# launchd runs with a minimal PATH that doesn't include ~/.local/bin (same
+# class of gotcha as python/venv elsewhere in this project) -- absolute path,
+# not relying on `claude` being resolvable on launchd's PATH.
+CLAUDE_BIN="$HOME/.local/bin/claude"
+
+"$CLAUDE_BIN" -p "$(cat claude_analysis_prompt.txt)" --allowedTools "Bash" --permission-mode acceptEdits
