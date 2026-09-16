@@ -207,6 +207,19 @@ CREATE INDEX IF NOT EXISTS signal_journal_ticker ON signal_journal(ticker, emitt
 -- (dev testing, or someone just asking again) must not inflate n -- what
 -- matters for a later evaluation is distinct (ticker, day) observations, not
 -- how many times someone happened to ask.
+-- Tickers waiting for the scheduled headless-Claude pass (run_claude_analysis.sh)
+-- to read their news and add a qualitative layer on top of opinion.py's
+-- deterministic score. telegram_bot.py enqueues here right after sending its
+-- own fast reply, so the news-reasoning layer follows a bit later rather than
+-- blocking the immediate answer -- there is no live-Claude hook inside the
+-- unattended bot process itself, see telegram_bot.py's module docstring.
+CREATE TABLE IF NOT EXISTS claude_analysis_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker       TEXT NOT NULL,
+    requested_at TEXT DEFAULT (datetime('now')),
+    processed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS opinion_journal (
     ticker      TEXT NOT NULL,
     date        TEXT NOT NULL,   -- ISO date
@@ -659,6 +672,37 @@ def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         f"INSERT INTO signal_journal ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
         tuple(row.get(c) for c in cols),
+    )
+    conn.commit()
+
+
+def enqueue_analysis(conn: sqlite3.Connection, ticker: str) -> None:
+    """Queue `ticker` for the next scheduled headless-Claude pass. Deduped
+    against any already-pending (unprocessed) row for the same ticker, so
+    asking about the same name several times before the schedule next fires
+    doesn't queue redundant work."""
+    exists = conn.execute(
+        "SELECT 1 FROM claude_analysis_queue WHERE ticker = ? AND processed_at IS NULL",
+        (ticker,),
+    ).fetchone()
+    if exists:
+        return
+    conn.execute("INSERT INTO claude_analysis_queue (ticker) VALUES (?)", (ticker,))
+    conn.commit()
+
+
+def pending_analysis(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+    """(id, ticker) pairs not yet processed, oldest first."""
+    return conn.execute(
+        "SELECT id, ticker FROM claude_analysis_queue WHERE processed_at IS NULL "
+        "ORDER BY requested_at"
+    ).fetchall()
+
+
+def mark_analysis_processed(conn: sqlite3.Connection, queue_id: int) -> None:
+    conn.execute(
+        "UPDATE claude_analysis_queue SET processed_at = datetime('now') WHERE id = ?",
+        (queue_id,),
     )
     conn.commit()
 

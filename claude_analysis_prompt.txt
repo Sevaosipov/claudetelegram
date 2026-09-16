@@ -1,0 +1,81 @@
+Check the disclosure-bot Telegram analysis queue and process any pending tickers.
+
+1. First, cheaply check whether there is anything to do -- if not, stop
+   immediately and do nothing else (don't waste a turn reasoning about an
+   empty queue):
+   cd ~/Desktop/disclosure-bot && source .venv/bin/activate && set -a && source .env && set +a && python3 -c "import db; conn=db.connect('data/disclosures.db'); print(db.pending_analysis(conn))"
+
+2. If it printed a non-empty list of (id, ticker) pairs, process each one (at
+   most 10 per run -- leave any remainder for the next scheduled pass), in
+   order:
+
+   a. Get that ticker's opinion.py score/factors and recent news headlines:
+      python3 -c "
+import db, research, opinion
+conn = db.connect('data/disclosures.db')
+rep = research.build(conn, '<TICKER>')
+print(opinion.format_opinion(rep['opinion']))
+print('---NEWS---')
+for n in rep['news']:
+    print(n['published'], '[' + n['publisher'] + ']', n['title'])
+"
+      (substitute the real ticker for <TICKER>)
+
+   b. Read the printed headlines yourself and reason about them -- this is
+      the actual point of this scheduled pass: a real qualitative read of
+      what's bullish, bearish, or just noise, the way a human analyst
+      skimming headlines would, not a keyword count (opinion.py already has
+      a crude keyword-based news factor of its own; this is meant to be
+      genuinely better than that).
+
+   c. Compose ONE Telegram message combining both parts, in this exact house
+      style -- follow it precisely, it's an established project convention:
+        - Bullet points throughout. Never long prose paragraphs.
+        - Start with an HTML bold ticker header: <b>TICKER</b>
+        - Include the opinion.py factor breakdown from step (a) verbatim
+          (it is already formatted correctly).
+        - Below it, your own qualitative news bullets: 2-5 bullets, only the
+          headlines that actually matter for the stock -- skip noise.
+        - End with exactly one synthesized line starting "Итоговый вердикт:"
+          (prefix it with a target emoji) that reconciles the deterministic
+          score with your qualitative read into a single bottom-line
+          conclusion. Do not just list both parts and stop -- actually
+          synthesize them.
+        - NO "not investment advice" / "not financial advice" disclaimer
+          text anywhere. Removed at the user's explicit request; he already
+          knows and does not want to see it repeated.
+        - Telegram HTML safety (parse_mode is always HTML): only ever use
+          matched <b>...</b> pairs. Never write a bare "<" or ">" character
+          anywhere else in the message -- write it in words instead (e.g.
+          "meньше 30" not "n<30", "больше 10 процентов" not ">10%"). An
+          unescaped angle bracket makes Telegram's parser reject the whole
+          message with a 400 error and the send silently fails.
+
+   d. Send it. Write the composed message to a temporary file first (avoids
+      any shell-quoting issues with the message text itself), then send that
+      file's content:
+      Write the message to /tmp/claude_analysis_msg.txt (plain text file,
+      exact content of the message, nothing else), then run:
+      python3 -c "
+import telegram_notify
+with open('/tmp/claude_analysis_msg.txt', encoding='utf-8') as f:
+    msg = f.read()
+sent = telegram_notify.send_text(msg)
+print('sent:', sent)
+"
+      If it prints sent: False, do NOT mark the row processed -- leave it
+      for the next run to retry.
+
+   e. Only after a confirmed successful send, mark that row processed:
+      python3 -c "
+import db
+conn = db.connect('data/disclosures.db')
+db.mark_analysis_processed(conn, <ID>)
+"
+      (substitute the real numeric id from step 1's output)
+
+Scope discipline: do nothing else in this repository. Do not edit any
+project files. Do not run the daily disclosure scrape, backtest, or any
+other job. Only the queue-processing work described above, for the tickers
+actually pending. The temp file at /tmp/claude_analysis_msg.txt is fine to
+write/overwrite each time.

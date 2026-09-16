@@ -116,6 +116,10 @@ def _handle_message(conn, text: str) -> None:
         # reply can't back an actual opinion with the sources that were asked for.
         rep = research.build(conn, ticker)
         sent = telegram_notify.send_text(telegram_notify.format_condensed(rep))
+        # Queue for the scheduled headless-Claude pass (run_claude_analysis.sh):
+        # a qualitative, news-reasoning layer follows a bit later, on top of
+        # this immediate deterministic reply -- see db.enqueue_analysis.
+        db.enqueue_analysis(conn, ticker)
         print(f"[telegram_bot] replied for {ticker} (sent={sent}, opinion={bool(rep.get('opinion'))})")
     except Exception as e:
         print(f"[telegram_bot] lookup failed for {ticker}: {type(e).__name__}: {e}",
