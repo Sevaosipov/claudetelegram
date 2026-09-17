@@ -15,6 +15,7 @@ import db, research, opinion
 conn = db.connect('data/disclosures.db')
 rep = research.build(conn, '<TICKER>')
 print(opinion.format_opinion(rep['opinion']))
+print(research.format_entry_target(rep))
 print('---NEWS---')
 for n in rep['news']:
     print(n['published'], '[' + n['publisher'] + ']', n['title'])
@@ -35,6 +36,10 @@ for n in rep['news']:
           where a few words suffice.
         - Start with an HTML bold ticker header: <b>TICKER</b>
         - Include the opinion.py factor breakdown from step (a) verbatim.
+        - Include the entry/target line from step (a) verbatim, if it printed
+          one (current price as entry reference, real analyst consensus
+          target as the hold-until reference -- both genuine sourced
+          numbers, never invent a price level yourself).
         - Below it, your own qualitative news bullets: 1-3 bullets MAX, only
           the headlines that actually matter -- skip noise entirely, and
           skip this section altogether if nothing in the news is notable.

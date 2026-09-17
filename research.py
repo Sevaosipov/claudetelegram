@@ -89,6 +89,25 @@ def _fmt_money(value: float | None, currency: str = "€") -> str:
     return f"{currency}{value:,.0f}"
 
 
+def format_entry_target(rep: dict) -> str:
+    """Current price as the entry reference, and the real sell-side analyst
+    consensus target as the hold-until reference -- both genuine sourced
+    numbers (current price from our own price history, target from actual
+    analysts, see analyst_view()), never a level this project invents itself.
+    "" when neither is available."""
+    prices = rep.get("prices")
+    current = prices.get("current") if isinstance(prices, dict) else None
+    analyst = rep.get("analyst")
+    bits = []
+    if current is not None:
+        bits.append(f"вход ~{current:,.2f}")
+    if analyst and analyst.get("target_mean") is not None and not analyst.get("target_stale"):
+        up = analyst.get("implied_upside_pct")
+        up_str = f", {up:+.0f}%" if up is not None else ""
+        bits.append(f"цель аналитиков ~{analyst['target_mean']:,.2f}{up_str}")
+    return "💵 " + " · ".join(bits) if bits else ""
+
+
 # --------------------------------------------------------------- our own data
 def insider_activity(conn, ticker: str) -> dict:
     """SEC Form 4 purchases and sales recorded for this ticker."""
@@ -805,6 +824,10 @@ def format_report(rep: dict) -> str:
 
     if rep.get("opinion"):
         L.append(opinion.format_opinion(rep["opinion"]))
+
+    entry_target = format_entry_target(rep)
+    if entry_target:
+        L.append("  " + entry_target)
 
     if rep.get("is_isin"):
         L.append("\n  ISIN, а не тикер: цена, новости, отчётность SEC, финансы, владение,"

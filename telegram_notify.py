@@ -208,12 +208,17 @@ def format_condensed(rep: dict) -> str:
     format_sec_line & co. (print-only, never sent to Telegram) don't need to.
     """
     import opinion
+    import research
     import tradingview
     t = rep["ticker"]
     L = [_b(t, True)]
 
     if rep.get("opinion"):
         L.append(opinion.format_opinion(rep["opinion"]))
+
+    entry_target = research.format_entry_target(rep)
+    if entry_target:
+        L.append(entry_target)
 
     buys, sells = rep["insiders"]["buys"], rep["insiders"]["sells"]
     if buys or sells:

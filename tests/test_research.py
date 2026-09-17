@@ -453,3 +453,31 @@ def test_corroboration_line_never_renders_a_verdict(conn, monkeypatch):
     assert "независимые источники по этому тикеру" in text  # sanity: line actually rendered
     for bad in ("рекомендуем", "стоит купить", "мы считаем", "наш прогноз", "целевая цена бота"):
         assert bad not in text
+
+
+def test_format_entry_target_shows_both_when_available():
+    rep = {"prices": {"current": 123.45},
+           "analyst": {"target_mean": 150.0, "implied_upside_pct": 20.0, "target_stale": False}}
+    text = research.format_entry_target(rep)
+    assert "123.45" in text
+    assert "150.00" in text and "+20%" in text
+
+
+def test_format_entry_target_skips_a_stale_analyst_target():
+    """Same rule as the dossier's own analyst section: a stale target (way off
+    the real price) is dropped rather than shown, real number or not."""
+    rep = {"prices": {"current": 100.0},
+           "analyst": {"target_mean": 500.0, "implied_upside_pct": None, "target_stale": True}}
+    text = research.format_entry_target(rep)
+    assert "100.00" in text and "500.00" not in text
+
+
+def test_format_entry_target_price_only_when_no_analyst_coverage():
+    rep = {"prices": {"current": 100.0}, "analyst": None}
+    text = research.format_entry_target(rep)
+    assert "100.00" in text and "цель" not in text.lower()
+
+
+def test_format_entry_target_empty_when_nothing_available():
+    assert research.format_entry_target({"prices": {"current": None}, "analyst": None}) == ""
+    assert research.format_entry_target({"prices": {}, "analyst": None}) == ""
