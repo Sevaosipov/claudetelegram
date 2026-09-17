@@ -394,10 +394,25 @@ def fetch_primary_xml(cik: str, accession: str, session: requests.Session) -> tu
 def scan_daily_index(date: dt.date, seen_accessions: set[str], session: requests.Session | None = None):
     """Like scan_new_filings, but scans SEC's complete daily index for one specific
     calendar date instead of the rolling 'latest ~100 filings' window -- use this
-    for full same-day coverage rather than near-real-time monitoring."""
+    for full same-day coverage rather than near-real-time monitoring.
+
+    Form 4/A (amendments) are skipped before the XML is even fetched, not just
+    filtered later: an amendment usually corrects an already-public original
+    (a typo, a footnote), and its OWN transactionDate can be many months
+    older than its filing date -- found by backtest.py turning up purchases
+    with e.g. a 2025-03 transaction "filed" in 2026-09. Treating that as a
+    fresh disclosure would score it as maximally stale-to-fresh in cluster.py
+    and, worse, feed backtest.py an entry date the market didn't actually
+    react on (it already knew from the original, prompt Form 4). Same
+    reasoning sec_13dg.py's --new-positions-only already applies to 13D/A --
+    this closes the same gap for Form 4.
+    """
     session = session or new_session()
-    for _form, cik, accession, filed in fetch_daily_index_accessions(date, session=session, forms=FORM_4):
+    for form, cik, accession, filed in fetch_daily_index_accessions(date, session=session, forms=FORM_4):
         if accession in seen_accessions or not cik:
+            continue
+        if form == "4/A":
+            yield accession, []
             continue
         try:
             fetched = fetch_primary_xml(cik, accession, session)
