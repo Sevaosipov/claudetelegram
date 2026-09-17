@@ -1,8 +1,18 @@
-"""Long-polls Telegram for inbound messages and replies with a per-ticker
-analysis: research.py's full dossier (insider/politician disclosure history,
-news, annual report, financials, analyst view, TradingView) reduced to its
-opinion section plus key supporting facts. Built on top of research.build()
-and telegram_notify.format_condensed()/send_text().
+"""Long-polls Telegram for inbound messages and replies with ONE merged
+verdict per ticker: opinion.py's deterministic score, the real entry/target
+prices, and a genuine qualitative news read, all in a single message.
+
+Used to reply immediately with just the deterministic part and let a
+scheduled pass send a qualitative follow-up later -- the user asked for one
+merged message instead, explicitly accepting the tradeoff (~30-90s wait
+instead of an instant reply). So a ticker lookup now enqueues
+(db.enqueue_analysis) and synchronously runs run_claude_analysis.sh right
+away rather than waiting for its next scheduled fire -- that script is the
+one thing that actually reads news and reasons (see its own header for why:
+no live-Claude hook exists inside this process). If that run fails or times
+out, falls back to sending the fast opinion.py-only reply so the user isn't
+left with total silence, and the queued row stays pending for the next
+scheduled or triggered run to retry.
 
 /backtest TICKER answers a different question: how did this ticker trade
 after its OWN past SEC insider purchases (backtest.backtest_ticker(), a
@@ -33,6 +43,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,6 +57,8 @@ import telegram_notify
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "disclosures.db"
+RUN_ANALYSIS_SCRIPT = BASE_DIR / "run_claude_analysis.sh"
+RUN_ANALYSIS_TIMEOUT = 300  # generous cap; a normal run takes well under this
 
 API_URL = "https://api.telegram.org/bot{token}/{method}"
 LONG_POLL_SECONDS = 25
@@ -54,7 +67,8 @@ PERSIST_SECONDS = 30 * 365 * 24 * 3600
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 
-HELP_TEXT = ("Пришлите тикер (например, AAPL) — в ответ опинион и сводка по нему.\n"
+HELP_TEXT = ("Пришлите тикер (например, AAPL) — через ~30-90 сек придёт один "
+             "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
              "что-то значить на уровне одного тикера).")
@@ -109,23 +123,31 @@ def _handle_message(conn, text: str) -> None:
         telegram_notify.send_text(
             f"Не похоже на тикер: {text[:40]!r}. " + HELP_TEXT)
         return
+    db.enqueue_analysis(conn, ticker)
+    print(f"[telegram_bot] queued {ticker}, running claude-analysis synchronously")
     try:
-        # Full build(), not build_condensed(): the opinion needs news/annual-
-        # report/financials/analyst, which only the full dossier fetches. Slower
-        # (several sequential network calls instead of one), but a condensed
-        # reply can't back an actual opinion with the sources that were asked for.
-        rep = research.build(conn, ticker)
-        sent = telegram_notify.send_text(telegram_notify.format_condensed(rep))
-        # Queue for the scheduled headless-Claude pass (run_claude_analysis.sh):
-        # a qualitative, news-reasoning layer follows a bit later, on top of
-        # this immediate deterministic reply -- see db.enqueue_analysis.
-        db.enqueue_analysis(conn, ticker)
-        print(f"[telegram_bot] replied for {ticker} (sent={sent}, opinion={bool(rep.get('opinion'))})")
+        result = subprocess.run([str(RUN_ANALYSIS_SCRIPT)], cwd=str(BASE_DIR),
+                                 timeout=RUN_ANALYSIS_TIMEOUT,
+                                 capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"exit {result.returncode}: {result.stderr[-2000:]}")
+        print(f"[telegram_bot] claude-analysis run finished for {ticker}")
     except Exception as e:
-        print(f"[telegram_bot] lookup failed for {ticker}: {type(e).__name__}: {e}",
-              file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось получить данные по {ticker} "
-                                   f"({type(e).__name__}). Попробуйте позже.")
+        print(f"[telegram_bot] synchronous claude-analysis failed for {ticker}: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        # Fall back to the fast deterministic-only reply so the user isn't left
+        # with total silence -- the queued row stays pending either way (only
+        # marked processed on a confirmed send inside run_claude_analysis.sh),
+        # so the next scheduled or triggered run will still pick it up.
+        try:
+            rep = research.build(conn, ticker)
+            telegram_notify.send_text(
+                telegram_notify.format_condensed(rep) +
+                "\n\n(Полный разбор не завершился в этот раз — попробуется снова.)")
+        except Exception as e2:
+            print(f"[telegram_bot] fallback reply also failed for {ticker}: "
+                  f"{type(e2).__name__}: {e2}", file=sys.stderr)
+            telegram_notify.send_text(f"Не удалось получить данные по {ticker}. Попробуйте позже.")
 
 
 def _poll_once(conn, token: str, chat_id: str, session: requests.Session) -> None:
