@@ -784,6 +784,12 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
          pct, amount, url, acc, found) = latest
         if pct is None or pct < min_percent:
             continue
+        # No trading symbol means the issuer isn't listed anywhere this bot can
+        # follow -- a shell, a private fund, a delisted name. The row stays in
+        # sec_stakes for the dossier; it just isn't something to act on, and the
+        # alert used to show the issuer's CIK where the ticker should be.
+        if not (ticker or "").strip():
+            continue
         if activist_only and not form_type.startswith("SCHEDULE 13D"):
             continue
         if max_age_days is not None:

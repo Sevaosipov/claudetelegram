@@ -204,6 +204,13 @@ def test_stake_below_the_filing_threshold_is_ignored(conn):
     assert cluster.find_stake_signals(conn) == []
 
 
+def test_stake_in_an_issuer_with_no_ticker_is_not_a_signal(conn):
+    """Nothing to follow: the alert used to print the issuer's CIK as its ticker."""
+    add_stake(conn, None, "Alternative Liquidity Index LP", 83.0)
+    add_stake(conn, "", "Some Other Holder", 40.0)
+    assert cluster.find_stake_signals(conn) == []
+
+
 def test_trivial_stake_increase_is_not_news(conn):
     """Index funds file 13G/A amendments constantly over fractions of a point."""
     add_stake(conn, "AAA", "Index Fund", 9.10, form_type="SCHEDULE 13G",
