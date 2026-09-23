@@ -12,6 +12,7 @@ it never raises, so a misconfigured bot doesn't break the rest of the pipeline.
 """
 from __future__ import annotations
 
+import datetime as dt
 import os
 
 import requests
@@ -551,3 +552,66 @@ def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
         parts.append("")
     parts.extend(house_lines)
     return "\n\n".join(parts) if len(parts) > 1 else parts[0]
+
+
+_CLOSE_REASON = {"insider_sell": "инсайдеры продают", "time": "срок вышел",
+                 "stop_loss": "стоп-лосс"}
+
+
+def _rule_lines(t, html: bool) -> list[str]:
+    lines = []
+    if t.met:
+        text = " · ".join(f"✓ {m}" for m in t.met)
+        lines.append(f"   {_esc(text) if html else text}")
+    if t.missed:
+        text = " · ".join(f"✗ {m}" for m in t.missed)
+        lines.append(f"   {_esc(text) if html else text}")
+    return lines
+
+
+def format_close_alert(alert, *, html: bool = True) -> str:
+    pos = alert.position
+    reason = _CLOSE_REASON.get(alert.trigger, alert.trigger)
+    price = ""
+    if alert.last_price:
+        change = (alert.last_price / pos.entry_price - 1) * 100
+        price = f" · вход {pos.entry_price:,.2f} → {alert.last_price:,.2f} ({change:+.1f}%)"
+    head = f"🚪 {pos.ticker} — {reason}"
+    detail = f"{alert.detail}{price} · открыта {datefmt.fmt(pos.opened_at)}"
+    return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
+
+
+def format_tiered_digest(selection, closes: list, *, html: bool = True) -> str:
+    """One message: 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть -- the daily Telegram digest
+    and the menu's "Сигналы" view (html=False) both render this."""
+    parts = []
+    if not selection.t212_checked:
+        parts.append("⚠️ Trading 212 не проверялся (нет ключа в .env) — показаны все акции.")
+    if selection.strong:
+        parts.append(_b(f"🔥 Сильные ({len(selection.strong)})", html))
+        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
+                  for t in selection.strong]
+    if selection.candidates:
+        parts.append(_b(f"👀 Кандидаты ({len(selection.candidates)})", html))
+        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
+                  for t in selection.candidates]
+    if closes:
+        parts.append(_b(f"🚪 Закрыть ({len(closes)})", html))
+        parts += [format_close_alert(a, html=html) for a in closes]
+    if not (selection.strong or selection.candidates or closes):
+        parts.append("За последние 3 дня сигналов нет.")
+    return "\n\n".join(parts)
+
+
+def format_positions(positions: list, price_fn) -> str:
+    if not positions:
+        return "Открытых позиций нет. /bought TICKER [цена] — добавить."
+    today = dt.date.today()
+    lines = ["Открытые позиции:"]
+    for p in positions:
+        price = price_fn(p.ticker)
+        change = f"{(price / p.entry_price - 1) * 100:+.1f}%" if price else "цена недоступна"
+        days = (today - dt.date.fromisoformat(p.opened_at)).days
+        lines.append(f"• {p.ticker}: вход {p.entry_price:,.2f}, сейчас "
+                     f"{f'{price:,.2f}' if price else '—'} ({change}), {days} дн.")
+    return "\n".join(lines)
