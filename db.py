@@ -415,6 +415,16 @@ CREATE TABLE IF NOT EXISTS crypto_etf_snapshots (
     PRIMARY KEY (fund, as_of)
 );
 
+-- Trading 212's tradable instruments (trading212.py), replaced wholesale on each
+-- daily refresh.
+CREATE TABLE IF NOT EXISTS t212_instruments (
+    ticker      TEXT PRIMARY KEY,    -- Trading 212's own id: AAPL_US_EQ
+    isin        TEXT,
+    type        TEXT,                -- STOCK / ETF / ...
+    short_name  TEXT,
+    currency    TEXT
+);
+
 -- Exchange wallet balances, one row per wallet per run (crypto_onchain.py).
 CREATE TABLE IF NOT EXISTS crypto_wallet_snapshots (
     coin        TEXT NOT NULL,
