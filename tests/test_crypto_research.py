@@ -47,7 +47,9 @@ def test_report_texts(conn, offline):
     rep = crypto_research.build(conn, BTC)
     report = crypto_research.format_report(rep)
     assert "BTC — Bitcoin" in report and "$BTC" in report and "📈 Прогноз на месяц" in report
-    assert "цены: Binance" in report and "новости: CoinDesk/Cointelegraph" in report
+    assert "цены: Binance (Yahoo недоступен)" in report
+    assert "новости: CoinDesk/Cointelegraph (Yahoo недоступен)" in report
+    assert "индикаторы" not in report.split("Источники:")[1]   # its section says so itself
     brief = crypto_research.format_brief(rep)
     assert brief.startswith("АКТИВ: BTC (Bitcoin, криптовалюта)") and "---NEWS---" in brief
     html = crypto_research.format_condensed(rep)

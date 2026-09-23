@@ -82,12 +82,14 @@ def _stock_hint(rep: dict) -> str:
 def _source_notes(rep: dict) -> list[str]:
     # Prices come from the history chain (Yahoo first, when it agrees with an exchange
     # spot); the exchanges-first current-price chain only fills in when that fails.
+    # An empty chain (None) is skipped: its own section already says "недоступно сейчас".
     notes = []
     for key, label, first in (("prices", "цены", "Yahoo"), ("indicators", "индикаторы", "TradingView"),
                               ("news", "новости", "Yahoo")):
         src = rep["sources"].get(key)
-        if src and src != first:
-            notes.append(f"{label}: {src}")
+        note = sources.source_note(label, src, first) if src is not None else None
+        if note:
+            notes.append(note)
     return notes
 
 

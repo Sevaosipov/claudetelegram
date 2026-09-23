@@ -552,7 +552,38 @@ def test_stock_build_uses_the_fallback_chains(conn, offline_stock):
 def test_stock_report_shows_the_outlook_and_the_sources(conn, offline_stock):
     text = research.format_report(research.build(conn, "NVDA"))
     assert "📈 Прогноз на месяц" in text
-    assert "цены: TradingView" in text and "аналитики: Nasdaq" in text and "новости: Google News" in text
+    assert ("Источники: цены: TradingView (Yahoo недоступен) · аналитики: Nasdaq (Yahoo недоступен)"
+            " · индикаторы: недоступно сейчас · новости: Google News (Yahoo недоступен)") in text
+
+
+def test_stock_brief_names_a_fallback_source(conn, offline_stock):
+    brief = research.format_brief(research.build(conn, "NVDA")).splitlines()
+    notes = brief[brief.index("---NEWS---") - 1]
+    assert notes.startswith("Источники: ") and "аналитики: Nasdaq (Yahoo недоступен)" in notes
+
+
+def test_a_failed_price_chain_says_unavailable(conn, offline_stock, monkeypatch):
+    """Spec §4/§5: a section whose whole chain failed says so; the rest still arrives
+    (the Nasdaq analyst stub keeps the report "found")."""
+    monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    rep = research.build(conn, "NVDA")
+    report = research.format_report(rep)
+    assert "Цена" in report and "\n  недоступно сейчас" in report
+    assert "цены: недоступно сейчас" in report
+    assert "цены: недоступно сейчас" in research.format_brief(rep)
+
+
+def test_no_analyst_coverage_reads_as_no_data(conn, offline_stock, monkeypatch):
+    monkeypatch.setattr(sources, "nasdaq_analyst", lambda s: None)
+    assert "аналитики: нет данных" in research.format_report(research.build(conn, "NVDA"))
+
+
+def test_yahoo_served_sections_have_no_note(conn, offline_stock, monkeypatch):
+    monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, "TradingView"))
+    monkeypatch.setattr(sources, "news", lambda a, name=None: ([], "Yahoo"))
+    monkeypatch.setattr(research, "price_context", lambda t: {"windows": [], "current": 5.0})
+    rep = research.build(conn, "NVDA")
+    assert research._source_notes(rep) == ["аналитики: Nasdaq (Yahoo недоступен)"]
 
 
 def test_brief_for_a_stock(conn, offline_stock):

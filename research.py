@@ -752,7 +752,9 @@ def _build_stock(conn, asset) -> dict:
         ).fetchone()
         sec_name = sec_name[0] if sec_name else None
 
-    headlines, source_notes["news"] = sources.news(asset, sec_name)
+    headlines = None
+    if not is_isin:   # news is skipped for an ISIN on purpose, not unavailable
+        headlines, source_notes["news"] = sources.news(asset, sec_name)
 
     rep = {
         "ticker": ticker,
@@ -823,13 +825,21 @@ def build(conn, text: str) -> dict:
     return _build_stock(conn, asset)
 
 
-_SOURCE_FIRST = {"prices": ("цены", "Yahoo"), "analyst": ("аналитики", "Yahoo"),
-                 "indicators": ("индикаторы", "TradingView"), "news": ("новости", "Yahoo")}
+# key -> (label, the chain's first source, what an empty chain means). No analyst
+# coverage looks the same as an outage, so an empty analyst chain reads "нет данных".
+_SOURCE_CHAINS = {"prices": ("цены", "Yahoo", "недоступно сейчас"),
+                  "analyst": ("аналитики", "Yahoo", "нет данных"),
+                  "indicators": ("индикаторы", "TradingView", "недоступно сейчас"),
+                  "news": ("новости", "Yahoo", "недоступно сейчас")}
 
 
 def _source_notes(rep: dict) -> list[str]:
-    return [f"{label}: {rep['sources'][k]}" for k, (label, first) in _SOURCE_FIRST.items()
-            if rep.get("sources", {}).get(k) and rep["sources"][k] != first]
+    """Only chains present in rep["sources"]: "prices" is set only when price_context
+    (Yahoo) failed, and an ISIN skips analysts and news on purpose."""
+    used = rep.get("sources") or {}
+    notes = [sources.source_note(label, used[k], first, empty)
+             for k, (label, first, empty) in _SOURCE_CHAINS.items() if k in used]
+    return [n for n in notes if n]
 
 
 _NOT_FOUND_HINT = "Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета)."
@@ -848,6 +858,9 @@ def format_brief(rep: dict) -> str:
     if entry_target:
         L.append(entry_target)
     L.append(outlook.format_outlook(rep["outlook"], rep["ticker"]))
+    notes = _source_notes(rep)
+    if notes:
+        L.append("Источники: " + " · ".join(notes))
     L.append("---NEWS---")
     L += [f"{n['published']} [{n['publisher']}] {n['title']}" for n in rep["news"]]
     return "\n".join(L)
@@ -899,6 +912,9 @@ def format_report(rep: dict) -> str:
         for p in windows:
             rel = f"  ({p['excess']:+.1f} п.п. к {BENCHMARK})" if p["excess"] is not None else ""
             L.append(f"  {p['label']:10} {p['return']:+7.1f}%{rel}")
+    elif (rep.get("sources") or {}).get("prices", "x") is None and not rep.get("is_isin"):
+        L.append("\n" + termstyle.section("Цена"))    # the whole price chain failed
+        L.append("  недоступно сейчас")
 
     if rep.get("analyst"):
         L.append(_format_analyst(rep["analyst"]))

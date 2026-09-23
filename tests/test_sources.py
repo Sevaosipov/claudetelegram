@@ -319,3 +319,13 @@ def test_stock_universe_symbols(monkeypatch):
         raise ConnectionError("x")
     monkeypatch.setattr(universe, "load", down)
     assert sources.stock_universe_symbols() == set()
+
+
+@pytest.mark.parametrize("used,empty,note", [
+    ("Yahoo", "недоступно сейчас", None),
+    (None, "недоступно сейчас", "цены: недоступно сейчас"),
+    (None, "нет данных", "цены: нет данных"),
+    ("Binance", "недоступно сейчас", "цены: Binance (Yahoo недоступен)"),
+])
+def test_source_note(used, empty, note):
+    assert sources.source_note("цены", used, "Yahoo", empty=empty) == note

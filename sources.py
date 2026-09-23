@@ -53,6 +53,17 @@ def first_available(attempts: list[tuple[str, Callable]]):
     return None, None
 
 
+def source_note(label: str, used: str | None, first: str,
+                empty: str = "недоступно сейчас") -> str | None:
+    """How a message names a section's source (spec §4): nothing when the chain's
+    first source answered, `empty` when none did, else "цены: Binance (Yahoo недоступен)"."""
+    if used == first:
+        return None
+    if used is None:
+        return f"{label}: {empty}"
+    return f"{label}: {used} ({first} недоступен)"
+
+
 def _get(url: str, **params) -> requests.Response:
     resp = requests.get(url, params=params or None, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()

@@ -307,3 +307,9 @@ def test_condensed_stock_reply_points_to_the_stock_report_not_the_coin():
     rep = _stock_rep(ticker="AAPL")
     del rep["asset"]
     assert tn.format_condensed(rep).splitlines()[-1] == "Полный отчёт: python research.py 'AAPL'"
+
+
+def test_condensed_stock_reply_names_fallback_sources():
+    text = tn.format_condensed(_stock_rep(sources={"prices": "TradingView", "news": "Yahoo"}))
+    assert "Источники: цены: TradingView (Yahoo недоступен)" in text
+    assert "Источники" not in tn.format_condensed(_stock_rep())
