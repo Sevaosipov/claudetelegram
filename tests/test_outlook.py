@@ -129,3 +129,116 @@ def test_walk_forward_is_not_wall_clock_dependent():
     # Both should have the same oos_n (7 years of test data)
     assert rows_past["up|flat|normal"]["oos_n"] == rows_future["up|flat|normal"]["oos_n"]
     assert rows_past["up|flat|normal"]["oos_n"] == 7 * 30
+
+
+# ------------------------------------------------------- refresh, lookup, message
+import datetime as dt  # noqa: E402
+
+import assets  # noqa: E402
+
+
+def _bars(closes, start="2010-01-01"):
+    return [(d.date().isoformat(), c)
+            for d, c in zip(pd.bdate_range(start, periods=len(closes)), closes)]
+
+
+@pytest.fixture
+def market(monkeypatch):
+    series = {"AAA": _bars(_path(4000)), "BBB": _bars(_path(4000, daily=-0.0005))}
+    calls = []
+
+    def history(asset, days=800):
+        calls.append((asset.yahoo, days))
+        bars = series.get(asset.yahoo)
+        return (bars, "Yahoo") if bars else (None, None)
+    monkeypatch.setattr(outlook, "_universe", lambda conn, kind: ["AAA", "BBB"] if kind == "stock" else [])
+    monkeypatch.setattr(outlook.sources, "price_history", history)
+    monkeypatch.setattr(outlook.tradingview, "fetch_snapshot", lambda q, session=None: None)
+    return calls
+
+
+def test_refresh_stores_bars_and_builds_the_table(conn, market):
+    outlook.refresh(conn, ["stock"])
+    table, built_at = outlook.load_table(conn, "stock")
+    assert table and built_at and len(outlook.load_bars(conn, "AAA")) == 4000
+
+
+def test_refresh_if_stale_does_nothing_when_fresh(conn, market):
+    outlook.refresh(conn, ["stock", "crypto"])
+    before = len(market)
+    outlook.refresh_if_stale(conn)
+    assert len(market) == before
+
+
+def test_a_split_triggers_a_full_refetch(conn, market, monkeypatch):
+    outlook.save_bars(conn, "AAA", [(d, c * 2) for d, c in _bars(_path(4000))])   # stale scale
+    outlook.refresh(conn, ["stock"])
+    aaa_days = [days for sym, days in market if sym == "AAA"]
+    assert aaa_days[-1] == outlook.FULL_HISTORY_DAYS
+    assert outlook.load_bars(conn, "AAA")[-1][1] == pytest.approx(_path(4000)[-1])
+
+
+def test_lookup_without_a_table(conn, market):
+    assert outlook.lookup(conn, assets.stock_asset("AAA"))["status"] == "no_table"
+
+
+def test_lookup_places_the_asset_and_reads_the_table(conn, market):
+    outlook.refresh(conn, ["stock"])
+    res = outlook.lookup(conn, assets.stock_asset("AAA"))
+    assert res["status"] == "ok" and res["table"] == "stock" and not res["pooled"]
+    assert res["situation"].count("|") == 2 and res["n"] > 0 and 0 < res["base_rate"] < 1
+
+
+def test_lookup_falls_back_to_tradingview(conn, market, monkeypatch):
+    outlook.refresh(conn, ["stock"])
+    monkeypatch.setattr(outlook.tradingview, "fetch_snapshot", lambda q, session=None: {
+        "close": 110.0, "SMA50": 105.0, "SMA200": 100.0, "Perf.1M": 1.0, "Volatility.M": 2.0})
+    res = outlook.lookup(conn, assets.stock_asset("SAP.DE"))
+    assert res["status"] == "ok" and res["pooled"] and res["source"] == "TradingView"
+    assert res["situation"] == "up|flat|*" and res["european"]
+
+
+def test_lookup_without_any_prices(conn, market):
+    outlook.refresh(conn, ["stock"])
+    assert outlook.lookup(conn, assets.stock_asset("ZZZ"))["status"] == "no_prices"
+    assert outlook.lookup(conn, assets.resolve("DE0007164600"))["status"] == "no_prices"
+
+
+def test_lookup_with_too_little_history(conn, market, monkeypatch):
+    outlook.refresh(conn, ["stock"])
+    monkeypatch.setattr(outlook.sources, "price_history",
+                        lambda asset, days=800: (_bars(_path(100)), "Yahoo"))
+    assert outlook.lookup(conn, assets.stock_asset("NEW"))["status"] == "short_history"
+
+
+OK = {"status": "ok", "table": "stock", "situation": "up|strong_up|normal", "pooled": False,
+      "source": "Yahoo", "n": 4210, "p": 0.61, "base_rate": 0.56, "edge": True,
+      "european": False}
+
+
+def test_message_with_an_edge():
+    text = outlook.format_outlook(OK, "NVDA")
+    assert text.splitlines()[0] == ("📈 Прогноз на месяц: рост в 61% похожих ситуаций "
+                                    "(n = 4 210) · обычно 56% · проверено на истории")
+    assert "ситуация: тренд вверх · месяц сильный рост · волатильность обычная" in text
+    assert text.splitlines()[-1].strip().startswith("частота в прошлом, не гарантия")
+
+
+def test_message_without_an_edge_and_with_own_history():
+    text = outlook.format_outlook({**OK, "edge": False, "own_n": 36, "own_p": 0.64}, "NVDA")
+    assert text.splitlines()[0] == "📈 Прогноз на месяц: нет преимущества над базовой частотой (обычно 56%)"
+    assert "у самой NVDA в такой ситуации: 64% (n = 36)" in text
+
+
+def test_message_notes():
+    text = outlook.format_outlook({**OK, "european": True, "source": "TradingView",
+                                   "pooled": True, "situation": "up|flat|*"}, "SAP.DE")
+    assert "(без учёта волатильности)" in text and "таблица по акциям США" in text
+    assert "цены: TradingView" in text
+
+
+@pytest.mark.parametrize("status,words", [("no_table", "ещё не готов"),
+                                          ("no_prices", "нет свежих цен"),
+                                          ("short_history", "мало истории")])
+def test_message_for_each_status(status, words):
+    assert words in outlook.format_outlook({"status": status}, "X")

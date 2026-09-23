@@ -11,8 +11,13 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import sys
 
 import pandas as pd
+
+import assets
+import sources
+import tradingview
 
 HORIZON = {"stock": 21, "crypto": 30}
 LOOKBACK = 252
@@ -23,6 +28,18 @@ MIN_OOS = 50
 MIN_OWN = 30
 OOS_START_OFFSET_YEARS = 4  # Test fold starts at the table's 5th year: years[0] + 4
 POOLED = "*"
+TABLE_MAX_AGE_DAYS = 7
+FULL_HISTORY_DAYS = 15 * 365 + 10
+TOP_UP_OVERLAP_DAYS = 30
+SPLIT_TOLERANCE = 0.01          # an overlap day off by more than 1% means history was rescaled
+LOOKUP_DAYS = 800
+CRYPTO_UNIVERSE_TOP = 50
+CRYPTO_MIN_HISTORY_DAYS = 730
+_TREND = {"up": "тренд вверх", "down": "тренд вниз", "mixed": "тренд смешанный"}
+_MOVE = {"strong_up": "месяц сильный рост", "strong_down": "месяц сильное падение",
+         "flat": "месяц без резких движений"}
+_VOL = {"high": "волатильность высокая", "normal": "волатильность обычная",
+        POOLED: "(без учёта волатильности)"}
 
 
 # ------------------------------------------------------------------ situations
@@ -173,3 +190,166 @@ def save_bars(conn, symbol: str, bars: list[tuple[str, float]]) -> None:
 def load_bars(conn, symbol: str) -> list[tuple[str, float]]:
     return [(d, c) for d, c in conn.execute(
         "SELECT date, close FROM price_bars WHERE symbol = ? ORDER BY date", (symbol,))]
+
+
+# ------------------------------------------------------------------------ refresh
+def _universe(conn, kind: str) -> list[str]:
+    """Yahoo symbols of the assets a table is built from."""
+    if kind == "stock":
+        import universe
+        return sorted({t.replace(".", "-") for t in universe.load()["tickers"]})
+    coins = [r for r in sources.cached_coins(conn)
+             if r[0] not in sources.STABLECOINS and r[3] is not None]
+    return [f"{sym}-USD" for sym, *_rest in sorted(coins, key=lambda r: r[3])[:CRYPTO_UNIVERSE_TOP]]
+
+
+def _asset_for(kind: str, yahoo_symbol: str):
+    return (assets.stock_asset(yahoo_symbol) if kind == "stock"
+            else assets.crypto_asset(yahoo_symbol[:-len("-USD")]))
+
+
+def _top_up(conn, asset) -> None:
+    """Fetch only the new days -- or everything again when the overlap shows the
+    history was rescaled (a split or dividend adjustment)."""
+    stored = load_bars(conn, asset.yahoo)
+    if not stored:
+        bars, _src = sources.price_history(asset, FULL_HISTORY_DAYS)
+        if bars:
+            save_bars(conn, asset.yahoo, bars)
+        return
+    last = dt.date.fromisoformat(stored[-1][0])
+    days = (dt.date.today() - last).days + TOP_UP_OVERLAP_DAYS
+    bars, _src = sources.price_history(asset, days)
+    if not bars:
+        return
+    old = dict(stored)
+    rescaled = any(d in old and abs(c / old[d] - 1) > SPLIT_TOLERANCE for d, c in bars)
+    if rescaled:
+        bars, _src = sources.price_history(asset, FULL_HISTORY_DAYS)
+        if not bars:
+            return
+        conn.execute("DELETE FROM price_bars WHERE symbol = ?", (asset.yahoo,))
+    save_bars(conn, asset.yahoo, bars)
+
+
+def refresh(conn, kinds=("stock", "crypto")) -> None:
+    for kind in kinds:
+        obs = []
+        for symbol in _universe(conn, kind):
+            asset = _asset_for(kind, symbol)
+            try:
+                _top_up(conn, asset)
+            except Exception as e:  # one symbol failing must not stop the table
+                print(f"[outlook] {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+            bars = load_bars(conn, asset.yahoo)
+            if kind == "crypto" and len(bars) < CRYPTO_MIN_HISTORY_DAYS:
+                continue
+            obs += observations(bars, HORIZON[kind])
+        if obs:
+            save_table(conn, kind, build_table(obs))
+            print(f"[outlook] {kind}: {len(obs)} observations")
+
+
+def refresh_if_stale(conn) -> None:
+    stale = []
+    for kind in ("stock", "crypto"):
+        _rows, built_at = load_table(conn, kind)
+        if (built_at is None or dt.datetime.now() - dt.datetime.fromisoformat(built_at)
+                > dt.timedelta(days=TABLE_MAX_AGE_DAYS)):
+            stale.append(kind)
+    if stale:
+        refresh(conn, stale)
+
+
+# ------------------------------------------------------------------------- lookup
+def lookup(conn, asset) -> dict:
+    if asset.is_isin:
+        return {"status": "no_prices"}
+    kind, h = asset.kind, HORIZON[asset.kind]
+    table, _built_at = load_table(conn, kind)
+    if not table:
+        return {"status": "no_table"}
+    bars, source = sources.price_history(asset, LOOKUP_DAYS)
+    key = None
+    if bars and len(bars) >= MIN_HISTORY:
+        key = situation([c for _d, c in bars], h)
+    is_pooled = False
+    if key is None:
+        snap = tradingview.fetch_snapshot(asset.tradingview or asset.symbol)
+        key = situation_from_tv(snap, h) if snap else None
+        if key is not None:
+            is_pooled, source = True, "TradingView"
+    if key is None:
+        return {"status": "short_history" if bars else "no_prices"}
+    row = table.get(key, {})
+    result = {"status": "ok", "table": kind, "situation": key, "pooled": is_pooled,
+              "source": source, "n": row.get("n", 0),
+              "p": row["up"] / row["n"] if row.get("n") else None,
+              "base_rate": next(iter(table.values()))["base_rate"],
+              "edge": has_edge(row), "european": kind == "stock" and asset.exchange is not None}
+    if not is_pooled:
+        own = [up for _y, k, up in observations(load_bars(conn, asset.yahoo), h) if k == key]
+        if len(own) >= MIN_OWN:
+            result["own_n"], result["own_p"] = len(own), sum(own) / len(own)
+    return result
+
+
+def describe(key: str) -> str:
+    trend, move, vol = key.split("|")
+    return f"{_TREND[trend]} · {_MOVE[move]} · {_VOL[vol]}"
+
+
+def _pct0(x: float) -> str:
+    return f"{x * 100:.0f}%"
+
+
+def format_outlook(result: dict, symbol: str) -> str:
+    status = result.get("status")
+    if status == "no_table":
+        return "📈 Прогноз на месяц: ещё не готов (таблица строится раз в неделю)"
+    if status == "no_prices":
+        return "📈 Прогноз на месяц: нет свежих цен"
+    if status == "short_history":
+        return "📈 Прогноз на месяц: мало истории для прогноза"
+    usual = f"обычно {_pct0(result['base_rate'])}"
+    if result["edge"] and result["p"] is not None:
+        n = f"{result['n']:,}".replace(",", " ")
+        head = (f"📈 Прогноз на месяц: рост в {_pct0(result['p'])} похожих ситуаций "
+                f"(n = {n}) · {usual} · проверено на истории")
+    else:
+        head = f"📈 Прогноз на месяц: нет преимущества над базовой частотой ({usual})"
+    lines = [head, f"   ситуация: {describe(result['situation'])}"]
+    if result.get("own_n"):
+        lines.append(f"   у самой {symbol} в такой ситуации: {_pct0(result['own_p'])} "
+                     f"(n = {result['own_n']})")
+    notes = []
+    if result.get("european"):
+        notes.append("таблица по акциям США")
+    if result.get("table") == "crypto":
+        notes.append("по ~30 крупнейшим монетам")
+    if result.get("source") not in (None, "Yahoo"):
+        notes.append(f"цены: {result['source']}")
+    lines.append("   частота в прошлом, не гарантия" + ("".join(f" · {n}" for n in notes)))
+    return "\n".join(lines)
+
+
+def main() -> int:
+    import argparse
+    import db
+    from pathlib import Path
+    ap = argparse.ArgumentParser(description=__doc__)
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--rebuild", action="store_true", help="refetch and rebuild both tables now")
+    group.add_argument("--refresh-if-stale", action="store_true",
+                       help="rebuild a table only when it is older than 7 days")
+    args = ap.parse_args()
+    conn = db.connect(Path(__file__).parent / "data" / "disclosures.db")
+    if args.rebuild:
+        refresh(conn)
+    else:
+        refresh_if_stale(conn)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

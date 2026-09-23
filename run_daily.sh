@@ -57,6 +57,10 @@ trap notify_failure EXIT
 # was a genuine first-ever filing. This drops amendments entirely.
 python bot.py --once --stake-min-percent 10 --activist-only --new-positions-only
 
+# The one-month outlook's frequency tables (outlook.py): rebuilt when older than a
+# week. Its own failure must not fail the daily run.
+python outlook.py --refresh-if-stale || echo "[outlook] refresh failed"
+
 # Separate feature, unrelated to the disclosure sources above: a daily check of
 # the EURUSD carry-gated trend strategy (see carry_strategy.py), alerting over
 # the same Telegram bot only when its position state changes.

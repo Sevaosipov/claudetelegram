@@ -42,7 +42,7 @@ FIELDS = (
     "RSI", "MACD.macd", "MACD.signal", "ADX",
     "close", "SMA50", "SMA200",
     "Perf.1M", "Perf.3M", "Perf.YTD", "Perf.Y",
-    "Volatility.D", "price_earnings_ttm", "earnings_per_share_basic_ttm",
+    "Volatility.D", "Volatility.M", "price_earnings_ttm", "earnings_per_share_basic_ttm",
     "beta_1_year",
 )
 
