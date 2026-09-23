@@ -200,3 +200,22 @@ def test_view_lists_open_positions(conn, keyed, scored, capsys, monkeypatch):
     positions.open_position(conn, "AAPL", 100.0)
     menu.show_signals(conn)
     assert "Открытые позиции" in _shown(capsys)
+
+
+def test_view_shows_exit_signals_even_when_already_alerted(conn, keyed, scored, no_prices, capsys,
+                                                             monkeypatch):
+    """ignore_alert_state=True -- this is a browse, not a digest, so an exit
+    already sent must still show up here."""
+    from conftest import add_sec_sale
+    monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
+    for i in range(2):
+        add_sec_purchase(conn, "AAPL", f"Buyer {i}", 200_000, "2026-01-10")
+    add_sec_sale(conn, "AAPL", "Buyer 0", 200_000, "2026-05-10")
+    add_sec_sale(conn, "AAPL", "Buyer 1", 200_000, "2026-05-10")
+    [exit_sig] = cluster.find_sec_exit_signals(conn)
+    cluster.commit_exit_alert(conn, exit_sig)
+    assert cluster.find_sec_exit_signals(conn) == []   # already alerted
+
+    menu.show_signals(conn)
+    out = _shown(capsys)
+    assert "Выходы" in out and "AAPL" in out

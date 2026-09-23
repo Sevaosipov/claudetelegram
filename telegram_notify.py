@@ -582,8 +582,8 @@ def format_close_alert(alert, *, html: bool = True) -> str:
 
 
 def format_tiered_digest(selection, closes: list, *, html: bool = True) -> str:
-    """One message: 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть -- the daily Telegram digest
-    and the menu's "Сигналы" view (html=False) both render this."""
+    """One message: 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть, 🚨 Выходы -- the daily
+    Telegram digest and the menu's "Сигналы" view (html=False) both render this."""
     parts = []
     if not selection.t212_checked:
         parts.append("⚠️ Trading 212 не проверялся (нет ключа в .env) — показаны все акции.")
@@ -598,7 +598,10 @@ def format_tiered_digest(selection, closes: list, *, html: bool = True) -> str:
     if closes:
         parts.append(_b(f"🚪 Закрыть ({len(closes)})", html))
         parts += [format_close_alert(a, html=html) for a in closes]
-    if not (selection.strong or selection.candidates or closes):
+    if selection.exits:
+        parts.append(_b(f"🚨 Выходы ({len(selection.exits)})", html))
+        parts += [format_any_signal(s, html=html) for s in selection.exits]
+    if not (selection.strong or selection.candidates or closes or selection.exits):
         parts.append("За последние 3 дня сигналов нет.")
     return "\n\n".join(parts)
 

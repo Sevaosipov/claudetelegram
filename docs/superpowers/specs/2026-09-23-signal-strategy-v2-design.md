@@ -17,7 +17,9 @@ digest and the menu's "Сигналы" view.
 ## Tier rules
 
 Scope: buy-side signals only (clusters, big solo buys, 13D/G stakes, crypto
-inflows). Exit signals and crypto outflows never appear as buy signals.
+inflows). Exit signals and crypto outflows never appear as buy signals -- exit
+signals instead surface in their own section (`Selection.exits`, see
+"Components" below); crypto outflows aren't shown at all.
 
 ### Floors (every stock)
 
@@ -127,14 +129,14 @@ or NULL), closed_at, close_reason, close_alerted_at`.
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `strategy.py` (new) | `classify(conn, signal, t212) -> TierResult(tier, met, missed)`; `select(conn, signals, t212) -> (strong, candidates)` with floors, caps and ordering; the rule constants | `cluster`, `trading212`, `marketcap` (via `enrich_signals`), `crypto` |
+| `strategy.py` (new) | `classify(conn, signal, t212) -> TierResult(tier, met, missed)`; `select(conn, signals, t212) -> Selection(strong, candidates, t212_checked, exits)` with floors, caps, ordering and exit passthrough; `exit_signals(conn, sources=...)`, the shared exit-finder list; the rule constants | `cluster`, `trading212`, `marketcap` (via `enrich_signals`), `crypto` |
 | `crypto.price_trend(conn, symbol)` (new) | 7-day return, last close vs 20-day average; daily-cached | `price_history_cache`, yfinance |
 | `positions.py` (new) | positions table access; `open/close/list`; `check_exits` | `db`, `cluster.name_key`, price via `crypto.yf_symbol` series |
 | finders (`cluster/buys.py`) | add `member_roles` | — |
 | `telegram_bot.py` | `/bought`, `/sold`, `/positions` | `positions` |
-| `telegram_notify.py` | `format_tiered_digest(strong, candidates, closes)` with 🔥 / 👀 / 🚪 sections and rule lines | — |
-| `bot.run_cluster_pass` | finders → `strategy.select` → `positions.check_exits` → one message; commit alert state for what was sent | above |
-| `menu.show_signals` | the same three sections plus open positions | above |
+| `telegram_notify.py` | `format_tiered_digest(selection, closes)` with 🔥 / 👀 / 🚪 / 🚨 sections and rule lines | — |
+| `bot.run_cluster_pass` | finders → `strategy.select` (buy side tiered, exits passed through) → `positions.check_exits` → one message; commit alert state for what was sent, exits included | above |
+| `menu.show_signals` | the same four sections (exits with `ignore_alert_state=True`) plus open positions | above |
 | `run_daily.sh` | drop `--min-score 35` (the tiers replace it); keep the stake flags | — |
 
 Data flow for the daily job:

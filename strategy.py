@@ -49,6 +49,9 @@ class Selection:
     strong: list[Tiered]
     candidates: list[Tiered]
     t212_checked: bool
+    # Exit signals from the input, unfiltered and untiered -- see select()'s
+    # docstring for why they bypass recency/T212/size entirely.
+    exits: list = field(default_factory=list)
 
 
 def _short(v: float) -> str:
@@ -193,11 +196,45 @@ def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | 
     return signals
 
 
+_EXIT_SOURCES = ("sec", "house", "bafin", "norway", "sweden", "senate")
+
+
+def exit_signals(conn, *, ignore_alert_state: bool = False, sources: dict | None = None) -> list:
+    """One definition of the exit-finder list, mirroring buy_side_signals -- people
+    who bought a ticker together later selling it together, for SEC, House, BaFin,
+    Norway, Sweden and Senate. Follows the same `sources` dict convention as
+    buy_side_signals (bot._which_sources' shape); None (the default) runs every
+    source, Senate included.
+    """
+    on = sources if sources is not None else {k: True for k in _EXIT_SOURCES}
+    signals = []
+    if on.get("sec", False):
+        signals += cluster.find_sec_exit_signals(conn, ignore_alert_state=ignore_alert_state)
+    if on.get("house", False):
+        signals += cluster.find_house_exit_signals(conn, ignore_alert_state=ignore_alert_state)
+    if on.get("bafin", False):
+        signals += cluster.find_bafin_exit_signals(conn, ignore_alert_state=ignore_alert_state)
+    if on.get("norway", False):
+        signals += cluster.find_norway_exit_signals(conn, ignore_alert_state=ignore_alert_state)
+    if on.get("sweden", False):
+        signals += cluster.find_sweden_exit_signals(conn, ignore_alert_state=ignore_alert_state)
+    if on.get("senate", False):
+        signals += cluster.find_senate_exit_signals(conn, ignore_alert_state=ignore_alert_state)
+    return signals
+
+
 def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection:
     """`t212` is a trading212.Availability, or None when the instrument list isn't
-    available -- then stocks aren't filtered and Selection.t212_checked says so."""
+    available -- then stocks aren't filtered and Selection.t212_checked says so.
+
+    ExitSignals in `signals` (hasattr "seller_count") are kept in .exits as-is:
+    no recency, Trading 212 or size filter -- they're already deduplicated by the
+    exit finders' own alert state (should_alert_exit), the same way should_alert
+    dedupes buy-side clusters.
+    """
     today = today or dt.date.today()
     since = (today - dt.timedelta(days=MAX_AGE_DAYS)).isoformat()
+    exits = [s for s in signals if hasattr(s, "seller_count")]
     pre = [s for s in signals
            if is_buy_side(s)
            and (cluster.disclosed_on(conn, s) or "") >= since
@@ -219,4 +256,5 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
         strong=[t for t in tiered if t.tier == STRONG],
         candidates=candidates[:MAX_CANDIDATES],
         t212_checked=t212 is not None,
+        exits=exits,
     )

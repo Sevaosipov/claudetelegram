@@ -36,7 +36,8 @@ def show_signals(conn) -> None:
     plus pending close alerts and the positions reported with /bought."""
     print()
     print(termstyle.header("СИГНАЛЫ"))
-    selection = strategy.select(conn, _find_signals(conn), trading212.availability(conn))
+    signals = _find_signals(conn) + strategy.exit_signals(conn, ignore_alert_state=True)
+    selection = strategy.select(conn, signals, trading212.availability(conn))
     closes = positions.check_exits(conn)
     print(telegram_notify.format_tiered_digest(selection, closes, html=False))
     print()

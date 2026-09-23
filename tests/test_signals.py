@@ -759,6 +759,37 @@ def test_send_digest_sends_nothing_when_there_is_nothing(conn, monkeypatch):
     assert sent == []
 
 
+def test_send_digest_commits_exits_only_on_success(conn, monkeypatch):
+    import strategy
+    exit_sig = cluster.ExitSignal(source="SEC", ticker="AAA", company="C", total_buyers=2,
+                                  seller_count=2, lines=["x"], seller_names=["A", "B"])
+    sel = strategy.Selection([], [], True, exits=[exit_sig])
+
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: False)
+    assert bot._send_digest(conn, sel, []) is False
+    assert db.get_alert_state(conn, "SEC_EXIT", "AAA") is None
+
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    assert bot._send_digest(conn, sel, []) is True
+    assert "Выходы" in sent[0] and "AAA" in sent[0]
+    assert db.get_alert_state(conn, "SEC_EXIT", "AAA") is not None
+
+
+def test_send_digest_sends_when_there_are_only_exits(conn, monkeypatch):
+    """No strong/candidate signals and no close alerts, but an exit -- must still
+    send, not silently drop it because the old strong+candidates check said
+    'nothing to say'."""
+    import strategy
+    exit_sig = cluster.ExitSignal(source="SEC", ticker="AAA", company="C", total_buyers=2,
+                                  seller_count=2, lines=[], seller_names=["A", "B"])
+    sel = strategy.Selection([], [], True, exits=[exit_sig])
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    assert bot._send_digest(conn, sel, []) is True
+    assert sent
+
+
 # --------------------------------------------------------- run_cluster_pass
 def test_run_cluster_pass_tiers_a_fresh_director_cluster(conn, monkeypatch):
     """End-to-end through real argparse defaults (bot.build_parser): a genuine
@@ -781,3 +812,35 @@ def test_run_cluster_pass_tiers_a_fresh_director_cluster(conn, monkeypatch):
     args = bot.build_parser().parse_args(["--once", "--no-market-context"])
     selection = bot.run_cluster_pass(conn, args)
     assert "AAA" in [t.signal.ticker for t in selection.strong]
+
+
+def test_run_cluster_pass_includes_exit_signals(conn, monkeypatch):
+    """The exit-finder block used to compute exits and hand them to strategy.select,
+    which silently dropped every one of them (is_buy_side excludes ExitSignal) --
+    they never reached .exits or the digest. run_cluster_pass must now surface
+    them via strategy.exit_signals."""
+    import trading212
+    monkeypatch.setattr(trading212, "availability", lambda conn: None)
+
+    for i in range(2):
+        add_sec_purchase(conn, "BBB", f"Buyer {i}", 200_000, "2026-01-10")
+    add_sec_sale(conn, "BBB", "Buyer 0", 200_000, "2026-05-10")
+    add_sec_sale(conn, "BBB", "Buyer 1", 200_000, "2026-05-10")
+
+    args = bot.build_parser().parse_args(["--once", "--no-market-context"])
+    selection = bot.run_cluster_pass(conn, args)
+    assert [e.ticker for e in selection.exits] == ["BBB"]
+
+
+def test_run_cluster_pass_respects_no_exit_signals(conn, monkeypatch):
+    import trading212
+    monkeypatch.setattr(trading212, "availability", lambda conn: None)
+
+    for i in range(2):
+        add_sec_purchase(conn, "BBB", f"Buyer {i}", 200_000, "2026-01-10")
+    add_sec_sale(conn, "BBB", "Buyer 0", 200_000, "2026-05-10")
+    add_sec_sale(conn, "BBB", "Buyer 1", 200_000, "2026-05-10")
+
+    args = bot.build_parser().parse_args(["--once", "--no-market-context", "--no-exit-signals"])
+    selection = bot.run_cluster_pass(conn, args)
+    assert selection.exits == []

@@ -255,11 +255,63 @@ def test_small_treasury_buy_is_not_listed(conn, sized, monkeypatch):
     assert not sel.strong and not sel.candidates
 
 
-def test_exit_signals_are_never_listed(conn, sized):
+def test_exit_signals_are_kept_separately_not_tiered(conn, sized):
     exit_sig = cluster.ExitSignal(source="SEC", ticker="AAA", company="C", total_buyers=2,
                                   seller_count=2, lines=[], seller_names=["A", "B"])
     sel = strategy.select(conn, [exit_sig], _T212())
     assert not sel.strong and not sel.candidates
+    assert sel.exits == [exit_sig]
+
+
+def test_exit_signals_bypass_recency_t212_and_size_filters(conn, sized):
+    """Unlike buy-side signals, exits carry no window_start/end recency, aren't
+    checked against Trading 212, and get no size floor -- they're already
+    deduplicated by the exit finders' own alert state (should_alert_exit)."""
+    old_exit = cluster.ExitSignal(source="SEC", ticker="ZZZZ", company="C", total_buyers=2,
+                                  seller_count=2, lines=[], seller_names=["A", "B"])
+    sel = strategy.select(conn, [old_exit], _T212(missing={"ZZZZ"}))
+    assert sel.exits == [old_exit]
+
+
+# --------------------------------------------------------------- exit_signals
+#
+# strategy.exit_signals: the shared exit-finder list, mirroring buy_side_signals.
+
+_EXIT_FINDER_NAMES = ("find_sec_exit_signals", "find_house_exit_signals",
+                      "find_bafin_exit_signals", "find_norway_exit_signals",
+                      "find_sweden_exit_signals", "find_senate_exit_signals")
+
+
+def _recording_exit_finders(monkeypatch):
+    calls = []
+
+    def make(name):
+        def f(conn, **kw):
+            calls.append((name, kw))
+            return []
+        return f
+    for name in _EXIT_FINDER_NAMES:
+        monkeypatch.setattr(cluster, name, make(name))
+    return calls
+
+
+def test_exit_signals_default_runs_every_finder(conn, monkeypatch):
+    calls = _recording_exit_finders(monkeypatch)
+    strategy.exit_signals(conn)
+    assert {name for name, _ in calls} == set(_EXIT_FINDER_NAMES)
+
+
+def test_exit_signals_respects_the_sources_dict(conn, monkeypatch):
+    calls = _recording_exit_finders(monkeypatch)
+    strategy.exit_signals(conn, sources={"sec": True, "house": False, "senate": False,
+                                         "bafin": False, "norway": False, "sweden": False})
+    assert {name for name, _ in calls} == {"find_sec_exit_signals"}
+
+
+def test_exit_signals_forwards_ignore_alert_state_to_every_finder(conn, monkeypatch):
+    calls = _recording_exit_finders(monkeypatch)
+    strategy.exit_signals(conn, ignore_alert_state=True)
+    assert all(kw["ignore_alert_state"] is True for _, kw in calls)
 
 
 # --------------------------------------------------------- buy_side_signals

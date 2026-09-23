@@ -163,8 +163,8 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
     keeping only the ones that grew past what was last alerted:
       - cluster buy signals: a ticker bought by multiple distinct people at once
       - exit signals: people who bought together later selling together
-    and tiers the buy side into strategy.Selection.strong / .candidates (see
-    strategy.select).
+    tiers the buy side into strategy.Selection.strong / .candidates, and keeps
+    exit signals in .exits, unfiltered (see strategy.select).
     """
     sources = _which_sources(args)
 
@@ -180,21 +180,10 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
                      "max_age_days": 30},
     )
     if not args.no_exit_signals:
-        if sources["sec"]:
-            signals += cluster.find_sec_exit_signals(conn)
-        if sources["house"]:
-            signals += cluster.find_house_exit_signals(conn)
-        if sources["bafin"]:
-            signals += cluster.find_bafin_exit_signals(conn)
-        if sources["norway"]:
-            signals += cluster.find_norway_exit_signals(conn)
-        if sources["sweden"]:
-            signals += cluster.find_sweden_exit_signals(conn)
-        if sources["senate"]:
-            signals += cluster.find_senate_exit_signals(conn)
+        signals += strategy.exit_signals(conn, sources=sources)
     # Tiers (strategy.py): buy side, disclosed in the last few days, on Trading 212,
     # above the size floors -- enrich_signals runs inside select(), only on what
-    # survives the cheap filters.
+    # survives the cheap filters. Exit signals pass straight through into .exits.
     selection = strategy.select(conn, signals, trading212.availability(conn))
 
     def keep(t):
@@ -279,18 +268,20 @@ def _commit_signals(conn, signals) -> None:
 
 
 def _send_digest(conn, selection, closes) -> bool:
-    """One Telegram message -- 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть -- and, only if it
-    went through, the bookkeeping: alert state and journal for the signals, and the
-    once-only mark for close alerts. A failed send leaves both untouched so the next
-    run retries. Nothing to say -> nothing sent, returns False."""
+    """One Telegram message -- 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть, 🚨 Выходы -- and,
+    only if it went through, the bookkeeping: alert state and journal for the
+    signals (including exits), and the once-only mark for close alerts. A failed
+    send leaves both untouched so the next run retries. Nothing to say -> nothing
+    sent, returns False."""
     tiered = selection.strong + selection.candidates
-    if not tiered and not closes:
+    if not tiered and not closes and not selection.exits:
         return False
     if not telegram_notify.send_text(telegram_notify.format_tiered_digest(selection, closes)):
-        print(f"[telegram] send failed -- leaving {len(tiered)} signal(s) and "
-              f"{len(closes)} close alert(s) for the next run", file=sys.stderr)
+        print(f"[telegram] send failed -- leaving {len(tiered)} signal(s), "
+              f"{len(selection.exits)} exit(s) and {len(closes)} close alert(s) for the "
+              f"next run", file=sys.stderr)
         return False
-    _commit_signals(conn, [t.signal for t in tiered])
+    _commit_signals(conn, [t.signal for t in tiered] + selection.exits)
     positions.mark_alerted(conn, closes)
     return True
 

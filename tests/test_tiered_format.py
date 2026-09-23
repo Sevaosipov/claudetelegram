@@ -35,6 +35,25 @@ def test_missing_trading_212_check_is_announced():
     assert "Trading 212 не проверялся" in telegram_notify.format_tiered_digest(_selection(False), [])
 
 
+def test_exits_section_appears_after_closes():
+    exit_sig = cluster.ExitSignal(source="SEC", ticker="ZZZ", company="Exit Corp", total_buyers=3,
+                                  seller_count=2, lines=["A: bought $1 -> sold $2"],
+                                  seller_names=["A", "B"])
+    sel = strategy.Selection([], [], True, exits=[exit_sig])
+    close = positions.CloseAlert(_pos("CCC"), "stop_loss", "−16.0% от входа", 84.0)
+    text = telegram_notify.format_tiered_digest(sel, [close])
+    assert text.index("Закрыть") < text.index("Выходы")
+    assert "ZZZ" in text and "🚨" in text
+
+
+def test_exits_alone_count_as_something_to_say():
+    exit_sig = cluster.ExitSignal(source="SEC", ticker="ZZZ", company="Exit Corp", total_buyers=3,
+                                  seller_count=2, lines=[], seller_names=["A", "B"])
+    sel = strategy.Selection([], [], True, exits=[exit_sig])
+    text = telegram_notify.format_tiered_digest(sel, [])
+    assert "сигналов нет" not in text and "ZZZ" in text
+
+
 def test_empty_selection_says_there_is_nothing():
     empty = strategy.Selection([], [], True)
     assert "сигналов нет" in telegram_notify.format_tiered_digest(empty, [], html=False)
