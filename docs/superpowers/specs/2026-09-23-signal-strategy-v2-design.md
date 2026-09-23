@@ -31,13 +31,13 @@ inflows). Exit signals and crypto outflows never appear as buy signals.
 ### Stocks
 
 **Сильный**: every one of:
-- Buyers include company insiders (officers or directors), not only >10% holders
-  (`holder_only` is false).
+- At least one buyer has an insider role (`ceo`, `cfo`, `chair`, `officer`,
+  `director`, `insider`), so the signal isn't only >10% holders or associates.
 - Open-market purchases. The existing defaults already exclude 10b5-1 plans and
   derivative rows.
 - Size and liquidity known and above the floors.
 - At least one of:
-  - **(a) Broad cluster**: ≥ 3 distinct insiders in the window.
+  - **(a) Broad cluster**: ≥ 3 distinct buyers with insider roles in the window.
   - **(b) Top-exec cluster**: ≥ 2 insiders, one of them CEO, CFO or Chair.
   - **(c) Top-exec conviction**: one CEO or CFO buying ≥ €250k that grows their
     holding by ≥ 10% (`position_increase_pct`).
@@ -49,15 +49,20 @@ are shown.
 
 Top-exec detection needs structured roles. The finders keep, next to
 `member_names`, a parallel `member_roles` list with a normalised role
-(`ceo`/`cfo`/`chair`/`officer`/`director`/`holder`/`other`), mapped from:
+(`ceo`/`cfo`/`chair`/`officer`/`director`/`insider`/`holder`/`associate`/`other`),
+mapped from:
 - SEC `officer_title`: "Chief Executive Officer", "CEO", "President and CEO",
   "Executive Chairman", "Chief Financial Officer", …
 - Sweden `position`: "Verkställande direktör (VD)" → ceo,
-  "Ekonomichef/finanschef/finansdirektör" → cfo, "Styrelseordförande" → chair.
+  "Ekonomichef/finanschef/finansdirektör" → cfo, "Styrelseordförande" → chair,
+  "Styrelseledamot" → director, other roles → officer. A related-party row
+  (`related_party`) → associate.
 - BaFin `position`: "Vorstand" → officer, "Aufsichtsrat" → director,
-  "in enger Beziehung" (a closely associated person) → other.
-- Norway: no role is stored, so every buyer is `other`. Norway signals can
-  therefore only reach Сильный through rule (a).
+  "in enger Beziehung" (a closely associated person) → associate, anything else →
+  officer.
+- Norway: no role is stored; Newsweb's managers' transactions are filed by company
+  insiders, so every buyer is `insider` (counts for rule (a), never as a top exec).
+- House/Senate: `other` (never Сильный: Congress is candidate-only).
 
 ### Crypto (BTC, ETH)
 
