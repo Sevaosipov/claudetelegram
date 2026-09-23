@@ -347,7 +347,11 @@ def run_house_pass(conn, args, universe_index: universe.Universe | None, years: 
                     continue
                 is_new = db.save_house_purchase(conn, t)
                 if is_new and t.txn_type == "P":
+                    # Counted either way: a PTR full of T-bills still proves the
+                    # parser is alive, which is what the liveness check reads.
                     new_count += 1
+                    if not house_ptr.is_feed_worthy(t.asset):
+                        continue
                     print(telegram_notify.format_house_line(t))
                     _append_csv({
                         "found_at": dt.datetime.now().isoformat(timespec="seconds"),

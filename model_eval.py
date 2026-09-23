@@ -111,7 +111,8 @@ def build_feature_frame(conn, rows: list[dict], corpus: str, horizon: int):
             "lag_days": _days_between(d, r["trade_date"]),   # both corpora carry trade_date
             "cluster_size": cluster_size[i],
             "price_vs_spy_63d": backtest._return_before(r["ticker"], d, 63),
-            "mcap_bucket": marketcap.size_bucket(marketcap.market_cap_eur(conn, r["ticker"])),
+            "mcap_bucket": marketcap.size_bucket(marketcap.market_cap_eur(
+                conn, r["ticker"], "HOUSE" if corpus == "politicians" else "SEC")),
         }
         if corpus == "politicians":
             feat["log_amount"] = math.log10(cluster.parse_amount_low(r["amount_range"]) + 1)

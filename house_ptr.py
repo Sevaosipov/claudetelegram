@@ -33,6 +33,27 @@ TYPE_RE = re.compile(r"^(P|S|E)$")
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 AMOUNT_RE = re.compile(r"^\$[\d,]+$|^-$")
 TICKER_RE = re.compile(r"\(([A-Za-z][A-Za-z.]{0,5})\)")
+ASSET_TYPE_RE = re.compile(r"\[([A-Z]{2})\]")
+
+# PTR asset-type codes that are an actual stake in a listed company: stock [ST] and
+# exchange-traded fund [EF]. The rest -- Treasury bills [GS], municipal bonds, fund
+# LPs [OT], options [OP], annuities -- used to be printed as "bought" alongside
+# stock buys, and outnumbered them. They are still stored; they just aren't news.
+EQUITY_ASSET_TYPES = {"ST", "EF"}
+
+
+def asset_type(asset_text: str | None) -> str | None:
+    """The two-letter [XX] code the House form appends to each asset, or None for
+    the older filings that carry none."""
+    codes = ASSET_TYPE_RE.findall(asset_text or "")
+    return codes[-1] if codes else None
+
+
+def is_feed_worthy(asset_text: str | None) -> bool:
+    """Whether a purchase of this asset belongs in the purchase feed. A missing code
+    is let through: unknown is not the same as a bond."""
+    code = asset_type(asset_text)
+    return code is None or code in EQUITY_ASSET_TYPES
 
 
 @dataclass

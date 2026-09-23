@@ -958,8 +958,8 @@ def enrich_signals(conn, signals: list) -> list:
     find_corroboration(conn, signals)
 
     for sig in signals:
-        cap = marketcap.market_cap_eur(conn, sig.ticker)
-        facts = marketcap.facts(conn, sig.ticker) or {}
+        cap = marketcap.market_cap_eur(conn, sig.ticker, sig.source)
+        facts = marketcap.facts(conn, sig.ticker, sig.source) or {}
         sig.market_cap_eur = cap
         sig.avg_daily_value = (fx.to_eur(facts["avg_daily_value"], facts.get("currency") or "USD", conn)
                                 if facts.get("avg_daily_value") else None)

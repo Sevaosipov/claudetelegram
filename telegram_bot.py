@@ -78,8 +78,15 @@ def _get_updates(token: str, offset: int | None, session: requests.Session) -> l
     params = {"timeout": LONG_POLL_SECONDS}
     if offset is not None:
         params["offset"] = offset
-    resp = session.get(API_URL.format(token=token, method="getUpdates"),
-                        params=params, timeout=LONG_POLL_SECONDS + 10)
+    try:
+        resp = session.get(API_URL.format(token=token, method="getUpdates"),
+                            params=params, timeout=LONG_POLL_SECONDS + 10)
+    except requests.ReadTimeout:
+        # A long poll that outlived its own timeout -- typically the Mac waking from
+        # sleep with the connection half-dead. Nothing was lost (the offset hasn't
+        # moved), so it's an empty poll, not a failure: treating it as one logged it
+        # and backed off for up to 5 minutes, during which messages went unanswered.
+        return []
     resp.raise_for_status()
     data = resp.json()
     if not data.get("ok"):

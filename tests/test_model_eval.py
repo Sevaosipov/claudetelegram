@@ -57,7 +57,7 @@ def test_prior_hitrate_excludes_a_trade_disclosed_10_days_earlier():
 
 def test_build_feature_frame_politicians_shape(conn, monkeypatch):
     monkeypatch.setattr(model_eval.backtest, "_return_before", lambda t, d, days=63: 1.5)
-    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t: 1e9)
+    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t, s=None: 1e9)
     rows = [_prow("AAA", "Rep A", "2025-06-01", 1),
             _prow("BBB", "Rep B", "2025-06-02", 0),
             _prow("AAA", "Rep C", "2025-06-15", 1)]
@@ -73,7 +73,7 @@ def test_build_feature_frame_politicians_shape(conn, monkeypatch):
 def test_build_feature_frame_insiders_shape(conn, monkeypatch):
     from conftest import add_sec_purchase
     monkeypatch.setattr(model_eval.backtest, "_return_before", lambda t, d, days=63: -2.0)
-    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t: 5e9)
+    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t, s=None: 5e9)
     rows = [
         {"ticker": "AAA", "owner": "Buyer One", "value": 250_000, "role": "officer/director",
          "disclosure_date": "2026-09-03", "trade_date": "2026-09-01",
@@ -286,7 +286,7 @@ def test_run_aborts_cleanly_when_data_is_thin(conn, monkeypatch):
                             _prow("AAA", "Rep A", "2026-08-01", 1),
                             _prow("BBB", "Rep B", "2026-08-02", 0)])
     monkeypatch.setattr(model_eval.backtest, "_return_before", lambda t, d, days=63: 0.0)
-    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t: 1e9)
+    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t, s=None: 1e9)
     out = model_eval.run(conn, "politicians")
     assert "INSUFFICIENT DATA for politicians" in out
     assert "not investment advice" in out.lower()
@@ -302,7 +302,7 @@ def test_run_produces_a_report_on_a_healthy_synthetic_corpus(conn, monkeypatch):
     monkeypatch.setattr(model_eval.backtest, "collect_political_trades",
                         lambda c, horizon=21, since_days=1200: rows)
     monkeypatch.setattr(model_eval.backtest, "_return_before", lambda t, d, days=63: 0.0)
-    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t: 1e9)
+    monkeypatch.setattr(model_eval.marketcap, "market_cap_eur", lambda c, t, s=None: 1e9)
     out = model_eval.run(conn, "politicians")
     assert "MODEL EVALUATION" in out and "Base rate" in out
     assert "Per-fold AUC (LR):" in out

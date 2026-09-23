@@ -39,6 +39,8 @@ def test_form4_parses_transactions():
 @pytest.mark.parametrize("raw,expected", [
     ("NONE", None), ("N/A", None), ("NA", None), ("-", None), ("", None), (None, None),
     ("  aapl ", "AAPL"), ("BRK.B", "BRK.B"),
+    # Every share class listed in one field: the first is the one to use.
+    ("LEN, LEN.B", "LEN"), ("GOOGL;GOOG", "GOOGL"),
 ])
 def test_clean_ticker(raw, expected):
     """A non-traded fund files issuerTradingSymbol as the literal string "NONE";
@@ -114,6 +116,19 @@ def test_house_ptr_pdf_parses():
     assert {t.txn_type for t in txns} <= {"P", "S", "S (partial)", "E"}
     assert any(t.ticker for t in txns), "no ticker extracted from any asset name"
     assert all("/" in t.txn_date for t in txns if t.txn_date)
+
+
+@pytest.mark.parametrize("asset,code,worthy", [
+    ("Apple Inc. (AAPL) [ST]", "ST", True),
+    ("SPDR S&P 500 ETF (SPY) [EF]", "EF", True),
+    ("U.S. Treasury Bill [GS]", "GS", False),
+    ("Smash Capital Fund II LP [OT]", "OT", False),
+    ("UNIV CA PUB EDUC [GS]", "GS", False),
+    ("Some Asset With No Code", None, True),   # unknown is not the same as a bond
+])
+def test_house_asset_type(asset, code, worthy):
+    assert house_ptr.asset_type(asset) == code
+    assert house_ptr.is_feed_worthy(asset) is worthy
 
 
 def test_house_amount_bracket_lower_bound():

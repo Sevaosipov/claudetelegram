@@ -73,8 +73,12 @@ JUNK_TICKERS = ("NONE", "N/A", "NA", "N.A.", "-", "--")
 
 
 def clean_ticker(raw: str | None) -> str | None:
-    """Normalise issuerTradingSymbol to a real ticker or None."""
-    t = (raw or "").strip().upper()
+    """Normalise issuerTradingSymbol to a real ticker or None.
+
+    Some issuers list every share class in the one field ("LEN, LEN.B"). The first
+    class is kept: left whole, it groups apart from plain "LEN" and resolves nowhere.
+    """
+    t = re.split(r"[,;\s]+", (raw or "").strip().upper())[0]
     return None if not t or t in JUNK_TICKERS else t
 
 

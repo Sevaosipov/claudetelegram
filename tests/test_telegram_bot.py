@@ -86,3 +86,24 @@ def test_handle_message_unrecognized_text_shows_help(conn, monkeypatch):
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     tb._handle_message(conn, "???")
     assert len(sent) == 1 and "тикер" in sent[0].lower()
+
+
+def test_get_updates_treats_a_read_timeout_as_an_empty_poll():
+    """A long poll outliving its timeout (e.g. waking from sleep) loses nothing, so it
+    must not surface as an error -- that used to trigger up to 5 minutes of backoff."""
+    import requests
+
+    class Session:
+        def get(self, *a, **k):
+            raise requests.ReadTimeout("read timed out")
+    assert tb._get_updates("tok", None, Session()) == []
+
+
+def test_get_updates_still_raises_on_connection_errors():
+    import requests
+
+    class Session:
+        def get(self, *a, **k):
+            raise requests.ConnectionError("no route")
+    with pytest.raises(requests.ConnectionError):
+        tb._get_updates("tok", None, Session())

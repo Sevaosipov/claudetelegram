@@ -20,6 +20,8 @@ which size bucket a company sits in, and every signal needs a lookup.
 """
 from __future__ import annotations
 
+import re
+
 import db
 import fx
 
@@ -28,6 +30,31 @@ CACHE_TTL_SECONDS = 7 * 24 * 3600
 # Tried in order for a bare ticker with no exchange information. US listings are by
 # far the most common here, so the unsuffixed form goes first.
 VENUE_SUFFIXES = ("", ".OL", ".ST", ".DE", ".CO", ".HE")
+
+# Where a signal's source already says which market the ticker trades on. Without
+# this, a bare Oslo ticker is tried as a US one first -- and Oslo's NRC resolved to
+# National Research Corp. Sources not listed here fall back to VENUE_SUFFIXES.
+SOURCE_VENUE = {
+    "SEC": "", "SEC13DG": "", "SEC144": "", "HOUSE": "", "SENATE": "",
+    "NORWAY": ".OL", "SWEDEN": ".ST",
+}
+
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+def clean_ticker(ticker: str | None) -> str | None:
+    """A ticker Yahoo could plausibly know, or None.
+
+    Form 4 occasionally lists every share class in one field ("LEN, LEN.B"), and
+    13D/G rows with no trading symbol carry the issuer's CIK instead. Both used to go
+    to Yahoo as-is, once per venue suffix -- six guaranteed 404s per ticker. The
+    first listed class is the one to use; a CIK is not a ticker at all.
+    """
+    if not ticker:
+        return None
+    first = re.split(r"[,\s;]+", ticker.strip().upper())[0]
+    return first if _TICKER_RE.match(first) else None
+
 
 # Upper bounds in EUR. Bucketing exists so backtest.py can ask "do signals in small
 # companies behave differently from signals in large ones" -- a question the bot
@@ -67,12 +94,12 @@ def _get(info, *names):
     return None
 
 
-def _fetch(ticker: str) -> dict | None:
+def _fetch(ticker: str, suffixes: tuple[str, ...] = VENUE_SUFFIXES) -> dict | None:
     try:
         import yfinance as yf
     except ImportError:
         return None
-    for suffix in VENUE_SUFFIXES:
+    for suffix in suffixes:
         symbol = (ticker.replace(".", "-") if not suffix else ticker) + suffix
         try:
             info = yf.Ticker(symbol).fast_info
@@ -99,22 +126,33 @@ def _fetch(ticker: str) -> dict | None:
     return None
 
 
-def facts(conn, ticker: str | None) -> dict | None:
-    """Cached company facts for a ticker, or None when it can't be resolved."""
-    if not ticker or _looks_like_isin(ticker):
+def facts(conn, ticker: str | None, source: str | None = None) -> dict | None:
+    """Cached company facts for a ticker, or None when it can't be resolved.
+
+    `source` is the signal source (SEC, NORWAY, ...) when known; it pins the lookup
+    to that market instead of guessing across all of them.
+    """
+    if not ticker or _looks_like_isin(ticker) or ticker.startswith("CRYPTO:"):
         return None
-    cached = db.get_company_facts(conn, ticker, CACHE_TTL_SECONDS)
+    ticker = clean_ticker(ticker)
+    if not ticker:
+        return None
+    venue = SOURCE_VENUE.get(source or "")
+    # A non-US venue is part of the cache key: the same bare symbol can be two
+    # different companies in New York and Oslo.
+    key = ticker + venue if venue else ticker
+    cached = db.get_company_facts(conn, key, CACHE_TTL_SECONDS)
     if cached is not None:
         return cached if cached.get("market_cap") else None
-    fetched = _fetch(ticker)
+    fetched = _fetch(ticker, (venue,) if venue is not None else VENUE_SUFFIXES)
     # A miss is cached too (as an empty row), so a delisted or unresolvable ticker
     # isn't re-fetched on every single run.
-    db.save_company_facts(conn, ticker, fetched or {})
+    db.save_company_facts(conn, key, fetched or {})
     return fetched
 
 
-def market_cap_eur(conn, ticker: str | None) -> float | None:
-    f = facts(conn, ticker)
+def market_cap_eur(conn, ticker: str | None, source: str | None = None) -> float | None:
+    f = facts(conn, ticker, source)
     if not f or not f.get("market_cap"):
         return None
     return fx.to_eur(f["market_cap"], f.get("currency") or "USD", conn)

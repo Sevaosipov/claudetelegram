@@ -55,7 +55,10 @@ def test_brand_new_position_reports_100_percent(conn):
 
 # --------------------------------------------------------------- disclosure lag
 def test_lag_is_measured_from_trade_to_filing(conn):
-    add_sec_purchase(conn, "AAA", "Buyer", 600_000, "2026-09-01", filed_date="2026-09-03")
+    # Relative to today: a fixed date ages out of SEC_WINDOW_DAYS and the finder
+    # then (correctly) returns nothing.
+    trade, filed = TODAY - dt.timedelta(days=5), TODAY - dt.timedelta(days=3)
+    add_sec_purchase(conn, "AAA", "Buyer", 600_000, trade.isoformat(), filed_date=filed.isoformat())
     assert cluster.find_sec_clusters(conn)[0].lag_days == 2
 
 
