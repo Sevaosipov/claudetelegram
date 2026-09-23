@@ -11,6 +11,10 @@ Callers name the source only when it isn't the first in its chain.
 from __future__ import annotations
 
 import datetime as dt
+import email.utils
+import html
+import re
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 
 import requests
@@ -215,3 +219,141 @@ def cached_coin_symbols(conn) -> set[str]:
 def coin_name(conn, symbol: str) -> str | None:
     row = conn.execute("SELECT name FROM coin_list WHERE symbol = ?", (symbol.upper(),)).fetchone()
     return row[0] if row and row[0] else None
+
+
+# ------------------------------------------------------------------ indicators
+def _rsi(closes: list[float], n: int = 14) -> float:
+    """Wilder's RSI over the whole series."""
+    deltas = [b - a for a, b in zip(closes, closes[1:])]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_g, avg_l = sum(gains[:n]) / n, sum(losses[:n]) / n
+    for g, l in zip(gains[n:], losses[n:]):
+        avg_g = (avg_g * (n - 1) + g) / n
+        avg_l = (avg_l * (n - 1) + l) / n
+    return 100.0 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
+
+
+def _pct(closes: list[float], back: int) -> float | None:
+    return (closes[-1] / closes[-1 - back] - 1) * 100 if len(closes) > back else None
+
+
+def _local_snapshot(closes: list[float]) -> dict | None:
+    """A TradingView-shaped field dict computed from our own closes, so
+    tradingview.analyze/format_view render it unchanged."""
+    if len(closes) < 200:
+        return None
+    return {"close": closes[-1], "SMA50": sum(closes[-50:]) / 50,
+            "SMA200": sum(closes[-200:]) / 200, "RSI": _rsi(closes),
+            "Perf.1M": _pct(closes, 21), "Perf.3M": _pct(closes, 63),
+            "Perf.Y": _pct(closes, 252), "_symbol": None}
+
+
+def indicators(asset, closes: list[float] | None = None):
+    import tradingview
+
+    def local():
+        c = closes
+        if c is None:
+            bars, _src = price_history(asset, 400)
+            c = [v for _d, v in bars or []]
+        snap = _local_snapshot(c)
+        return tradingview.analyze(snap) if snap else None
+    return first_available([
+        ("TradingView", lambda: tradingview.analyze(
+            tradingview.fetch_snapshot(asset.tradingview or asset.symbol))),
+        ("расчёт по ценам", local)])
+
+
+# ------------------------------------------------------------- analyst targets
+def nasdaq_analyst(symbol: str) -> dict | None:
+    data = _get(f"https://api.nasdaq.com/api/analyst/{symbol}/targetprice").json()
+    ov = (((data or {}).get("data") or {}).get("consensusOverview")) or {}
+    if not ov.get("priceTarget"):
+        return None
+    return {
+        "price_targets": {"mean": float(ov["priceTarget"]), "low": ov.get("lowPriceTarget"),
+                          "high": ov.get("highPriceTarget")},
+        "recommendations": [{"strongBuy": 0, "buy": int(ov.get("buy") or 0),
+                             "hold": int(ov.get("hold") or 0), "sell": int(ov.get("sell") or 0),
+                             "strongSell": 0}],
+        "upgrades_downgrades": [],
+    }
+
+
+# ------------------------------------------------------------------------- news
+NEWS_LIMIT = 8
+CRYPTO_FEEDS = (("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+                ("Cointelegraph", "https://cointelegraph.com/rss"))
+
+
+def _yahoo_news(symbol: str) -> list[dict]:
+    import yfinance as yf
+    out = []
+    for item in (yf.Ticker(symbol).news or [])[:NEWS_LIMIT]:
+        content = item.get("content", item)
+        provider = content.get("provider")
+        publisher = (provider.get("displayName") if isinstance(provider, dict)
+                     else content.get("publisher")) or "?"
+        url = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
+        out.append({"title": content.get("title") or "", "publisher": publisher,
+                    "published": (content.get("pubDate") or "")[:10],
+                    "url": url.get("url") if isinstance(url, dict) else (url or "")})
+    return out
+
+
+def _rss_date(text: str) -> str:
+    try:
+        return email.utils.parsedate_to_datetime(text).date().isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _rss_items(url: str, **params) -> list[dict]:
+    root = ET.fromstring(_get(url, **params).content)
+    out = []
+    for item in root.iter("item"):
+        source = item.find("source")
+        out.append({"title": html.unescape((item.findtext("title") or "").strip()),
+                    "publisher": source.text.strip() if source is not None and source.text else None,
+                    "published": _rss_date(item.findtext("pubDate") or ""),
+                    "url": (item.findtext("link") or "").strip()})
+    return out
+
+
+def _google_news(query: str) -> list[dict]:
+    items = _rss_items("https://news.google.com/rss/search", q=query, hl="en-US", gl="US",
+                       ceid="US:en")
+    for i in items:
+        i["publisher"] = i["publisher"] or "Google News"
+    return items[:NEWS_LIMIT]
+
+
+def _crypto_feed_news(symbol: str, name: str | None) -> list[dict]:
+    words = [w for w in {symbol.lower(), (name or "").lower()} if w]
+    out, seen = [], set()
+    for publisher, url in CRYPTO_FEEDS:
+        try:
+            items = _rss_items(url)
+        except (requests.RequestException, ET.ParseError) as e:
+            print(f"[sources] {publisher} недоступен: {type(e).__name__}")
+            continue
+        for it in items:
+            title = it["title"].lower()
+            if it["title"] in seen or not any(re.search(rf"\b{re.escape(w)}\b", title) for w in words):
+                continue
+            seen.add(it["title"])
+            it["publisher"] = publisher
+            out.append(it)
+    return sorted(out, key=lambda i: i["published"], reverse=True)[:NEWS_LIMIT]
+
+
+def news(asset, name: str | None = None):
+    if asset.is_isin or not asset.yahoo:
+        return None, None
+    query = f"{name or asset.symbol} {'crypto' if asset.kind == 'crypto' else 'stock'}"
+    attempts = [("Yahoo", lambda: _yahoo_news(asset.yahoo)),
+                ("Google News", lambda: _google_news(query))]
+    if asset.kind == "crypto":
+        attempts.append(("CoinDesk/Cointelegraph", lambda: _crypto_feed_news(asset.symbol, name)))
+    return first_available(attempts)

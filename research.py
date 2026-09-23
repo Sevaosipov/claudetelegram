@@ -437,25 +437,11 @@ def _format_analyst(view: dict) -> str:
 def recent_news(ticker: str) -> list:
     """Recent headlines. Publisher is kept and shown: this feed mixes wire services
     with message-board-adjacent sites, and the difference matters to a reader."""
-    import yfinance as yf
+    import sources
     try:
-        items = yf.Ticker(ticker.replace(".", "-")).news or []
+        return sources._yahoo_news(ticker.replace(".", "-"))
     except Exception:
         return []
-    out = []
-    for item in items[:NEWS_LIMIT]:
-        content = item.get("content", item)
-        provider = content.get("provider")
-        publisher = (provider.get("displayName") if isinstance(provider, dict)
-                     else content.get("publisher")) or "?"
-        url = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
-        out.append({
-            "title": content.get("title") or "",
-            "publisher": publisher,
-            "published": (content.get("pubDate") or "")[:10],
-            "url": url.get("url") if isinstance(url, dict) else (url or ""),
-        })
-    return out
 
 
 # ------------------------------------------------------- financial snapshot

@@ -166,3 +166,82 @@ def test_cached_coins_negative_caching_avoids_retries(conn, monkeypatch):
     result2 = sources.cached_coins(conn)
     assert len(calls) == 2  # No additional calls
     assert result1 == result2
+
+
+# ------------------------------------------------------ indicators, analysts, news
+import tradingview  # noqa: E402
+
+RSS = b"""<?xml version="1.0"?><rss><channel>
+<item><title>Bitcoin climbs as ETF inflows return</title><link>https://example.test/a</link>
+<pubDate>Tue, 22 Sep 2026 10:00:00 GMT</pubDate><source url="https://x">Wire A</source></item>
+<item><title>Solana validators upgrade</title><link>https://example.test/b</link>
+<pubDate>Mon, 21 Sep 2026 09:00:00 GMT</pubDate></item>
+</channel></rss>"""
+
+
+def test_indicators_fall_back_to_a_local_calculation(monkeypatch):
+    monkeypatch.setattr(tradingview, "fetch_snapshot", lambda q, session=None: None)
+    closes = [100.0 + i for i in range(260)]
+    view, src = sources.indicators(NVDA, closes)
+    assert src == "расчёт по ценам"
+    assert view["ma_state"] == "цена выше и 50-, и 200-дневной средней"
+    assert view["rsi"] == 100.0 and view["gauge"] is None
+
+
+def test_indicators_prefer_tradingview(monkeypatch):
+    monkeypatch.setattr(tradingview, "fetch_snapshot",
+                        lambda q, session=None: {"Recommend.All": 0.5, "RSI": 55.0, "close": 10.0})
+    view, src = sources.indicators(NVDA, [1.0] * 10)
+    assert src == "TradingView" and view["gauge"] == 0.5
+
+
+def test_rsi_is_about_50_for_alternating_moves():
+    assert 45 < sources._rsi([100.0, 101.0] * 30) < 55
+
+
+def test_nasdaq_analyst_converts_to_the_yahoo_shape(monkeypatch):
+    monkeypatch.setattr(sources, "_get", lambda url, **p: _Resp({"data": {"consensusOverview": {
+        "lowPriceTarget": 245.0, "highPriceTarget": 400.0, "priceTarget": 334.9,
+        "buy": 15, "sell": 4, "hold": 9}}}))
+    raw = sources.nasdaq_analyst("AAPL")
+    assert raw["price_targets"] == {"mean": 334.9, "low": 245.0, "high": 400.0}
+    assert raw["recommendations"][0] == {"strongBuy": 0, "buy": 15, "hold": 9, "sell": 4,
+                                         "strongSell": 0}
+
+
+def test_nasdaq_analyst_without_coverage_is_none(monkeypatch):
+    monkeypatch.setattr(sources, "_get", lambda url, **p: _Resp(
+        {"data": {"consensusOverview": {"priceTarget": None}}}))
+    assert sources.nasdaq_analyst("ZZZZ") is None
+
+
+def test_google_news_parses_rss(monkeypatch):
+    monkeypatch.setattr(sources, "_get", lambda url, **p: _Resp(content=RSS))
+    items = sources._google_news("Bitcoin crypto")
+    assert items[0] == {"title": "Bitcoin climbs as ETF inflows return", "publisher": "Wire A",
+                        "published": "2026-09-22", "url": "https://example.test/a"}
+    assert items[1]["publisher"] == "Google News"
+
+
+def test_crypto_feeds_keep_only_matching_headlines_once(monkeypatch):
+    monkeypatch.setattr(sources, "_get", lambda url, **p: _Resp(content=RSS))
+    items = sources._crypto_feed_news("BTC", "Bitcoin")
+    assert [i["title"] for i in items] == ["Bitcoin climbs as ETF inflows return"]
+    assert items[0]["publisher"] == "CoinDesk"
+
+
+def test_news_chain_falls_back_for_crypto(monkeypatch):
+    def down(q):
+        raise ConnectionError("x")
+    monkeypatch.setattr(sources, "_yahoo_news", lambda s: [])
+    monkeypatch.setattr(sources, "_google_news", down)
+    monkeypatch.setattr(sources, "_crypto_feed_news", lambda s, n: [{"title": "t"}])
+    assert sources.news(BTC, "Bitcoin") == ([{"title": "t"}], "CoinDesk/Cointelegraph")
+
+
+def test_stocks_have_no_crypto_feed_fallback(monkeypatch):
+    monkeypatch.setattr(sources, "_yahoo_news", lambda s: [])
+    monkeypatch.setattr(sources, "_google_news", lambda q: [])
+    monkeypatch.setattr(sources, "_crypto_feed_news", lambda s, n: [{"title": "t"}])
+    assert sources.news(NVDA) == (None, None)
+    assert sources.news(ISIN) == (None, None)
