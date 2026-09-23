@@ -140,18 +140,19 @@ def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | 
     """One definition of the buy-side finder list, shared by bot.run_cluster_pass,
     menu._find_signals and calibrate_strategy._signals -- the three had drifted out
     of sync with each other (stake max_age_days=30 only in menu/calibration;
-    on-chain always on in menu, opt-in via --onchain-only in bot, never run in
+    on-chain always on in menu, opt-in via --onchain in bot, never run in
     calibration; Senate missing from calibration entirely).
 
     Runs every buy-side finder -- SEC/House/Senate/BaFin/Norway/Sweden clusters,
     13D/G stakes, crypto treasury purchases and spot-ETF inflows -- plus on-chain
     flows when `onchain` is set. Exit finders (people who bought together later
-    selling together) are a different concern and stay bot.py's own job.
+    selling together) are a different concern -- see exit_signals() below.
 
     `sources` follows bot._which_sources' shape: a dict of source name -> bool,
     with an optional "stakes" key that gates 13D/G independently of "sec" (bot's
     --forms flag can select SEC forms without 13D/13G). None (the default) runs
-    every source, Senate included.
+    every source, Senate included; a key an explicit dict leaves out means OFF,
+    not on.
 
     `sec_kwargs` and `sweden_kwargs` layer their finder's own extra knobs
     (include_derivatives/insiders_only/include_10b5_1 for SEC;
@@ -166,29 +167,33 @@ def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | 
     sweden_kwargs = sweden_kwargs or {}
     stake_kwargs = {**_STAKE_DEFAULTS, **(stake_kwargs or {})}
 
+    # A key this caller's own dict left out means OFF -- only the all-True dict
+    # comprehension above (sources=None) means "run everything". `.get(key, True)`
+    # used to default a missing key to ON even in an explicit dict, silently
+    # running sources the caller never asked for.
     signals = []
-    if on.get("sec", True):
+    if on.get("sec", False):
         signals += cluster.find_sec_clusters(conn, ignore_alert_state=ignore_alert_state,
                                               **cluster_kwargs, **sec_kwargs)
-    if on.get("house", True):
+    if on.get("house", False):
         signals += cluster.find_house_clusters(conn, ignore_alert_state=ignore_alert_state,
                                                 **cluster_kwargs)
-    if on.get("senate", True):
+    if on.get("senate", False):
         signals += cluster.find_senate_clusters(conn, ignore_alert_state=ignore_alert_state,
                                                  **cluster_kwargs)
-    if on.get("bafin", True):
+    if on.get("bafin", False):
         signals += cluster.find_bafin_clusters(conn, ignore_alert_state=ignore_alert_state,
                                                 **cluster_kwargs)
-    if on.get("norway", True):
+    if on.get("norway", False):
         signals += cluster.find_norway_clusters(conn, ignore_alert_state=ignore_alert_state,
                                                  **cluster_kwargs)
-    if on.get("sweden", True):
+    if on.get("sweden", False):
         signals += cluster.find_sweden_clusters(conn, ignore_alert_state=ignore_alert_state,
                                                  **cluster_kwargs, **sweden_kwargs)
-    if on.get("stakes", on.get("sec", True)):
+    if on.get("stakes", on.get("sec", False)):
         signals += cluster.find_stake_signals(conn, ignore_alert_state=ignore_alert_state,
                                               **stake_kwargs)
-    if on.get("crypto", True):
+    if on.get("crypto", False):
         signals += cluster.find_treasury_signals(conn, ignore_alert_state=ignore_alert_state)
         signals += cluster.find_etf_flow_signals(conn, ignore_alert_state=ignore_alert_state)
     if onchain:

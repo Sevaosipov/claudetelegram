@@ -371,6 +371,15 @@ def test_buy_side_signals_stakes_key_gates_independently_of_sec(conn, monkeypatc
     assert {name for name, _ in calls} == {"find_sec_clusters"}
 
 
+def test_buy_side_signals_missing_key_in_an_explicit_sources_dict_means_off(conn, monkeypatch):
+    """sources=None means "run everything" (via the all-True dict comprehension),
+    but once a caller passes its own dict, a key it left out must mean OFF, not
+    ON -- the opposite of what `.get(key, True)` used to do."""
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, sources={"sec": True})
+    assert {name for name, _ in calls} == {"find_sec_clusters", "find_stake_signals"}
+
+
 def test_buy_side_signals_default_stake_tuning_matches_run_daily(conn, monkeypatch):
     calls = _recording_finders(monkeypatch)
     strategy.buy_side_signals(conn)

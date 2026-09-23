@@ -972,7 +972,7 @@ python bot.py --once --no-sweden
 python bot.py --once --include-share-programs            # считать и выдачи по программам акций
 
 # качество сигналов
-python bot.py --once --min-score 40                      # только сильные сигналы
+python bot.py --once --min-score 40                      # ручной фильтр по баллу score_signal (не тир «Сильный»)
 python bot.py --once --min-liquidity 1000000             # без неликвида (€1 млн/день)
 python bot.py --once --include-10b5-1                    # считать и плановые сделки 10b5-1
 python bot.py --once --insiders-only                     # без держателей >10%
