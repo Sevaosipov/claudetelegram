@@ -8,6 +8,7 @@ import datetime as dt
 import fx
 import sweden
 
+from .roles import Buyer, bafin_role, sec_role, sweden_role
 from .common import (
     BAFIN_MIN_BUYERS,
     BAFIN_SOLO_THRESHOLD,
@@ -158,6 +159,10 @@ def find_sec_clusters(conn, window_days: int = SEC_WINDOW_DAYS, min_buyers: int 
                 key=lambda v: (v is not None, v or 0), default=None),
             first_buy=_is_first_buy(conn, ticker, member_names, since),
             lag_days=_median([l for o in by_owner.values() for l in o["lags"]]),
+            buyers=[Buyer(name, sec_role(o["title"], o["is_officer"], o["is_director"],
+                                         o["is_ten_pct"]),
+                          o["total"], _position_increase(o))
+                    for name, o in by_owner.items()],
         ))
     return signals
 
@@ -349,6 +354,7 @@ def find_house_clusters(conn, window_days: int = HOUSE_WINDOW_DAYS, min_buyers: 
             window_start=min(dates_in_window), window_end=max(dates_in_window),
             reason="cluster" if is_cluster else "solo",
             member_names=member_names,
+            buyers=[Buyer(name, "other", m["total"]) for name, m in by_member.items()],
         ))
     return signals
 
@@ -417,6 +423,7 @@ def find_bafin_clusters(conn, window_days: int = BAFIN_WINDOW_DAYS, min_buyers: 
             window_start=min(dates), window_end=max(dates),
             reason="cluster" if is_cluster else "solo",
             member_names=member_names,
+            buyers=[Buyer(name, bafin_role(o["position"]), o["total"]) for name, o in by_notifier.items()],
         ))
     return signals
 
@@ -470,6 +477,7 @@ def find_norway_clusters(conn, window_days: int = NORWAY_WINDOW_DAYS, min_buyers
             window_start=min(dates), window_end=max(dates),
             reason="cluster" if is_cluster else "solo",
             member_names=member_names,
+            buyers=[Buyer(name, "insider", o["total"]) for name, o in by_person.items()],
         ))
     return signals
 
@@ -501,7 +509,7 @@ def find_sweden_clusters(conn, window_days: int = SWEDEN_WINDOW_DAYS, min_buyers
         where.append("instrument_type IN (" + ",".join("?" * len(sweden.SHARE_INSTRUMENTS)) + ")")
     params = [since] + ([] if include_derivatives else sorted(sweden.SHARE_INSTRUMENTS))
     rows = conn.execute(
-        """SELECT isin, issuer_name, person, position, txn_date, value, currency
+        """SELECT isin, issuer_name, person, position, txn_date, value, currency, related_party
            FROM sweden_purchases WHERE """ + " AND ".join(where),
         params,
     ).fetchall()
@@ -513,8 +521,8 @@ def find_sweden_clusters(conn, window_days: int = SWEDEN_WINDOW_DAYS, min_buyers
     signals = []
     for isin, group in by_isin.items():
         by_person: dict[str, dict] = {}
-        for _, issuer_name, person, position, txn_date, value, currency in group:
-            slot = by_person.setdefault(person, {"issuer_name": issuer_name, "position": position, "total": 0.0})
+        for _, issuer_name, person, position, txn_date, value, currency, related in group:
+            slot = by_person.setdefault(person, {"issuer_name": issuer_name, "position": position, "total": 0.0, "related": related})
             slot["total"] += fx.to_eur(value, currency, conn)
             if position:
                 slot["position"] = position
@@ -542,5 +550,6 @@ def find_sweden_clusters(conn, window_days: int = SWEDEN_WINDOW_DAYS, min_buyers
             window_start=min(dates), window_end=max(dates),
             reason="cluster" if is_cluster else "solo",
             member_names=member_names,
+            buyers=[Buyer(name, sweden_role(o["position"], o["related"]), o["total"]) for name, o in by_person.items()],
         ))
     return signals

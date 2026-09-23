@@ -234,3 +234,7 @@ class ClusterSignal:
     avg_daily_value: float | None = None
     score: float = 0.0
     corroborated_by: list[str] = field(default_factory=list)
+    # One entry per distinct buyer with a normalised role (cluster/roles.py), so the
+    # tier rules in strategy.py can ask "is the CEO in this" without parsing
+    # `members`' display strings.
+    buyers: list = field(default_factory=list)

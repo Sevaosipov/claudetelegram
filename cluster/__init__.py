@@ -126,3 +126,11 @@ from .crypto import (  # noqa: F401
     find_treasury_signals,
 )
 from .recency import disclosed_on  # noqa: F401
+from .roles import (  # noqa: F401
+    INSIDER_ROLES,
+    TOP_EXEC_ROLES,
+    Buyer,
+    bafin_role,
+    sec_role,
+    sweden_role,
+)
