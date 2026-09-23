@@ -10,13 +10,14 @@ Check the disclosure-bot Telegram analysis queue and process any pending tickers
    order:
 
    a. Get that ticker's opinion.py score/factors, entry/target, outlook and recent
-      news headlines:
+      news headlines. The command looks the ticker up by its queue id -- never
+      paste the ticker text itself into a command:
       python3 -c "
 import db, research
 conn = db.connect('data/disclosures.db')
-print(research.format_brief(research.build(conn, '<TICKER>')))
+print(research.format_brief(research.build(conn, dict(db.pending_analysis(conn))[<ID>])))
 "
-      (substitute the real ticker for <TICKER>)
+      (substitute the real numeric id from step 1's output for <ID>)
 
    b. Read the printed headlines yourself and reason about them -- this is
       the actual point of this scheduled pass: a real qualitative read of
