@@ -46,8 +46,11 @@ import cik_map
 import cluster
 import db
 import insider_score
+import positions
 import sec_edgar
+import strategy
 import tradingview
+import trading212
 import universe
 import telegram_notify
 from passes import (
@@ -148,12 +151,14 @@ def _which_sources(args) -> dict:
     }
 
 
-def run_cluster_pass(conn, args) -> list:
+def run_cluster_pass(conn, args) -> strategy.Selection:
     """Recomputes both signal types from everything currently in SQLite (not just
-    this run's new rows -- a cluster/exit accumulates across multiple daily runs)
-    and returns only the ones that grew past what was last alerted:
+    this run's new rows -- a cluster/exit accumulates across multiple daily runs),
+    keeping only the ones that grew past what was last alerted:
       - cluster buy signals: a ticker bought by multiple distinct people at once
       - exit signals: people who bought together later selling together
+    and tiers the buy side into strategy.Selection.strong / .candidates (see
+    strategy.select).
     """
     sources = _which_sources(args)
 
@@ -201,28 +206,27 @@ def run_cluster_pass(conn, args) -> list:
             signals += cluster.find_sweden_exit_signals(conn)
         if sources["senate"]:
             signals += cluster.find_senate_exit_signals(conn)
-    # Attach company context (size, liquidity) and rank. Everything above this point
-    # is pure SQL; this is the only step that reaches the network.
-    signals = cluster.enrich_signals(conn, signals)
+    # Tiers (strategy.py): buy side, disclosed in the last few days, on Trading 212,
+    # above the size floors -- enrich_signals runs inside select(), only on what
+    # survives the cheap filters.
+    selection = strategy.select(conn, signals, trading212.availability(conn))
 
-    if args.min_score:
-        signals = [s for s in signals if getattr(s, "score", 0) >= args.min_score]
-    if args.min_liquidity:
-        # Keep signals whose liquidity is unknown: unknown is not the same as low,
-        # and silently dropping every non-US name would be worse than the noise.
-        signals = [s for s in signals
-                   if getattr(s, "avg_daily_value", None) is None
-                   or s.avg_daily_value >= args.min_liquidity]
+    def keep(t):
+        s = t.signal
+        if args.min_score and getattr(s, "score", 0) < args.min_score:
+            return False
+        adv = getattr(s, "avg_daily_value", None)
+        return not (args.min_liquidity and adv is not None and adv < args.min_liquidity)
+    selection.strong = [t for t in selection.strong if keep(t)]
+    selection.candidates = [t for t in selection.candidates if keep(t)]
 
     if not args.no_market_context:
-        # Deliberately last: runs only on whatever survived every filter above,
-        # so a daily run pays for this once per surviving signal, not once per
-        # signal the finders produced.
-        signals = tradingview.annotate_signals(signals)
+        # Last, so it runs only on what will actually be shown.
+        tradingview.annotate_signals([t.signal for t in selection.strong + selection.candidates])
 
-    for s in signals:
-        print(telegram_notify.format_any_signal(s))
-    return signals
+    for t in selection.strong + selection.candidates:
+        print(f"[{t.tier}] " + telegram_notify.format_any_signal(t.signal))
+    return selection
 
 
 def _signal_features(sig) -> dict:
@@ -286,6 +290,23 @@ def _commit_signals(conn, signals) -> None:
             cluster.commit_stake_alert(conn, s)
         else:
             cluster.commit_alert(conn, s)
+
+
+def _send_digest(conn, selection, closes) -> bool:
+    """One Telegram message -- 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть -- and, only if it
+    went through, the bookkeeping: alert state and journal for the signals, and the
+    once-only mark for close alerts. A failed send leaves both untouched so the next
+    run retries. Nothing to say -> nothing sent, returns False."""
+    tiered = selection.strong + selection.candidates
+    if not tiered and not closes:
+        return False
+    if not telegram_notify.send_text(telegram_notify.format_tiered_digest(selection, closes)):
+        print(f"[telegram] send failed -- leaving {len(tiered)} signal(s) and "
+              f"{len(closes)} close alert(s) for the next run", file=sys.stderr)
+        return False
+    _commit_signals(conn, [t.signal for t in tiered])
+    positions.mark_alerted(conn, closes)
+    return True
 
 
 def check_source_liveness(conn, new_by_source: dict, threshold: int) -> list[str]:
@@ -494,10 +515,6 @@ def main():
                      help="don't compute exit signals (people who bought a ticker together later "
                           "selling it together -- see EXIT_* constants in cluster/common.py)")
     ap.add_argument("--no-telegram", action="store_true", help="skip sending Telegram alerts")
-    ap.add_argument("--telegram-item-limit", type=int, default=40,
-                     help="if a single run finds more new cluster signals than this (basically never, "
-                          "but a safety net for e.g. a DB reset), send one short warning instead of "
-                          "the full list, to avoid flooding the chat (default 40)")
     args = ap.parse_args()
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -593,45 +610,21 @@ def main():
         for x in stale_sources:
             print(f"[stale] {x}", file=sys.stderr)
 
-        signals = run_cluster_pass(conn, args)
-
-        if signals and not args.no_telegram:
-            if len(signals) > args.telegram_item_limit:
-                # Too many to send as a digest -- almost always a first population
-                # of a new source or a reset database, not a remarkable day. Send one
-                # short warning instead of flooding the chat, and then commit them
-                # anyway: leaving them uncommitted would reproduce the same flood on
-                # every subsequent run, warning about the same signals forever.
-                sent = telegram_notify.send_text(
-                    f"⚠️ Найдено {len(signals)} сигналов за один прогон — это выше лимита "
-                    f"({args.telegram_item_limit}), обычно так выглядит первое наполнение "
-                    f"источника или сброс базы, а не примечательный день. Полный список не "
-                    f"отправляю, он в data/disclosures.db и в меню (пункт 3). Отмечаю их как "
-                    f"отправленные, иначе это же предупреждение будет приходить каждый прогон."
-                )
-                if sent:
-                    _commit_signals(conn, signals)
-            else:
-                # Only mark these as alerted if the send actually went through --
-                # a signal re-fires only once its buyer count grows past the last
-                # alerted one, so committing after a failed send (network blip,
-                # bad token, Telegram outage, or credentials simply not set) would
-                # silently drop the alert for good. Committing only on success
-                # means the next run just re-sends it.
-                sent = telegram_notify.send_text(telegram_notify.format_signals_digest(signals))
-                if sent:
-                    _commit_signals(conn, signals)
-                else:
-                    print(f"[telegram] send failed -- leaving {len(signals)} signal(s) uncommitted, "
-                          f"they'll be retried on the next run", file=sys.stderr)
+        selection = run_cluster_pass(conn, args)
+        closes = positions.check_exits(conn)
+        for a in closes:
+            print(telegram_notify.format_close_alert(a, html=False))
+        if not args.no_telegram:
+            _send_digest(conn, selection, closes)
+        signal_count = len(selection.strong) + len(selection.candidates)
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from
         # "hasn't run in ten days".
         db.save_cached_value(conn, "last_successful_run", time.time())
 
-        print(f"--- poll finished, {total_new} new purchase(s), {len(signals)} signal(s), "
-              f"took {time.time()-started:.1f}s ---")
+        print(f"--- poll finished, {total_new} new purchase(s), {signal_count} signal(s), "
+              f"{len(closes)} close alert(s), took {time.time()-started:.1f}s ---")
 
         if args.once:
             break

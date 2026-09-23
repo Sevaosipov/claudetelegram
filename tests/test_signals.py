@@ -722,3 +722,38 @@ def test_corroboration_survives_the_full_chain_to_the_dossier(conn):
     summary = research.corroboration_summary(conn, "AAA")
     assert summary["all_sources"] == ["SEC", "SENATE"]
     assert summary["recent_sources"] == ["SEC", "SENATE"]
+
+
+# ------------------------------------------------------- tiered daily digest
+def test_send_digest_commits_signals_and_close_alerts_only_on_success(conn, monkeypatch):
+    import positions
+    import strategy
+    RECENT = (TODAY - dt.timedelta(days=1)).isoformat()
+    sig = cluster.ClusterSignal(source="SEC", ticker="AAA", company="C", buyer_count=3,
+                                total_value=1e6, members=[], window_start=RECENT,
+                                window_end=RECENT, member_names=["A", "B", "C"])
+    sig.tier = strategy.STRONG
+    sel = strategy.Selection([strategy.Tiered(sig, strategy.STRONG, ["x"], [])], [], True)
+    pos = positions.open_position(conn, "ZZZ", 10.0, today=TODAY - dt.timedelta(days=100))
+    closes = positions.check_exits(conn, price_fn=lambda t: None)
+
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: False)
+    assert bot._send_digest(conn, sel, closes) is False
+    assert db.get_alert_state(conn, "SEC", "AAA") is None
+    assert positions.check_exits(conn, price_fn=lambda t: None)       # not marked yet
+
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    assert bot._send_digest(conn, sel, closes) is True
+    assert "Сильные" in sent[0] and "ZZZ" in sent[0]
+    assert db.get_alert_state(conn, "SEC", "AAA") is not None
+    assert conn.execute("SELECT tier FROM signal_journal").fetchone()[0] == "strong"
+    assert positions.check_exits(conn, price_fn=lambda t: None) == []
+
+
+def test_send_digest_sends_nothing_when_there_is_nothing(conn, monkeypatch):
+    import strategy
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    assert bot._send_digest(conn, strategy.Selection([], [], True), []) is False
+    assert sent == []
