@@ -486,6 +486,8 @@ CREATE TABLE IF NOT EXISTS outlook_table (
     oos_n           INTEGER NOT NULL,
     oos_brier_s     REAL,
     oos_brier_base  REAL,
+    oos_folds       INTEGER,        -- test years with this situation in them
+    oos_fold_wins   INTEGER,        -- of those, years it beat the base rate's Brier
     assets          INTEGER,        -- how many assets the table was counted from
     built_at        TEXT NOT NULL,
     PRIMARY KEY (table_name, situation)
@@ -511,6 +513,8 @@ _ADDED_COLUMNS = [
     ("signal_journal", "corroborated_by", "TEXT"),
     ("signal_journal", "tier", "TEXT"),
     ("outlook_table", "assets", "INTEGER"),
+    ("outlook_table", "oos_folds", "INTEGER"),
+    ("outlook_table", "oos_fold_wins", "INTEGER"),
 ]
 
 

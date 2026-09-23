@@ -2,6 +2,8 @@
 synthetic price paths."""
 from __future__ import annotations
 
+import random
+
 import pandas as pd
 import pytest
 
@@ -63,7 +65,18 @@ def test_observations_are_monthly_and_labelled():
     obs = outlook.observations(list(zip(dates, closes)), 21)
     expected = len(range(outlook.MIN_HISTORY - 1, 600 - 21, 21))
     assert len(obs) == expected and all(up for _y, _k, up in obs)
-    assert obs[0][0] == int(dates[outlook.MIN_HISTORY - 1][:4])
+    assert obs[0][0] == int(dates[outlook.MIN_HISTORY - 1 + 21][:4])
+
+
+def test_an_observation_belongs_to_the_year_its_label_is_known():
+    """A December observation whose month ends in January is a January fact: labelled
+    by the start date, a training fold (years < Y) would peek into year Y."""
+    t = outlook.MIN_HISTORY - 1
+    dates = [d.date().isoformat()
+             for d in pd.date_range(pd.Timestamp("2015-12-20") - pd.Timedelta(days=t), periods=400)]
+    assert dates[t] == "2015-12-20" and dates[t + 30] == "2016-01-19"
+    obs = outlook.observations(list(zip(dates, _path(400))), 30)
+    assert obs[0][0] == 2016
 
 
 # ---------------------------------------------------------- table, walk-forward
@@ -80,6 +93,78 @@ def test_a_planted_effect_has_an_edge_and_noise_does_not():
     rows = outlook.build_table(noise + planted)
     row = rows["up|strong_up|normal"]
     assert outlook.has_edge(row) and row["n"] == 30 * 12 and row["up"] == 30 * 12
+
+
+SITUATIONS = [f"{t}|{m}|{v}" for t in ("up", "down", "mixed")
+              for m in ("strong_up", "strong_down", "flat") for v in ("high", "normal")]
+
+
+def _market(seed, planted=None, effect=0.0, n_assets=40, years=range(2011, 2024)):
+    """Noise shaped like a real table: each month a date-wide market move lifts or sinks
+    every asset together, and half the assets share that month's situation (regimes
+    cluster by date). No situation has an effect of its own except `planted`."""
+    rnd = random.Random(seed)
+    obs = []
+    for y in years:
+        for _month in range(12):
+            shock = rnd.gauss(0, 0.12)
+            regime = rnd.choice(SITUATIONS)
+            for _asset in range(n_assets):
+                k = regime if rnd.random() < 0.5 else rnd.choice(SITUATIONS)
+                p = min(max(0.58 + shock + (effect if k == planted else 0.0), 0.02), 0.98)
+                obs.append((y, k, rnd.random() < p))
+    return obs
+
+
+def test_noise_with_a_market_factor_rarely_has_an_edge():
+    """A date-wide market factor fools the Brier-only rule (19-25% of pure-noise
+    situations in the controller's simulation); the four-part rule keeps that to a few
+    percent. Ten fixed seeds, every full and pooled row of each table."""
+    rows = [r for seed in range(10)
+            for r in outlook.build_table(_market(seed, n_assets=150)).values()]
+    brier_only = sum(r["oos_n"] >= outlook.MIN_OOS and r["oos_brier_s"] < r["oos_brier_base"]
+                     for r in rows)
+    assert brier_only / len(rows) > 0.15
+    assert sum(outlook.has_edge(r) for r in rows) / len(rows) <= 0.06
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_a_planted_effect_in_a_noisy_market_has_an_edge(seed):
+    rows = outlook.build_table(_market(seed, planted="up|flat|normal", effect=0.15))
+    assert outlook.has_edge(rows["up|flat|normal"])
+
+
+def test_winning_overall_but_in_only_one_of_three_years_is_no_edge():
+    """A situation far above the base rate in training, then one big year and two
+    losing ones: its overall Brier beats the base rate, its record by year doesn't."""
+    def year(y, s_obs, s_ups):
+        background = [(y, "mixed|flat|normal", i % 2 == 0) for i in range(100)]
+        return background + [(y, "up|strong_up|high", i < s_ups) for i in range(s_obs)]
+    obs = [o for y in range(2010, 2014) for o in year(y, 20, 18)]    # training only
+    obs += year(2014, 60, 60) + year(2015, 10, 5) + year(2016, 10, 5) + year(2017, 0, 0)
+    row = outlook.build_table(obs)["up|strong_up|high"]
+    assert (row["oos_n"], row["oos_folds"], row["oos_fold_wins"]) == (80, 3, 1)
+    assert row["oos_brier_s"] < row["oos_brier_base"]              # overall it "wins"...
+    assert not outlook.has_edge(row)                               # ...but only one year
+
+
+EDGE = {"oos_n": 120, "oos_folds": 5, "oos_fold_wins": 3, "oos_brier_s": 0.23,
+        "oos_brier_base": 0.24}
+
+
+@pytest.mark.parametrize("change,edge", [
+    ({}, True),
+    ({"oos_n": 49}, False),                                        # too few observations
+    ({"oos_folds": 2, "oos_fold_wins": 2}, False),                 # too few test years
+    ({"oos_fold_wins": 2}, False),                                 # wins 2 of 5 years
+    ({"oos_brier_s": 0.2392}, False),                              # skill 0.33% < 0.5%
+    ({"oos_brier_s": 0.2387}, True),                               # skill 0.54%
+    ({"oos_folds": None, "oos_fold_wins": None}, False),           # a row from before folds
+])
+def test_the_four_conditions_of_an_edge(change, edge):
+    assert outlook.has_edge({**EDGE, **change}) is edge
+    older = {k: v for k, v in EDGE.items() if k not in ("oos_folds", "oos_fold_wins")}
+    assert not outlook.has_edge(older)
 
 
 def test_a_thin_situation_has_no_edge():
@@ -101,6 +186,8 @@ def test_tables_and_bars_round_trip(conn):
     loaded, built_at = outlook.load_table(conn, "stock")
     assert loaded["up|flat|normal"]["n"] == 60 and built_at
     assert loaded["up|flat|normal"]["assets"] == 97
+    assert (loaded["up|flat|normal"]["oos_folds"], loaded["up|flat|normal"]["oos_fold_wins"]) == \
+        (rows["up|flat|normal"]["oos_folds"], rows["up|flat|normal"]["oos_fold_wins"]) == (7, 0)
     outlook.save_bars(conn, "AAA", [("2026-01-02", 1.0), ("2026-01-05", 2.0)])
     assert outlook.load_bars(conn, "AAA") == [("2026-01-02", 1.0), ("2026-01-05", 2.0)]
 
@@ -120,7 +207,7 @@ def test_an_older_outlook_table_gains_the_new_columns(tmp_path):
     conn = db.connect(path)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(outlook_table)")}
     conn.close()
-    assert "assets" in columns
+    assert {"assets", "oos_folds", "oos_fold_wins"} <= columns
 
 
 def test_walk_forward_folds_boundaries_are_correct():

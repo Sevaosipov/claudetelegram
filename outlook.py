@@ -25,7 +25,13 @@ LOOKBACK = 252
 MIN_HISTORY = LOOKBACK + 21            # 273 observations
 VOL_WINDOW = 21
 HIGH_VOL_QUANTILE = 0.75
+# An edge (has_edge) needs all four: enough out-of-sample observations, spread over
+# enough test years, a better Brier score than the base rate in most of those years,
+# and a skill above rounding noise overall.
 MIN_OOS = 50
+MIN_OOS_FOLDS = 3
+MIN_FOLD_WIN_SHARE = 0.6
+MIN_BRIER_SKILL = 0.005
 MIN_OWN = 30
 OOS_START_OFFSET_YEARS = 4  # Test fold starts at the table's 5th year: years[0] + 4
 POOLED = "*"
@@ -100,7 +106,8 @@ def pooled(key: str) -> str:
 # ------------------------------------------------------------------- tables
 def observations(bars: list[tuple[str, float]], h: int) -> list[tuple[int, str, bool]]:
     """(year, situation, price higher h observations later), sampled every h
-    observations so no two overlap."""
+    observations so no two overlap. The year is that of the label date (t + h), when
+    the outcome is known: a training fold (years < Y) then never peeks into year Y."""
     if len(bars) < MIN_HISTORY + h:
         return []
     closes = pd.Series([c for _d, c in bars], dtype=float)
@@ -110,7 +117,7 @@ def observations(bars: list[tuple[str, float]], h: int) -> list[tuple[int, str, 
         key = keys.iloc[t]
         if pd.isna(key):
             continue
-        out.append((int(bars[t][0][:4]), key, bool(closes.iloc[t + h] > closes.iloc[t])))
+        out.append((int(bars[t + h][0][:4]), key, bool(closes.iloc[t + h] > closes.iloc[t])))
     return out
 
 
@@ -130,13 +137,22 @@ def _walk_forward(obs: list[tuple[int, str, bool]]) -> dict:
             c = counts.setdefault(k, [0, 0])
             c[0] += 1
             c[1] += u
+        fold: dict[str, list] = {}       # this year's n and summed Brier: situation, base
         for k, u in test:
             n, ups = counts.get(k, (0, 0))
             p = ups / n if n else base
-            a = acc.setdefault(k, {"oos_n": 0, "oos_brier_s": 0.0, "oos_brier_base": 0.0})
-            a["oos_n"] += 1
-            a["oos_brier_s"] += (p - u) ** 2
-            a["oos_brier_base"] += (base - u) ** 2
+            f = fold.setdefault(k, [0, 0.0, 0.0])
+            f[0] += 1
+            f[1] += (p - u) ** 2
+            f[2] += (base - u) ** 2
+        for k, (n, brier_s, brier_base) in fold.items():
+            a = acc.setdefault(k, {"oos_n": 0, "oos_brier_s": 0.0, "oos_brier_base": 0.0,
+                                   "oos_folds": 0, "oos_fold_wins": 0})
+            a["oos_n"] += n
+            a["oos_brier_s"] += brier_s
+            a["oos_brier_base"] += brier_base
+            a["oos_folds"] += 1
+            a["oos_fold_wins"] += brier_s < brier_base
     for a in acc.values():
         a["oos_brier_s"] /= a["oos_n"]
         a["oos_brier_base"] /= a["oos_n"]
@@ -151,7 +167,8 @@ def _table(obs: list[tuple[int, str, bool]]) -> dict:
         c[1] += u
     base = sum(u for _y, _k, u in obs) / len(obs) if obs else None
     wf = _walk_forward(obs)
-    empty = {"oos_n": 0, "oos_brier_s": None, "oos_brier_base": None}
+    empty = {"oos_n": 0, "oos_brier_s": None, "oos_brier_base": None, "oos_folds": 0,
+             "oos_fold_wins": 0}
     return {k: {"n": n, "up": ups, "base_rate": base, **wf.get(k, empty)}
             for k, (n, ups) in counts.items()}
 
@@ -164,8 +181,15 @@ def build_table(obs: list[tuple[int, str, bool]]) -> dict:
 
 
 def has_edge(row: dict) -> bool:
-    return (row.get("oos_n", 0) >= MIN_OOS and row.get("oos_brier_s") is not None
-            and row["oos_brier_s"] < row["oos_brier_base"])
+    """Spec §2's walk-forward check, made stricter: in simulated noise tables with a
+    date-wide market factor, "Brier better than the base rate, n >= 50" passed 19-25%
+    of situations with no real effect; these four together pass at most ~6% and still
+    find ~73% of real +8-point effects. A row from before folds were stored has none."""
+    n, folds, wins = (row.get(k) or 0 for k in ("oos_n", "oos_folds", "oos_fold_wins"))
+    brier_s, brier_base = row.get("oos_brier_s"), row.get("oos_brier_base")
+    if n < MIN_OOS or folds < MIN_OOS_FOLDS or wins / folds < MIN_FOLD_WIN_SHARE:
+        return False
+    return bool(brier_s is not None and brier_base and 1 - brier_s / brier_base >= MIN_BRIER_SKILL)
 
 
 # ------------------------------------------------------------------- storage
@@ -175,19 +199,22 @@ def save_table(conn, name: str, rows: dict, n_assets: int | None) -> None:
     conn.execute("DELETE FROM outlook_table WHERE table_name = ?", (name,))
     conn.executemany(
         "INSERT INTO outlook_table (table_name, situation, n, up, base_rate, oos_n, "
-        "oos_brier_s, oos_brier_base, assets, built_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "oos_brier_s, oos_brier_base, oos_folds, oos_fold_wins, assets, built_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [(name, k, r["n"], r["up"], r["base_rate"], r["oos_n"], r["oos_brier_s"],
-          r["oos_brier_base"], n_assets, built_at) for k, r in rows.items()])
+          r["oos_brier_base"], r["oos_folds"], r["oos_fold_wins"], n_assets, built_at)
+         for k, r in rows.items()])
     conn.commit()
 
 
 def load_table(conn, name: str) -> tuple[dict, str | None]:
     rows = conn.execute(
-        "SELECT situation, n, up, base_rate, oos_n, oos_brier_s, oos_brier_base, assets, "
-        "built_at FROM outlook_table WHERE table_name = ?", (name,)).fetchall()
+        "SELECT situation, n, up, base_rate, oos_n, oos_brier_s, oos_brier_base, oos_folds, "
+        "oos_fold_wins, assets, built_at FROM outlook_table WHERE table_name = ?",
+        (name,)).fetchall()
     table = {k: {"n": n, "up": up, "base_rate": b, "oos_n": on, "oos_brier_s": bs,
-                 "oos_brier_base": bb, "assets": na}
-             for k, n, up, b, on, bs, bb, na, _at in rows}
+                 "oos_brier_base": bb, "oos_folds": of, "oos_fold_wins": ow, "assets": na}
+             for k, n, up, b, on, bs, bb, of, ow, na, _at in rows}
     return table, (rows[0][-1] if rows else None)
 
 
