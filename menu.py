@@ -202,12 +202,12 @@ def _render_signals(conn) -> None:
         + cluster.find_sweden_exit_signals(conn, ignore_alert_state=True)
     )
     if not signals:
-        print("Сейчас нет ни одного сигнала, удовлетворяющего порогам (см. cluster.py).")
+        print("Сейчас нет ни одного сигнала, удовлетворяющего порогам (см. cluster/common.py).")
         return
     signals = cluster.enrich_signals(conn, signals)
     signals = [s for s in signals if getattr(s, "score", 0.0) >= SIGNALS_MIN_SCORE]
     if not signals:
-        print(f"Сейчас нет сигналов с баллом >= {SIGNALS_MIN_SCORE:.0f} (см. cluster.py).")
+        print(f"Сейчас нет сигналов с баллом >= {SIGNALS_MIN_SCORE:.0f} (см. cluster/common.py).")
         return
     for s in signals:
         print(telegram_notify.format_any_signal(s))

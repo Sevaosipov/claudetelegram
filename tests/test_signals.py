@@ -13,6 +13,7 @@ import pytest
 import bot
 import cluster
 import db
+import passes
 import research
 from conftest import add_form_144, add_house_txn, add_sec_purchase, add_sec_sale, add_senate_txn, add_stake
 
@@ -332,7 +333,7 @@ def test_find_stake_signals_merged_group_does_not_refire_after_commit(conn):
 
 # ------------------------------------------------------- scanned-days ledger
 def test_unscanned_days_are_returned_and_today_is_always_included(conn):
-    days = bot._days_to_scan(conn, "SEC", lookback_days=4, max_new_days=5)
+    days = passes._days_to_scan(conn, "SEC", lookback_days=4, max_new_days=5)
     assert TODAY in days
     assert len(days) == 4
 
@@ -340,7 +341,7 @@ def test_unscanned_days_are_returned_and_today_is_always_included(conn):
 def test_scanned_days_are_skipped(conn):
     yesterday = TODAY - dt.timedelta(days=1)
     db.mark_day_scanned(conn, "SEC", yesterday.isoformat(), 100)
-    days = bot._days_to_scan(conn, "SEC", lookback_days=3, max_new_days=5)
+    days = passes._days_to_scan(conn, "SEC", lookback_days=3, max_new_days=5)
     assert yesterday not in days
     assert TODAY in days
 
@@ -348,7 +349,7 @@ def test_scanned_days_are_skipped(conn):
 def test_backfill_is_capped_per_run(conn):
     """A ten-day outage must not turn into one enormous run; the rest drains over
     the following runs, because each run records what it scanned."""
-    days = bot._days_to_scan(conn, "SEC", lookback_days=10, max_new_days=2)
+    days = passes._days_to_scan(conn, "SEC", lookback_days=10, max_new_days=2)
     assert len(days) == 3, "two backlog days plus today"
     assert TODAY in days
 
@@ -356,7 +357,7 @@ def test_backfill_is_capped_per_run(conn):
 def test_today_is_never_marked_scanned(conn):
     """Today's index is still being published, so marking it done would freeze the
     day's remaining filings out permanently."""
-    bot._scan_day(conn, "SEC", TODAY, TODAY, lambda: 5)
+    passes._scan_day(conn, "SEC", TODAY, TODAY, lambda: 5)
     assert TODAY.isoformat() not in db.scanned_days(conn, "SEC")
 
 
@@ -369,7 +370,7 @@ def test_a_failed_day_is_left_unscanned_for_retry(conn):
     def boom():
         raise requests.RequestException("503")
 
-    assert bot._scan_day(conn, "SEC", yesterday, TODAY, boom) is None
+    assert passes._scan_day(conn, "SEC", yesterday, TODAY, boom) is None
     assert yesterday.isoformat() not in db.scanned_days(conn, "SEC")
 
 
