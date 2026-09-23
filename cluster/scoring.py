@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 
+import crypto
 import fx
 
 from .common import (
     CAP_BUYERS,
     CAP_CORROBORATION,
+    CAP_CRYPTO_SIZE,
     CAP_MARKET_CAP,
     CAP_POSITION,
     CORROBORATION_WINDOW_DAYS,
@@ -18,6 +21,8 @@ from .common import (
     MAX_CREDIBLE_PCT_OF_MCAP,
     P_ILLIQUID,
     P_UNKNOWN_SIZE,
+    W_CRYPTO_BASE,
+    W_CRYPTO_SIZE,
     W_FIRST_BUY,
     W_FRESH,
     W_FULL_UNWIND,
@@ -54,6 +59,12 @@ def score_signal(sig, corroborated_by: list[str] | None = None) -> float:
             score += 25.0   # 13D means the holder may seek to influence control
         if sig.prev_percent is not None:
             score += min(max(sig.percent - sig.prev_percent, 0.0), 20.0) * 2.0
+    elif hasattr(sig, "crypto_kind"):    # CryptoSignal
+        # No company, no officers, no market cap to measure against -- how much
+        # money moved is all there is, on a log scale so a EUR 5bn day doesn't
+        # bury everything else.
+        value = sig.total_value or 0.0
+        score = W_CRYPTO_BASE + min(W_CRYPTO_SIZE * math.log10(1 + value / 1e6), CAP_CRYPTO_SIZE)
     elif hasattr(sig, "seller_count"):   # ExitSignal
         # Exit signals carry none of the buy-side context (officer status, % of
         # market cap, freshness) the general path below scores on -- they are a
@@ -76,7 +87,9 @@ def score_signal(sig, corroborated_by: list[str] | None = None) -> float:
             score += W_FIRST_BUY
         if sig.lag_days is not None:
             score += W_FRESH * max(0.0, 1.0 - sig.lag_days / FRESH_DECAY_DAYS)
-        if sig.market_cap_eur is None:
+        # A coin has no market cap to be unknown -- congressional crypto buys come
+        # through here as ordinary clusters.
+        if sig.market_cap_eur is None and not crypto.is_crypto(sig.ticker):
             score += P_UNKNOWN_SIZE
         if sig.avg_daily_value is not None and sig.avg_daily_value < ILLIQUID_BELOW_EUR:
             score += P_ILLIQUID
@@ -150,6 +163,13 @@ def enrich_signals(conn, signals: list) -> list:
     find_corroboration(conn, signals)
 
     for sig in signals:
+        if getattr(sig, "total_value", None) is None and getattr(sig, "units", None):
+            # A crypto move known only in coins (an on-chain balance change, a
+            # treasury filing that gave no price): valued at spot, here, because
+            # this is the one step allowed to reach the network.
+            price = crypto.price_usd(conn, crypto.symbol_of(sig.ticker))
+            if price:
+                sig.total_value = fx.to_eur(sig.units * price, "USD", conn)
         cap = marketcap.market_cap_eur(conn, sig.ticker, sig.source)
         facts = marketcap.facts(conn, sig.ticker, sig.source) or {}
         sig.market_cap_eur = cap

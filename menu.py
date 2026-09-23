@@ -200,6 +200,10 @@ def _render_signals(conn) -> None:
         + cluster.find_bafin_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_norway_exit_signals(conn, ignore_alert_state=True)
         + cluster.find_sweden_exit_signals(conn, ignore_alert_state=True)
+        + cluster.find_treasury_signals(conn, ignore_alert_state=True)
+        + cluster.find_etf_flow_signals(conn, ignore_alert_state=True)
+        # Empty unless the bot has been run with --onchain: no snapshots, no signal.
+        + cluster.find_onchain_signals(conn, ignore_alert_state=True)
     )
     if not signals:
         print("Сейчас нет ни одного сигнала, удовлетворяющего порогам (см. cluster/common.py).")

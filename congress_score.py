@@ -22,6 +22,7 @@ import re
 
 import yfinance as yf
 
+import crypto
 import db
 
 LOOKBACK_MONTHS = 12
@@ -34,8 +35,9 @@ def _parse_amount_mid(amount_range: str) -> float:
 
 
 def _yf_symbol(ticker: str) -> str:
-    # yfinance wants share classes as e.g. "BRK-B", not the "BRK.B" style PTRs use.
-    return ticker.replace(".", "-")
+    # yfinance wants share classes as e.g. "BRK-B", not the "BRK.B" style PTRs use,
+    # and crypto as "BTC-USD" rather than this project's "CRYPTO:BTC".
+    return crypto.yf_symbol(ticker)
 
 
 def _price_on(conn, ticker: str, date: dt.date) -> float | None:

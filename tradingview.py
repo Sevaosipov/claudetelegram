@@ -96,6 +96,10 @@ def fetch_snapshot(query: str, session: requests.Session | None = None) -> dict 
     it (numbers, or None for a field with no value)."""
     session = session or requests.Session()
     symbol = query.strip().upper()
+    if symbol.startswith("CRYPTO:") and not symbol.endswith("USD"):
+        # This project's CRYPTO:BTC (see crypto.py); TradingView's own CRYPTO
+        # index quotes the pair, CRYPTO:BTCUSD.
+        symbol += "USD"
     if _looks_like_isin(symbol) or ":" not in symbol:
         resolved = resolve_symbol(symbol, session)
         if not resolved:

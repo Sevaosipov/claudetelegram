@@ -378,6 +378,52 @@ CREATE TABLE IF NOT EXISTS scanned_days (
     scanned_at  TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (source, date)
 );
+
+-- Company balance-sheet crypto trades from 8-K/6-K prose (crypto_treasury.py). Keyed
+-- by the trade rather than the document: one accession routinely states the same
+-- trade in both the 8-K body and its press-release exhibit.
+CREATE TABLE IF NOT EXISTS crypto_treasury_txns (
+    accession      TEXT NOT NULL,
+    company        TEXT,
+    ticker         TEXT,          -- the company's own ticker (MSTR), not the coin's
+    cik            TEXT,
+    coin           TEXT NOT NULL, -- BTC / ETH
+    side           TEXT NOT NULL, -- P / S
+    units          REAL NOT NULL,
+    avg_price_usd  REAL,
+    total_usd      REAL,
+    filed_date     TEXT,          -- ISO
+    form           TEXT,
+    source_url     TEXT,
+    found_at       TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (accession, coin, side, units)
+);
+
+CREATE TABLE IF NOT EXISTS crypto_treasury_seen (
+    doc_id TEXT PRIMARY KEY      -- EFTS "_id": accession:filename
+);
+
+-- Daily issuer-published share count and NAV per spot ETF (crypto_etf.py). Flow is
+-- the change in shares between two snapshots, valued at the later NAV.
+CREATE TABLE IF NOT EXISTS crypto_etf_snapshots (
+    fund                TEXT NOT NULL,
+    coin                TEXT NOT NULL,
+    as_of               TEXT NOT NULL,   -- ISO, the issuer's own date stamp
+    shares_outstanding  REAL NOT NULL,
+    nav_usd             REAL NOT NULL,
+    found_at            TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (fund, as_of)
+);
+
+-- Exchange wallet balances, one row per wallet per run (crypto_onchain.py).
+CREATE TABLE IF NOT EXISTS crypto_wallet_snapshots (
+    coin        TEXT NOT NULL,
+    address     TEXT NOT NULL,
+    label       TEXT,
+    balance     REAL NOT NULL,
+    taken_at    TEXT NOT NULL,           -- ISO datetime
+    PRIMARY KEY (address, taken_at)
+);
 """
 
 
@@ -876,3 +922,43 @@ def save_norway_purchase(conn: sqlite3.Connection, t: dict) -> bool:
         ),
     )
     return cur.rowcount > 0
+
+
+def crypto_treasury_seen(conn: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT doc_id FROM crypto_treasury_seen")}
+
+
+def mark_crypto_treasury_seen(conn: sqlite3.Connection, doc_id: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO crypto_treasury_seen(doc_id) VALUES (?)", (doc_id,))
+
+
+def save_crypto_treasury_txn(conn: sqlite3.Connection, t) -> bool:
+    """t is a crypto_treasury.TreasuryTxn. Returns True if it was a new trade."""
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO crypto_treasury_txns
+           (accession, company, ticker, cik, coin, side, units, avg_price_usd, total_usd,
+            filed_date, form, source_url)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (t.accession, t.company, t.ticker, t.cik, t.coin, t.side, t.units,
+         t.avg_price_usd, t.total_usd, t.filed_date, t.form, t.source_url),
+    )
+    return cur.rowcount > 0
+
+
+def save_crypto_etf_snapshot(conn: sqlite3.Connection, s) -> bool:
+    """s is a crypto_etf.Snapshot. Returns True if this (fund, as_of) was new."""
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO crypto_etf_snapshots
+           (fund, coin, as_of, shares_outstanding, nav_usd) VALUES (?,?,?,?,?)""",
+        (s.fund, s.coin, s.as_of, s.shares_outstanding, s.nav_usd),
+    )
+    return cur.rowcount > 0
+
+
+def save_crypto_wallet_snapshot(conn: sqlite3.Connection, b, taken_at: str) -> None:
+    """b is a crypto_onchain.WalletBalance."""
+    conn.execute(
+        """INSERT OR REPLACE INTO crypto_wallet_snapshots
+           (coin, address, label, balance, taken_at) VALUES (?,?,?,?,?)""",
+        (b.coin, b.address, b.label, b.balance, taken_at),
+    )

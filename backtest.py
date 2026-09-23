@@ -61,6 +61,7 @@ warnings.filterwarnings("ignore")
 import logging
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+import crypto
 import db
 import cluster
 import marketcap
@@ -88,7 +89,7 @@ def _series(ticker: str, start: str):
         return _SERIES_CACHE[key]
     out = None
     try:
-        hist = yf.Ticker(ticker.replace(".", "-")).history(start=start)["Close"].dropna()
+        hist = yf.Ticker(crypto.yf_symbol(ticker)).history(start=start)["Close"].dropna()
         if len(hist) >= 2:
             out = hist
     except Exception:
@@ -146,7 +147,7 @@ def _return_before(ticker: str, date: str, days: int = 63) -> float | None:
     try:
         start = (dt.date.fromisoformat(date) - dt.timedelta(days=days * 2 + 40)).isoformat()
         end = (dt.date.fromisoformat(date) + dt.timedelta(days=1)).isoformat()
-        px = yf.Ticker(ticker.replace(".", "-")).history(start=start, end=end)["Close"].dropna()
+        px = yf.Ticker(crypto.yf_symbol(ticker)).history(start=start, end=end)["Close"].dropna()
         spy = yf.Ticker(BENCHMARK).history(start=start, end=end)["Close"].dropna()
         out = _excess_return(px, spy, days)
     except Exception:

@@ -195,6 +195,23 @@ def format_sweden_line(t: dict) -> str:
     )
 
 
+def format_treasury_line(t) -> str:
+    """t is a crypto_treasury.TreasuryTxn."""
+    verb = "bought" if t.side == "P" else "sold"
+    who = f"{t.company} ({t.ticker})" if t.ticker else t.company
+    value = f" = ${t.value_usd:,.0f}" if t.value_usd else ""
+    price = f" @ ${t.avg_price_usd:,.0f}" if t.avg_price_usd else ""
+    return (f"🪙 Treasury: {who} {verb} {t.units:,.4g} {t.coin}{price}{value}\n"
+            f"   {t.form} filed {datefmt.fmt(t.filed_date)}\n"
+            f"   {t.source_url}")
+
+
+def format_etf_flow_line(fund: str, coin: str, prev_as_of: str, as_of: str, flow_usd: float) -> str:
+    sign = "+" if flow_usd >= 0 else "−"
+    return (f"🏦 ETF {fund} ({coin}): {sign}${abs(flow_usd) / 1e6:,.1f}m net flow "
+            f"{datefmt.fmt(prev_as_of)} → {datefmt.fmt(as_of)}")
+
+
 def format_condensed(rep: dict) -> str:
     """Telegram-safe rendering of a research.build() report for the inbound
     ticker-analysis reply in telegram_bot.py: the opinion section (when present)
@@ -459,7 +476,53 @@ def format_stake_signal(sig, *, html: bool = False) -> str:
     return "\n".join(lines)
 
 
+_CRYPTO_HEADINGS = {
+    # (crypto_kind, bullish) -> heading
+    ("treasury", True): "🪙 КОМПАНИЯ КУПИЛА",
+    ("treasury", False): "🪙 КОМПАНИЯ ПРОДАЛА",
+    ("etf_flow", True): "🏦 ПРИТОК В СПОТ-ETF",
+    ("etf_flow", False): "🏦 ОТТОК ИЗ СПОТ-ETF",
+    ("exchange_flow", True): "⛓ ВЫВОД С БИРЖ",
+    ("exchange_flow", False): "⛓ ЗАВОД НА БИРЖИ",
+}
+
+
+def format_crypto_signal(sig, *, html: bool = False) -> str:
+    """Treasury purchase, spot-ETF flow, or exchange-wallet flow -- see cluster/crypto.py."""
+    heading = _CRYPTO_HEADINGS[(sig.crypto_kind, sig.bullish)]
+    size = []
+    if sig.units:
+        size.append(f"{sig.units:,.0f} {sig.coin}")
+    if sig.total_value:
+        size.append(f"€{sig.total_value:,.0f}")
+    score = getattr(sig, "score", None)
+    tail = f" · {score:.0f} баллов" if score is not None else ""
+    headline = f"{heading}: {sig.ticker} — {' · '.join(size) or 'сумма неизвестна'}{tail}"
+    lines = [_b(headline, html), f"   {_esc(sig.company) if html else sig.company}"]
+    when = datefmt.fmt(sig.window_end[:10])
+    if sig.window_start[:10] != sig.window_end[:10]:
+        when = f"{datefmt.fmt(sig.window_start[:10])} – {when}"
+    lines.append(f"   {when}")
+    for d in sig.details:
+        lines.append(f"   • {_esc(d) if html else d}")
+    if sig.crypto_kind == "exchange_flow":
+        caveat = "не раскрытие: балансы помеченных кошельков бирж, возможны внутренние переводы"
+        lines.append(f"   ⚠️ {_esc(caveat) if html else caveat}")
+    corr = getattr(sig, "corroborated_by", None)
+    if corr:
+        text = f"Другие источники по этой монете: {', '.join(corr)}"
+        lines.append(f"   🔗 {_esc(text) if html else text}")
+    note = getattr(sig, "market_note", None)
+    if note:
+        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
+    if sig.url:
+        lines.append(f'   <a href="{_esc(sig.url)}">источник</a>' if html else f"   {sig.url}")
+    return "\n".join(lines)
+
+
 def format_any_signal(s, *, html: bool = False) -> str:
+    if hasattr(s, "crypto_kind"):
+        return format_crypto_signal(s, html=html)
     if hasattr(s, "seller_count"):
         return format_exit_signal(s, html=html)
     if hasattr(s, "percent"):
@@ -470,10 +533,13 @@ def format_any_signal(s, *, html: bool = False) -> str:
 def format_signals_digest(signals: list) -> str:
     exit_count = sum(1 for s in signals if hasattr(s, "seller_count"))
     stake_count = sum(1 for s in signals if hasattr(s, "percent"))
-    buy_count = len(signals) - exit_count - stake_count
+    crypto_count = sum(1 for s in signals if hasattr(s, "crypto_kind"))
+    buy_count = len(signals) - exit_count - stake_count - crypto_count
     parts = [f"{buy_count} кластерных покупок", f"{exit_count} выходов"]
     if stake_count:
         parts.append(f"{stake_count} крупных долей")
+    if crypto_count:
+        parts.append(f"{crypto_count} крипто")
     header = "🎯 <b>Новые сигналы: " + ", ".join(parts) + "</b>"
     return "\n\n".join([header] + [format_any_signal(s, html=True) for s in signals])
 

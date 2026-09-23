@@ -25,6 +25,8 @@ from xml.etree import ElementTree as ET
 import pdfplumber
 import requests
 
+import crypto
+
 BASE = "https://disclosures-clerk.house.gov"
 INDEX_ZIP_URL = BASE + "/public_disc/financial-pdfs/{year}FD.zip"
 PTR_PDF_URL = BASE + "/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
@@ -35,11 +37,12 @@ AMOUNT_RE = re.compile(r"^\$[\d,]+$|^-$")
 TICKER_RE = re.compile(r"\(([A-Za-z][A-Za-z.]{0,5})\)")
 ASSET_TYPE_RE = re.compile(r"\[([A-Z]{2})\]")
 
-# PTR asset-type codes that are an actual stake in a listed company: stock [ST] and
-# exchange-traded fund [EF]. The rest -- Treasury bills [GS], municipal bonds, fund
-# LPs [OT], options [OP], annuities -- used to be printed as "bought" alongside
-# stock buys, and outnumbered them. They are still stored; they just aren't news.
-EQUITY_ASSET_TYPES = {"ST", "EF"}
+# PTR asset-type codes worth showing in the purchase feed: stock [ST], exchange-traded
+# funds [EF] and cryptocurrency [CT]. The rest -- Treasury bills [GS], municipal
+# bonds, fund LPs [OT], options [OP], annuities -- used to be printed as "bought"
+# alongside stock buys, and outnumbered them. They are still stored; they just
+# aren't news.
+FEED_ASSET_TYPES = {"ST", "EF", "CT"}
 
 
 def asset_type(asset_text: str | None) -> str | None:
@@ -53,7 +56,7 @@ def is_feed_worthy(asset_text: str | None) -> bool:
     """Whether a purchase of this asset belongs in the purchase feed. A missing code
     is let through: unknown is not the same as a bond."""
     code = asset_type(asset_text)
-    return code is None or code in EQUITY_ASSET_TYPES
+    return code is None or code in FEED_ASSET_TYPES
 
 
 @dataclass
@@ -271,6 +274,12 @@ def _finalize(cur: dict, doc_id: str, filer_info: dict, source_url: str) -> Tran
     asset_text = " ".join(cur["asset_parts"]).strip()
     ticker_matches = TICKER_RE.findall(asset_text)
     ticker = ticker_matches[-1] if ticker_matches else None
+    if asset_type(asset_text) == "CT":
+        # Crypto rarely carries a parenthesised symbol ("Bitcoin [CT]"), and when it
+        # does ("Bitcoin (BTC)") a bare BTC would collide with the equity of that
+        # name. Keyed as CRYPTO:<SYM> instead -- see crypto.py.
+        sym = crypto.symbol_for_text(asset_text)
+        ticker = crypto.ticker(sym) if sym else None
     amount_range = " ".join(cur["amount_parts"]).strip()
     amount_range = re.sub(r"\s*-\s*", " - ", amount_range)
     return Transaction(

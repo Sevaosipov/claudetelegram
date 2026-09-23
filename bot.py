@@ -54,9 +54,12 @@ from passes import (
     CSV_PATH,
     _sec_forms,
     run_144_pass,
+    run_crypto_etf_pass,
+    run_crypto_treasury_pass,
     run_bafin_pass,
     run_house_pass,
     run_norway_pass,
+    run_onchain_pass,
     run_sec_pass,
     run_senate_pass,
     run_stake_pass,
@@ -127,7 +130,7 @@ def _which_sources(args) -> dict:
     individual --no-* skip flag. Shared by main()'s poll loop and
     run_cluster_pass() so the two never drift apart."""
     only_set = (args.sec_only or args.house_only or args.bafin_only or args.norway_only
-                or args.sweden_only)
+                or args.sweden_only or args.crypto_only)
     return {
         "sec": args.sec_only or not only_set,
         "house": args.house_only or not only_set,
@@ -137,6 +140,11 @@ def _which_sources(args) -> dict:
         # Never implied by "all sources": it has to be asked for explicitly, because
         # it is currently unreachable from here (see senate_efd.py).
         "senate": args.senate,
+        # Corporate treasury trades and spot-ETF flows. Congressional crypto buys
+        # are House/Senate rows and come with those sources, not this flag.
+        "crypto": (args.crypto_only or not only_set) and not args.no_crypto,
+        # Not a disclosure (see crypto_onchain.py), so opt-in like the Senate.
+        "onchain": args.onchain and (args.crypto_only or not only_set),
     }
 
 
@@ -175,6 +183,11 @@ def run_cluster_pass(conn, args) -> list:
                                                min_increase_pp=args.stake_min_increase,
                                                activist_only=args.activist_only,
                                                new_positions_only=args.new_positions_only)
+    if sources["crypto"]:
+        signals += cluster.find_treasury_signals(conn)
+        signals += cluster.find_etf_flow_signals(conn)
+    if sources["onchain"]:
+        signals += cluster.find_onchain_signals(conn)
     if not args.no_exit_signals:
         if sources["sec"]:
             signals += cluster.find_sec_exit_signals(conn)
@@ -221,7 +234,9 @@ def _signal_features(sig) -> dict:
     whatever the constants currently are.
     """
     import json
-    if hasattr(sig, "percent"):          # StakeSignal
+    if hasattr(sig, "crypto_kind"):      # CryptoSignal
+        kind, buyers, members = sig.crypto_kind, len(sig.member_names) or 1, sig.member_names
+    elif hasattr(sig, "percent"):        # StakeSignal
         kind, buyers, members = "stake", 1, [sig.person]
     elif hasattr(sig, "seller_count"):   # ExitSignal
         kind, buyers, members = "exit", sig.total_buyers, sig.seller_names
@@ -262,7 +277,9 @@ def _commit_signals(conn, signals) -> None:
     """
     for s in signals:
         db.journal_signal(conn, _signal_features(s))
-        if hasattr(s, "seller_count"):
+        if hasattr(s, "crypto_kind"):
+            cluster.commit_crypto_alert(conn, s)
+        elif hasattr(s, "seller_count"):
             cluster.commit_exit_alert(conn, s)
         elif hasattr(s, "percent"):
             cluster.commit_stake_alert(conn, s)
@@ -441,6 +458,18 @@ def main():
                      help="only alert on a holder's first-ever stake filing on a ticker -- drops "
                           "13D/G amendments entirely, however large the increase, since an "
                           "already-known holder growing their stake is not a new activist showing up")
+    ap.add_argument("--crypto-only", action="store_true",
+                     help="only the crypto sources: company treasury trades and spot-ETF flows "
+                          "(plus on-chain with --onchain)")
+    ap.add_argument("--no-crypto", action="store_true",
+                     help="skip company crypto-treasury trades (8-K/6-K) and spot-ETF flows")
+    ap.add_argument("--crypto-days", type=int, default=7,
+                     help="how far back (calendar days) to search 8-K/6-K filings for treasury "
+                          "trades; documents already read are skipped. Default 7")
+    ap.add_argument("--onchain", action="store_true",
+                     help="also snapshot large exchange cold-wallet balances (mempool.space, a "
+                          "public Ethereum RPC) and signal on big net flows. OFF by default: "
+                          "not a disclosure, and exchange-internal transfers look the same")
     ap.add_argument("--sweden-only", action="store_true")
     ap.add_argument("--no-sweden", action="store_true",
                      help="skip Sweden (Finansinspektionen's insider register)")
@@ -493,6 +522,7 @@ def main():
     do_sec, do_house, do_bafin = sources["sec"], sources["house"], sources["bafin"]
     do_norway, do_sweden = sources["norway"], sources["sweden"]
     do_senate = sources["senate"]
+    do_crypto, do_onchain = sources["crypto"], sources["onchain"]
 
     # 13D/G and 144 identify the issuer only by CIK, so they need the ticker map;
     # loading it is a single cached request and nothing else depends on it.
@@ -535,6 +565,12 @@ def main():
             new_by_source["SWEDEN"] = _run_source("SWEDEN", run_sweden_pass, conn, args)
         if do_senate:
             new_by_source["SENATE"] = _run_source("SENATE", run_senate_pass, conn, args)
+        if do_crypto:
+            new_by_source["CRYPTO_TREASURY"] = _run_source("CRYPTO_TREASURY", run_crypto_treasury_pass,
+                                                           conn, args)
+            new_by_source["CRYPTO_ETF"] = _run_source("CRYPTO_ETF", run_crypto_etf_pass, conn, args)
+        if do_onchain:
+            new_by_source["CRYPTO_ONCHAIN"] = _run_source("CRYPTO_ONCHAIN", run_onchain_pass, conn, args)
 
         # None means the source failed outright; it's reported separately rather
         # than being counted as "ran and found nothing".

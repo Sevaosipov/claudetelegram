@@ -12,6 +12,9 @@ import requests
 
 import bafin
 import cluster
+import crypto_etf
+import crypto_onchain
+import crypto_treasury
 import db
 import fx
 import house_ptr
@@ -440,3 +443,74 @@ def run_senate_pass(conn, args) -> int:
         seen.add(report_id)
         conn.commit()
     return new_count
+
+
+def run_crypto_treasury_pass(conn, args) -> int:
+    """Company balance-sheet crypto trades stated in 8-K/6-K text (crypto_treasury.py).
+    The trailing --crypto-days of filings are searched every run; a document already
+    read is skipped before it is fetched, so the re-scan costs one search per coin.
+    Every parsed trade is stored -- few enough that there's nothing to filter --
+    and the signal threshold is applied later, in EUR, by cluster/crypto.py."""
+    seen = db.crypto_treasury_seen(conn)
+    today = dt.date.today()
+    start = today - dt.timedelta(days=args.crypto_days)
+    print(f"[CRYPTO] treasury filings {start.isoformat()}..{today.isoformat()}")
+    try:
+        import cik_map
+        cik_lookup = cik_map.CikMap()
+    except Exception as e:
+        print(f"[CRYPTO] no CIK->ticker map ({e}); using EDGAR's first-listed ticker",
+              file=sys.stderr)
+        cik_lookup = None
+    new_count = 0
+    for doc_id, txns in crypto_treasury.scan_new_filings(start, today, seen,
+                                                         cik_lookup=cik_lookup):
+        for t in txns:
+            if db.save_crypto_treasury_txn(conn, t):
+                new_count += 1
+                print(telegram_notify.format_treasury_line(t))
+                _append_csv({
+                    "found_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "source": "Crypto treasury (8-K)",
+                    "date": t.filed_date,
+                    "person": t.company,
+                    "role": "company treasury" + ("" if t.side == "P" else " (sale)"),
+                    "issuer_or_asset": t.coin,
+                    "ticker": t.ticker or "",
+                    "amount": f"{t.units:,.4g} {t.coin}"
+                              + (f" (${t.value_usd:,.0f})" if t.value_usd else ""),
+                    "url": t.source_url,
+                })
+        db.mark_crypto_treasury_seen(conn, doc_id)
+        seen.add(doc_id)
+        conn.commit()
+    return new_count
+
+
+def run_crypto_etf_pass(conn, args) -> int:
+    """Today's issuer-published share count and NAV per covered spot ETF
+    (crypto_etf.py). Returns how many snapshots were new -- zero on a weekend or a
+    second run the same day, which is why the liveness check tolerates streaks."""
+    new_count = 0
+    for snap in crypto_etf.fetch_snapshots():
+        if not db.save_crypto_etf_snapshot(conn, snap):
+            continue
+        new_count += 1
+        history = conn.execute(
+            "SELECT as_of, shares_outstanding, nav_usd FROM crypto_etf_snapshots "
+            "WHERE fund = ? ORDER BY as_of DESC LIMIT 2", (snap.fund,)).fetchall()
+        for prev_as_of, as_of, flow in crypto_etf.flows(history):
+            print(telegram_notify.format_etf_flow_line(snap.fund, snap.coin, prev_as_of, as_of, flow))
+    conn.commit()
+    return new_count
+
+
+def run_onchain_pass(conn, args) -> int:
+    """One balance snapshot per tracked exchange wallet (crypto_onchain.py)."""
+    taken_at = dt.datetime.now().isoformat(timespec="seconds")
+    balances = crypto_onchain.fetch_balances()
+    for b in balances:
+        db.save_crypto_wallet_snapshot(conn, b, taken_at)
+    conn.commit()
+    print(f"[ONCHAIN] {len(balances)} wallet balance(s) snapshotted")
+    return len(balances)
