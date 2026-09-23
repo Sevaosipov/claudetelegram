@@ -102,3 +102,30 @@ def test_tables_and_bars_round_trip(conn):
     assert loaded["up|flat|normal"]["n"] == 60 and built_at
     outlook.save_bars(conn, "AAA", [("2026-01-02", 1.0), ("2026-01-05", 2.0)])
     assert outlook.load_bars(conn, "AAA") == [("2026-01-02", 1.0), ("2026-01-05", 2.0)]
+
+
+def test_walk_forward_folds_boundaries_are_correct():
+    """Test that walk-forward folds start at the table's 5th year and end at year[-1].
+    With years 2010-2021 (12 years), OOS_START_OFFSET_YEARS=4 means first fold year is
+    2014 (years[0]=2010, 2010+4=2014). Folds run through 2020 (years[-1]=2021, but < 2021).
+    Test years are 2014, 2015, 2016, 2017, 2018, 2019, 2020 = 7 years.
+    """
+    obs = _obs("up|flat|normal", 30, lambda i: True, years=range(2010, 2022))
+    rows = outlook.build_table(obs)
+    row = rows["up|flat|normal"]
+    # 7 test years × 30 observations per year = 210 ≥ MIN_OOS (50)
+    assert row["oos_n"] == 7 * 30
+
+
+def test_walk_forward_is_not_wall_clock_dependent():
+    """Test that walk-forward result doesn't depend on today's date.
+    Same observations shifted by +10 years should give identical oos_n."""
+    obs_past = _obs("up|flat|normal", 30, lambda i: True, years=range(2010, 2022))
+    rows_past = outlook.build_table(obs_past)
+
+    obs_future = _obs("up|flat|normal", 30, lambda i: True, years=range(2020, 2032))
+    rows_future = outlook.build_table(obs_future)
+
+    # Both should have the same oos_n (7 years of test data)
+    assert rows_past["up|flat|normal"]["oos_n"] == rows_future["up|flat|normal"]["oos_n"]
+    assert rows_past["up|flat|normal"]["oos_n"] == 7 * 30

@@ -21,7 +21,7 @@ VOL_WINDOW = 21
 HIGH_VOL_QUANTILE = 0.75
 MIN_OOS = 50
 MIN_OWN = 30
-OOS_START_OFFSET_YEARS = 5
+OOS_START_OFFSET_YEARS = 4  # Test fold starts at the table's 5th year: years[0] + 4
 POOLED = "*"
 
 
@@ -94,7 +94,7 @@ def _walk_forward(obs: list[tuple[int, str, bool]]) -> dict:
     if not years:
         return {}
     acc: dict[str, dict] = {}
-    for year in range(years[0] + OOS_START_OFFSET_YEARS, dt.date.today().year):
+    for year in range(years[0] + OOS_START_OFFSET_YEARS, years[-1]):
         train = [(k, u) for y, k, u in obs if y < year]
         test = [(k, u) for y, k, u in obs if y == year]
         if not train or not test:
