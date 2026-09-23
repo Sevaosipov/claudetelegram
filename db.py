@@ -457,6 +457,15 @@ CREATE TABLE IF NOT EXISTS positions (
     close_reason      TEXT,
     close_alerted_at  TEXT
 );
+
+-- The ~250 largest coins by market cap (sources.cached_coins), refreshed daily:
+-- how the resolver recognises "PEPE" as a coin.
+CREATE TABLE IF NOT EXISTS coin_list (
+    symbol   TEXT PRIMARY KEY,
+    coin_id  TEXT,
+    name     TEXT,
+    rank     INTEGER
+);
 """
 
 
