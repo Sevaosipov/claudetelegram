@@ -466,6 +466,29 @@ CREATE TABLE IF NOT EXISTS coin_list (
     name     TEXT,
     rank     INTEGER
 );
+
+-- Daily closes for the outlook universes (outlook.py), keyed by Yahoo symbol.
+CREATE TABLE IF NOT EXISTS price_bars (
+    symbol  TEXT NOT NULL,
+    date    TEXT NOT NULL,
+    close   REAL NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
+
+-- One row per situation per table ("stock" / "crypto"): how often the price was
+-- higher a month later, and the walk-forward check of that number.
+CREATE TABLE IF NOT EXISTS outlook_table (
+    table_name      TEXT NOT NULL,
+    situation       TEXT NOT NULL,
+    n               INTEGER NOT NULL,
+    up              INTEGER NOT NULL,
+    base_rate       REAL,
+    oos_n           INTEGER NOT NULL,
+    oos_brier_s     REAL,
+    oos_brier_base  REAL,
+    built_at        TEXT NOT NULL,
+    PRIMARY KEY (table_name, situation)
+);
 """
 
 
