@@ -171,9 +171,10 @@ P_ILLIQUID = -12.0           # trades less than ILLIQUID_BELOW_EUR of value per 
 ILLIQUID_BELOW_EUR = 250_000
 W_FULL_UNWIND = 20.0         # every buyer in the cluster has now sold, not just some
 # A crypto signal has no company to measure against, so what it scores on is having
-# cleared its finder's size bar at all, plus how far past EUR 1m the move was. At
-# run_daily.sh's --min-score 35 that passes ETF days and exchange flows at their
-# thresholds and treasury buys from roughly EUR 90m.
+# cleared its finder's size bar at all, plus how far past EUR 1m the move was. A
+# manual-run --min-score 35 (the daily digest itself sorts by strategy.py's tiers,
+# not this score) passes ETF days and exchange flows at their thresholds and
+# treasury buys from roughly EUR 90m.
 W_CRYPTO_BASE = 20.0
 W_CRYPTO_SIZE = 8.0          # per decade of EUR moved, from EUR 1m
 CAP_CRYPTO_SIZE = 30.0

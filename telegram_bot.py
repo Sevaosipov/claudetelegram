@@ -21,6 +21,11 @@ exist historically, so there's nothing to check it against yet; see
 db.journal_opinion() / backtest.py's --opinions mode, which starts
 accumulating a real record from whenever a ticker first gets checked.
 
+/bought TICKER [price], /sold TICKER and /positions track what the user
+reports actually buying (positions.py) -- entirely separate from the ticker
+lookup above, and the only place this bot writes state instead of just
+reading and replying. See POSITIONS_USAGE and _handle_positions_command.
+
 Only ever responds to TELEGRAM_CHAT_ID -- the same chat the rest of
 disclosure-bot already alerts into. Any message from a different chat is
 logged and dropped without a reply, so a stranger who finds the bot's

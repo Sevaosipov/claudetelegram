@@ -110,7 +110,10 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=35)
     args = ap.parse_args()
     mem = db.connect(":memory:")
-    src = sqlite3.connect(DB_PATH)
+    # Read-only via URI: a plain sqlite3.connect(DB_PATH) silently creates an empty
+    # database when data/ is missing (a fresh checkout, or the wrong cwd) instead of
+    # raising -- which would replay a real-looking but completely empty history.
+    src = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     src.backup(mem)
     src.close()
     t212 = trading212.availability(mem)

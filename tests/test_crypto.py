@@ -270,8 +270,9 @@ def test_crypto_score_grows_with_size_and_is_capped(conn):
 
 @pytest.mark.parametrize("value_eur,passes", [(66e6, False), (94e6, True), (345e6, True)])
 def test_crypto_scores_against_the_daily_bar(value_eur, passes):
-    """run_daily.sh sends at --min-score 35: a EUR 94m treasury buy (Strive's 1,355
-    BTC) clears it, BitMine's EUR 66m week doesn't, a $400m ETF day does."""
+    """A manual-run --min-score 35 (the daily digest sorts by strategy.py's tiers,
+    not this score): a EUR 94m treasury buy (Strive's 1,355 BTC) clears it,
+    BitMine's EUR 66m week doesn't, a $400m ETF day does."""
     sig = cluster.CryptoSignal("CRYPTO_TREASURY", "treasury", "CRYPTO:BTC", "x", True, None,
                                value_eur, "", "", [], None, ["k"])
     assert (cluster.score_signal(sig) >= 35) is passes

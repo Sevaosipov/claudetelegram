@@ -261,10 +261,10 @@ def _commit_signals(conn, signals) -> None:
     and journal them at the same moment.
 
     Journalling belongs here rather than where signals are computed. A signal that
-    was computed but not sent (Telegram down, --no-telegram, over the item limit
-    before that path also committed) still returns on the next run, so recording it
-    at computation time would enter the same signal into the journal repeatedly and
-    quietly inflate every backtest group. One row per signal actually sent.
+    was computed but not sent (Telegram down, --no-telegram) still returns on the
+    next run, so recording it at computation time would enter the same signal into
+    the journal repeatedly and quietly inflate every backtest group. One row per
+    signal actually sent.
     """
     for s in signals:
         db.journal_signal(conn, _signal_features(s))
