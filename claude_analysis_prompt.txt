@@ -42,7 +42,9 @@ print(research.format_brief(research.build(conn, dict(db.pending_analysis(conn))
           historical frequency, never as a promise or your own forecast.
         - For a coin (`криптовалюта` on the first line) there is no opinion
           score. Include the price/trend lines and the bot's own lines
-          (🪙 🏦 🟢 ⛓) instead.
+          (🪙 🏦 🟢 ⛓) instead. End the coin message's bullets with the
+          `Нужна акция? Напишите …` line from step (a) verbatim, just before
+          the Итоговый вердикт line.
         - Below it, your own qualitative news bullets: 1-3 bullets MAX, only
           the headlines that actually matter -- skip noise entirely, and
           skip this section altogether if nothing in the news is notable.

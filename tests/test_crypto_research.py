@@ -54,6 +54,14 @@ def test_report_texts(conn, offline):
     assert html.startswith("<b>BTC — Bitcoin</b>") and "📈 Прогноз на месяц" in html
 
 
+def test_coin_replies_point_to_the_stock(conn, offline):
+    """A coin can shadow a stock with the same ticker ($BTC is the Grayscale ETF)."""
+    rep = crypto_research.build(conn, BTC)
+    brief = crypto_research.format_brief(rep).splitlines()
+    assert brief[brief.index("---NEWS---") - 1] == "Нужна акция? Напишите $BTC"
+    assert crypto_research.format_condensed(rep).splitlines()[-1] == "Нужна акция? Напишите $BTC"
+
+
 def test_nothing_found_when_no_source_has_a_price(conn, offline, monkeypatch):
     monkeypatch.setattr(crypto_research.sources, "price_history", lambda a, days=800: (None, None))
     rep = crypto_research.build(conn, BTC)

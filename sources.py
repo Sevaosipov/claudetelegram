@@ -255,6 +255,16 @@ def cached_coin_symbols(conn) -> set[str]:
     return {r[0] for r in cached_coins(conn)} | set(crypto.SYMBOLS)
 
 
+def stock_universe_symbols() -> set[str]:
+    """S&P 100 + Nasdaq-100 tickers (universe.py): these win a clash with a coin.
+    An empty set when the list can't be had. Never raises."""
+    try:
+        import universe
+        return set(universe.load()["tickers"])
+    except Exception:  # no list just means no override
+        return set()
+
+
 def coin_name(conn, symbol: str) -> str | None:
     row = conn.execute("SELECT name FROM coin_list WHERE symbol = ?", (symbol.upper(),)).fetchone()
     return row[0] if row and row[0] else None

@@ -15,6 +15,7 @@ import telegram_bot as tb
 def _offline_lookup(monkeypatch):
     import sources
     monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "ETH", "SOL"})
+    monkeypatch.setattr(sources, "stock_universe_symbols", lambda: set())
     monkeypatch.setattr(sources, "current_price", lambda asset: (100.0, "Yahoo"))
 
 
@@ -274,6 +275,16 @@ def test_a_coin_is_queued_as_a_coin(conn, monkeypatch):
     tb._handle_message(conn, "btc")
     tb._handle_message(conn, "$BTC")
     assert [t for _, t in db.pending_analysis(conn)] == ["CRYPTO:BTC", "$BTC"]
+
+
+def test_a_coin_symbol_in_the_stock_universe_is_queued_as_the_stock(conn, monkeypatch):
+    import db
+    import sources
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "DASH"})
+    monkeypatch.setattr(sources, "stock_universe_symbols", lambda: {"DASH"})
+    tb._handle_message(conn, "dash")
+    assert [t for _, t in db.pending_analysis(conn)] == ["$DASH"]
 
 
 def test_an_unknown_stock_is_not_queued(conn, monkeypatch):

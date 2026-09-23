@@ -225,7 +225,8 @@ def _handle_message(conn, text: str) -> None:
     if not text or text.startswith("/"):
         telegram_notify.send_text(HELP_TEXT)
         return
-    asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn))
+    asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn),
+                           stocks=sources.stock_universe_symbols)
     if asset is None:
         telegram_notify.send_text(f"Не похоже на тикер: {telegram_notify._esc(text[:40])}. "
                                   + LOOKUP_HINT)

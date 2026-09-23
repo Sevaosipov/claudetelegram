@@ -509,7 +509,8 @@ def offline_stock(monkeypatch):
     monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: None)
     monkeypatch.setattr(research.marketcap, "facts", lambda conn, t, source=None: {})
     monkeypatch.setattr(research.marketcap, "market_cap_eur", lambda conn, t, source=None: None)
-    monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC"})
+    monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "DASH"})
+    monkeypatch.setattr(sources, "stock_universe_symbols", lambda: set())
     monkeypatch.setattr(sources, "current_price", lambda a: (123.0, "TradingView"))
     monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, None))
     monkeypatch.setattr(sources, "news", lambda a, name=None: (
@@ -525,6 +526,13 @@ def offline_stock(monkeypatch):
 
 def test_build_dispatches_crypto_to_the_crypto_dossier(conn, offline_stock):
     assert research.build(conn, "BTC") == {"kind": "crypto", "ticker": "BTC"}
+
+
+def test_build_resolves_a_stock_universe_clash_to_the_stock(conn, offline_stock, monkeypatch):
+    assert research.build(conn, "DASH")["kind"] == "crypto"
+    monkeypatch.setattr(sources, "stock_universe_symbols", lambda: {"DASH"})
+    rep = research.build(conn, "DASH")
+    assert rep["kind"] == "stock" and rep["ticker"] == "DASH"
 
 
 def test_build_rejects_text_that_is_not_a_ticker(conn, offline_stock):

@@ -6,7 +6,9 @@ Rules, in order:
   2. "$XYZ" -> always a stock ("$BTC" is the Grayscale ETF, not bitcoin);
   3. "CRYPTO:XYZ" or "XYZ-USD" -> a coin;
   4. a symbol with an exchange suffix (EQNR.OL, VOLV-B.ST, SAP.DE) -> that listing;
-  5. a symbol in the coin list -> a coin -- crypto wins a clash, so "SOL" is Solana;
+  5. a symbol in the coin list -> a coin -- crypto wins a clash, so "SOL" is Solana --
+     unless it is also in the stock universe (S&P 100 + Nasdaq-100): "DASH" is
+     DoorDash, and the coin is "DASH-USD";
   6. anything else shaped like a ticker -> a US stock or ETF.
 Only the first word counts ("aapl buy now" is AAPL), as it always has in Telegram.
 """
@@ -58,7 +60,10 @@ def stock_asset(symbol: str) -> Asset:
     return Asset("stock", s, s if exchange else s.replace(".", "-"), None, exchange)
 
 
-def resolve(text: str, coins: set[str] | Callable[[], set[str]] | None = None) -> Asset | None:
+def resolve(text: str, coins: set[str] | Callable[[], set[str]] | None = None,
+            stocks: set[str] | Callable[[], set[str]] | None = None) -> Asset | None:
+    """`coins` / `stocks`: a set or a callable giving one, asked only when needed.
+    coins=None means the built-in coin list; stocks=None means no stock override."""
     words = (text or "").strip().upper().split()
     if not words:
         return None
@@ -79,5 +84,6 @@ def resolve(text: str, coins: set[str] | Callable[[], set[str]] | None = None) -
         return stock_asset(t)
     known = coins() if callable(coins) else (coins if coins is not None else crypto.SYMBOLS)
     if t in known:
-        return crypto_asset(t)
+        large_caps = stocks() if callable(stocks) else stocks
+        return stock_asset(t) if large_caps and t in large_caps else crypto_asset(t)
     return stock_asset(t)

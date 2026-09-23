@@ -308,3 +308,14 @@ def test_stocks_have_no_crypto_feed_fallback(monkeypatch):
     monkeypatch.setattr(sources, "_crypto_feed_news", lambda s, n: [{"title": "t"}])
     assert sources.news(NVDA) == (None, None)
     assert sources.news(ISIN) == (None, None)
+
+
+def test_stock_universe_symbols(monkeypatch):
+    import universe
+    monkeypatch.setattr(universe, "load", lambda: {"tickers": ["DASH", "STX", "BRK.B"]})
+    assert sources.stock_universe_symbols() == {"DASH", "STX", "BRK.B"}
+
+    def down():
+        raise ConnectionError("x")
+    monkeypatch.setattr(universe, "load", down)
+    assert sources.stock_universe_symbols() == set()

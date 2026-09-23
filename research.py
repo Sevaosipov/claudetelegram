@@ -813,7 +813,8 @@ def _analyst_raw(asset):
 def build(conn, text: str) -> dict:
     """Dossier for any stock, ETF, coin or ISIN (see assets.resolve). Raises
     ValueError when `text` isn't shaped like a ticker at all."""
-    asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn))
+    asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn),
+                           stocks=sources.stock_universe_symbols)
     if asset is None:
         raise ValueError(f"not a ticker: {text!r}")
     if asset.kind == "crypto":

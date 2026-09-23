@@ -74,6 +74,11 @@ def _title(rep: dict) -> str:
     return rep["ticker"] + (f" — {rep['name']}" if rep["name"] else "")
 
 
+def _stock_hint(rep: dict) -> str:
+    """A coin can shadow a stock with the same ticker ($BTC is the Grayscale ETF)."""
+    return f"Нужна акция? Напишите ${rep['ticker']}"
+
+
 def _source_notes(rep: dict) -> list[str]:
     # Prices come from the history chain (Yahoo first, when it agrees with an exchange
     # spot); the exchanges-first current-price chain only fills in when that fails.
@@ -142,6 +147,7 @@ def format_brief(rep: dict) -> str:
         L.append(note)
     L += _bot_lines(rep)
     L.append(outlook.format_outlook(rep["outlook"], rep["ticker"]))
+    L.append(_stock_hint(rep))
     L.append("---NEWS---")
     L += [f"{n['published']} [{n['publisher']}] {n['title']}" for n in rep["news"]]
     return "\n".join(L)
@@ -155,4 +161,5 @@ def format_condensed(rep: dict) -> str:
         L.append(f"тренд: цена {_TREND_TEXT[rep['trend']]}")
     L += [telegram_notify._esc(line) for line in _bot_lines(rep)]
     L.append(telegram_notify._esc(outlook.format_outlook(rep["outlook"], rep["ticker"])))
+    L.append(telegram_notify._esc(_stock_hint(rep)))
     return "\n".join(L)

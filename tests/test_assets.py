@@ -71,3 +71,25 @@ def test_default_coins_are_the_builtin_list():
 def test_signal_ticker_matches_the_signal_tables():
     assert assets.resolve("BTC", COINS).signal_ticker == "CRYPTO:BTC"
     assert assets.resolve("NVDA", COINS).signal_ticker == "NVDA"
+
+
+# ---------------------------------------------- a coin must not take a large-cap stock
+def test_a_symbol_in_the_stock_universe_is_the_stock():
+    """DASH is DoorDash, STX Seagate, APP AppLovin -- all in the S&P 100 / Nasdaq-100
+    and all in the top-250 coin list too. The coin needs "DASH-USD"."""
+    assert assets.resolve("DASH", coins={"DASH"}, stocks={"DASH"}).kind == "stock"
+    assert assets.resolve("DASH", coins={"DASH"}, stocks=set()).kind == "crypto"
+    assert assets.resolve("BTC", coins={"BTC"}, stocks={"DASH"}).kind == "crypto"
+    assert assets.resolve("DASH-USD", coins={"DASH"}, stocks={"DASH"}).kind == "crypto"
+
+
+def test_the_stock_universe_is_only_consulted_for_a_coin_symbol():
+    calls = []
+
+    def stocks():
+        calls.append(1)
+        return {"DASH"}
+    for text in ("NVDA", "$BTC", "EQNR.OL", "BTC-USD", "DE0007164600"):
+        assets.resolve(text, coins=COINS, stocks=stocks)
+    assert calls == []
+    assert assets.resolve("SOL", coins=COINS, stocks=stocks).kind == "crypto" and calls == [1]
