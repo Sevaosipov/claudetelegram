@@ -68,16 +68,9 @@ def _unshadow(conn) -> None:
 
 
 def _signals(conn) -> list:
-    return (cluster.find_sec_clusters(conn, ignore_alert_state=True)
-            + cluster.find_house_clusters(conn, ignore_alert_state=True)
-            + cluster.find_bafin_clusters(conn, ignore_alert_state=True)
-            + cluster.find_norway_clusters(conn, ignore_alert_state=True)
-            + cluster.find_sweden_clusters(conn, ignore_alert_state=True)
-            + cluster.find_stake_signals(conn, min_percent=10.0, activist_only=True,
-                                          max_age_days=30, new_positions_only=True,
-                                          ignore_alert_state=True)
-            + cluster.find_treasury_signals(conn, ignore_alert_state=True)
-            + cluster.find_etf_flow_signals(conn, ignore_alert_state=True))
+    """strategy.buy_side_signals -- the same finder list bot.run_cluster_pass and
+    menu._find_signals use -- with on-chain included, like menu's."""
+    return strategy.buy_side_signals(conn, ignore_alert_state=True, onchain=True)
 
 
 def replay(conn, start: dt.date, end: dt.date, t212) -> dict[str, dict]:

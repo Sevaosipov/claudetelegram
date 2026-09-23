@@ -131,11 +131,13 @@ def _which_sources(args) -> dict:
     """Which sources are enabled for this run, honoring the mutually-exclusive
     *_only flags (any one of them switches off all the others) and each source's
     individual --no-* skip flag. Shared by main()'s poll loop and
-    run_cluster_pass() so the two never drift apart."""
+    run_cluster_pass() (via strategy.buy_side_signals) so the two never drift
+    apart."""
     only_set = (args.sec_only or args.house_only or args.bafin_only or args.norway_only
                 or args.sweden_only or args.crypto_only)
+    sec = args.sec_only or not only_set
     return {
-        "sec": args.sec_only or not only_set,
+        "sec": sec,
         "house": args.house_only or not only_set,
         "bafin": (args.bafin_only or not only_set) and not args.no_bafin,
         "norway": (args.norway_only or not only_set) and not args.no_norway,
@@ -148,6 +150,10 @@ def _which_sources(args) -> dict:
         "crypto": (args.crypto_only or not only_set) and not args.no_crypto,
         # Not a disclosure (see crypto_onchain.py), so opt-in like the Senate.
         "onchain": args.onchain and (args.crypto_only or not only_set),
+        # 13D/G stakes ride on the SEC source but have their own form-type gate
+        # (--forms) -- kept here, alongside the source it depends on, rather than
+        # re-derived inside strategy.buy_side_signals.
+        "stakes": sec and bool(_sec_forms(args) & {"13D", "13G"}),
     }
 
 
@@ -162,37 +168,17 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
     """
     sources = _which_sources(args)
 
-    signals = []
-    if sources["sec"]:
-        signals += cluster.find_sec_clusters(conn, min_value=args.min_cluster_value,
-                                              solo_threshold=args.solo_threshold,
-                                              include_derivatives=args.include_derivatives,
-                                              insiders_only=args.insiders_only,
-                                              include_10b5_1=args.include_10b5_1)
-    if sources["house"]:
-        signals += cluster.find_house_clusters(conn, min_value=args.min_cluster_value, solo_threshold=args.solo_threshold)
-    if sources["bafin"]:
-        signals += cluster.find_bafin_clusters(conn, min_value=args.min_cluster_value, solo_threshold=args.solo_threshold)
-    if sources["norway"]:
-        signals += cluster.find_norway_clusters(conn, min_value=args.min_cluster_value, solo_threshold=args.solo_threshold)
-    if sources["senate"]:
-        signals += cluster.find_senate_clusters(conn, min_value=args.min_cluster_value,
-                                                 solo_threshold=args.solo_threshold)
-    if sources["sweden"]:
-        signals += cluster.find_sweden_clusters(conn, min_value=args.min_cluster_value,
-                                                 solo_threshold=args.solo_threshold,
-                                                 include_share_programs=args.include_share_programs,
-                                                 include_derivatives=args.include_derivatives)
-    if sources["sec"] and ("13D" in _sec_forms(args) or "13G" in _sec_forms(args)):
-        signals += cluster.find_stake_signals(conn, min_percent=args.stake_min_percent,
-                                               min_increase_pp=args.stake_min_increase,
-                                               activist_only=args.activist_only,
-                                               new_positions_only=args.new_positions_only)
-    if sources["crypto"]:
-        signals += cluster.find_treasury_signals(conn)
-        signals += cluster.find_etf_flow_signals(conn)
-    if sources["onchain"]:
-        signals += cluster.find_onchain_signals(conn)
+    signals = strategy.buy_side_signals(
+        conn, sources=sources, onchain=sources["onchain"],
+        cluster_kwargs={"min_value": args.min_cluster_value, "solo_threshold": args.solo_threshold},
+        sec_kwargs={"include_derivatives": args.include_derivatives,
+                   "insiders_only": args.insiders_only, "include_10b5_1": args.include_10b5_1},
+        sweden_kwargs={"include_share_programs": args.include_share_programs,
+                      "include_derivatives": args.include_derivatives},
+        stake_kwargs={"min_percent": args.stake_min_percent, "min_increase_pp": args.stake_min_increase,
+                     "activist_only": args.activist_only, "new_positions_only": args.new_positions_only,
+                     "max_age_days": 30},
+    )
     if not args.no_exit_signals:
         if sources["sec"]:
             signals += cluster.find_sec_exit_signals(conn)

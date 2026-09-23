@@ -208,3 +208,88 @@ def test_exit_signals_are_never_listed(conn, sized):
                                   seller_count=2, lines=[], seller_names=["A", "B"])
     sel = strategy.select(conn, [exit_sig], _T212())
     assert not sel.strong and not sel.candidates
+
+
+# --------------------------------------------------------- buy_side_signals
+#
+# The one shared finder list bot.run_cluster_pass, menu._find_signals and
+# calibrate_strategy._signals all call, so they can't drift out of sync again.
+# Wiring is checked by recording which finder each source maps to and what it was
+# called with, rather than seeding real rows for nine different tables.
+
+_FINDER_NAMES = ("find_sec_clusters", "find_house_clusters", "find_senate_clusters",
+                 "find_bafin_clusters", "find_norway_clusters", "find_sweden_clusters",
+                 "find_stake_signals", "find_treasury_signals", "find_etf_flow_signals",
+                 "find_onchain_signals")
+
+
+def _recording_finders(monkeypatch):
+    calls = []
+
+    def make(name):
+        def f(conn, **kw):
+            calls.append((name, kw))
+            return []
+        return f
+    for name in _FINDER_NAMES:
+        monkeypatch.setattr(cluster, name, make(name))
+    return calls
+
+
+def test_buy_side_signals_default_runs_every_source_but_not_onchain(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn)
+    called = {name for name, _ in calls}
+    assert called == set(_FINDER_NAMES) - {"find_onchain_signals"}
+
+
+def test_buy_side_signals_onchain_is_opt_in(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, onchain=True)
+    assert "find_onchain_signals" in {name for name, _ in calls}
+
+
+def test_buy_side_signals_respects_the_sources_dict(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, sources={"sec": True, "house": False, "senate": False,
+                                             "bafin": False, "norway": False, "sweden": False,
+                                             "crypto": False})
+    assert {name for name, _ in calls} == {"find_sec_clusters", "find_stake_signals"}
+
+
+def test_buy_side_signals_stakes_key_gates_independently_of_sec(conn, monkeypatch):
+    """bot's --forms flag can select SEC forms without 13D/13G -- "sec": True must
+    not force stakes on when the sources dict says otherwise."""
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, sources={"sec": True, "stakes": False, "house": False,
+                                             "senate": False, "bafin": False, "norway": False,
+                                             "sweden": False, "crypto": False})
+    assert {name for name, _ in calls} == {"find_sec_clusters"}
+
+
+def test_buy_side_signals_default_stake_tuning_matches_run_daily(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn)
+    [kw] = [kw for name, kw in calls if name == "find_stake_signals"]
+    assert kw["min_percent"] == 10.0 and kw["activist_only"] is True
+    assert kw["new_positions_only"] is True and kw["max_age_days"] == 30
+
+
+def test_buy_side_signals_forwards_cluster_and_source_specific_kwargs(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(
+        conn, cluster_kwargs={"min_value": 1.0, "solo_threshold": 2.0},
+        sec_kwargs={"insiders_only": True}, sweden_kwargs={"include_share_programs": True})
+    by_name = dict(calls)
+    assert by_name["find_sec_clusters"]["min_value"] == 1.0
+    assert by_name["find_sec_clusters"]["insiders_only"] is True
+    assert by_name["find_house_clusters"]["min_value"] == 1.0
+    assert "insiders_only" not in by_name["find_house_clusters"]
+    assert by_name["find_sweden_clusters"]["min_value"] == 1.0
+    assert by_name["find_sweden_clusters"]["include_share_programs"] is True
+
+
+def test_buy_side_signals_forwards_ignore_alert_state_to_every_finder(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, ignore_alert_state=True, onchain=True)
+    assert all(kw["ignore_alert_state"] is True for _, kw in calls)

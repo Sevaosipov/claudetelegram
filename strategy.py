@@ -118,6 +118,77 @@ def _crypto_tier(conn, sig) -> Tiered | None:
     return Tiered(sig, CANDIDATE, met, [f"цена не подтверждает: {desc}"])
 
 
+_BUY_SIDE_SOURCES = ("sec", "house", "senate", "bafin", "norway", "sweden", "crypto")
+
+# run_daily.sh's own tuning: the mandatory-filing 5%/13G default is mostly routine
+# 13G ownership crossings, not news.
+_STAKE_DEFAULTS = {"min_percent": 10.0, "activist_only": True,
+                   "new_positions_only": True, "max_age_days": 30}
+
+
+def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | None = None,
+                      onchain: bool = False, sec_kwargs: dict | None = None,
+                      sweden_kwargs: dict | None = None, stake_kwargs: dict | None = None,
+                      cluster_kwargs: dict | None = None) -> list:
+    """One definition of the buy-side finder list, shared by bot.run_cluster_pass,
+    menu._find_signals and calibrate_strategy._signals -- the three had drifted out
+    of sync with each other (stake max_age_days=30 only in menu/calibration;
+    on-chain always on in menu, opt-in via --onchain-only in bot, never run in
+    calibration; Senate missing from calibration entirely).
+
+    Runs every buy-side finder -- SEC/House/Senate/BaFin/Norway/Sweden clusters,
+    13D/G stakes, crypto treasury purchases and spot-ETF inflows -- plus on-chain
+    flows when `onchain` is set. Exit finders (people who bought together later
+    selling together) are a different concern and stay bot.py's own job.
+
+    `sources` follows bot._which_sources' shape: a dict of source name -> bool,
+    with an optional "stakes" key that gates 13D/G independently of "sec" (bot's
+    --forms flag can select SEC forms without 13D/13G). None (the default) runs
+    every source, Senate included.
+
+    `sec_kwargs` and `sweden_kwargs` layer their finder's own extra knobs
+    (include_derivatives/insiders_only/include_10b5_1 for SEC;
+    include_share_programs/include_derivatives for Sweden) on top of
+    `cluster_kwargs` (min_value, solo_threshold), which every cluster finder
+    shares. `stake_kwargs` defaults to run_daily.sh's tuning -- see
+    _STAKE_DEFAULTS -- rather than find_stake_signals' bare defaults.
+    """
+    on = sources if sources is not None else {k: True for k in _BUY_SIDE_SOURCES}
+    cluster_kwargs = cluster_kwargs or {}
+    sec_kwargs = sec_kwargs or {}
+    sweden_kwargs = sweden_kwargs or {}
+    stake_kwargs = {**_STAKE_DEFAULTS, **(stake_kwargs or {})}
+
+    signals = []
+    if on.get("sec", True):
+        signals += cluster.find_sec_clusters(conn, ignore_alert_state=ignore_alert_state,
+                                              **cluster_kwargs, **sec_kwargs)
+    if on.get("house", True):
+        signals += cluster.find_house_clusters(conn, ignore_alert_state=ignore_alert_state,
+                                                **cluster_kwargs)
+    if on.get("senate", True):
+        signals += cluster.find_senate_clusters(conn, ignore_alert_state=ignore_alert_state,
+                                                 **cluster_kwargs)
+    if on.get("bafin", True):
+        signals += cluster.find_bafin_clusters(conn, ignore_alert_state=ignore_alert_state,
+                                                **cluster_kwargs)
+    if on.get("norway", True):
+        signals += cluster.find_norway_clusters(conn, ignore_alert_state=ignore_alert_state,
+                                                 **cluster_kwargs)
+    if on.get("sweden", True):
+        signals += cluster.find_sweden_clusters(conn, ignore_alert_state=ignore_alert_state,
+                                                 **cluster_kwargs, **sweden_kwargs)
+    if on.get("stakes", on.get("sec", True)):
+        signals += cluster.find_stake_signals(conn, ignore_alert_state=ignore_alert_state,
+                                              **stake_kwargs)
+    if on.get("crypto", True):
+        signals += cluster.find_treasury_signals(conn, ignore_alert_state=ignore_alert_state)
+        signals += cluster.find_etf_flow_signals(conn, ignore_alert_state=ignore_alert_state)
+    if onchain:
+        signals += cluster.find_onchain_signals(conn, ignore_alert_state=ignore_alert_state)
+    return signals
+
+
 def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection:
     """`t212` is a trading212.Availability, or None when the instrument list isn't
     available -- then stocks aren't filtered and Selection.t212_checked says so."""
