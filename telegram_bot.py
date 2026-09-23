@@ -52,6 +52,7 @@ import requests
 
 import backtest
 import db
+import positions
 import research
 import telegram_notify
 
@@ -67,11 +68,17 @@ PERSIST_SECONDS = 30 * 365 * 24 * 3600
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
+POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие)\n"
+                   "/sold TICKER — отметить продажу\n"
+                   "/positions — открытые позиции")
+
 HELP_TEXT = ("Пришлите тикер (например, AAPL) — через ~30-90 сек придёт один "
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
-             "что-то значить на уровне одного тикера).")
+             "что-то значить на уровне одного тикера).\n"
+             + POSITIONS_USAGE)
 
 
 def _get_updates(token: str, offset: int | None, session: requests.Session) -> list:
@@ -100,6 +107,56 @@ def _extract_ticker(text: str) -> str | None:
     return candidate if _TICKER_RE.match(candidate) else None
 
 
+def _position_ticker(arg: str) -> str | None:
+    t = arg.strip().lstrip("$").upper()
+    return t if (_TICKER_RE.match(t) or _ISIN_RE.match(t)) else None
+
+
+def _handle_positions_command(conn, text: str) -> bool:
+    """/bought, /sold, /positions -- the positions positions.py tracks for close
+    alerts. Returns False for anything else."""
+    parts = text.split()
+    cmd = parts[0].lower().split("@")[0] if parts else ""
+    if cmd == "/positions":
+        telegram_notify.send_text(telegram_notify.format_positions(
+            positions.open_positions(conn), positions.last_close))
+        return True
+    if cmd not in ("/bought", "/sold"):
+        return False
+    ticker = _position_ticker(parts[1]) if len(parts) > 1 else None
+    if not ticker:
+        telegram_notify.send_text(POSITIONS_USAGE)
+        return True
+    if cmd == "/sold":
+        pos = positions.close_position(conn, ticker)
+        telegram_notify.send_text(f"Позиция {ticker} закрыта." if pos
+                                  else f"По {ticker} нет открытой позиции.")
+        return True
+    price = None
+    if len(parts) > 2:
+        try:
+            price = float(parts[2].replace(",", "."))
+        except ValueError:
+            telegram_notify.send_text(POSITIONS_USAGE)
+            return True
+        if price <= 0:
+            telegram_notify.send_text(POSITIONS_USAGE)
+            return True
+    price = price or positions.last_close(ticker)
+    if not price:
+        telegram_notify.send_text(f"Не нашёл цену {ticker} — укажите её: /bought {ticker} 12.34")
+        return True
+    try:
+        pos = positions.open_position(conn, ticker, price)
+    except ValueError:
+        telegram_notify.send_text(f"Позиция {ticker} уже открыта. /sold {ticker}, чтобы закрыть.")
+        return True
+    who = (f"слежу за продажами: {', '.join(pos.insiders)}" if pos.insiders
+           else "сильного сигнала по нему не было — слежу только за сроком и стоп-лоссом")
+    telegram_notify.send_text(f"Записал {ticker} по {price:,.2f}; {who}.")
+    return True
+
+
 def _handle_backtest(conn, text: str) -> None:
     arg = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
     ticker = _extract_ticker(arg)
@@ -119,6 +176,8 @@ def _handle_backtest(conn, text: str) -> None:
 
 def _handle_message(conn, text: str) -> None:
     text = (text or "").strip()
+    if _handle_positions_command(conn, text):
+        return
     if text.lower().startswith("/backtest"):
         _handle_backtest(conn, text)
         return

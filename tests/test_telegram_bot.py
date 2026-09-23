@@ -107,3 +107,52 @@ def test_get_updates_still_raises_on_connection_errors():
             raise requests.ConnectionError("no route")
     with pytest.raises(requests.ConnectionError):
         tb._get_updates("tok", None, Session())
+
+
+# ------------------------------------------------------- position commands
+@pytest.fixture
+def replies(monkeypatch):
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    monkeypatch.setattr("positions.last_close", lambda ticker: 50.0)
+    return sent
+
+
+def test_bought_with_price_opens_a_position(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought grab 18.40")
+    [pos] = positions.open_positions(conn)
+    assert (pos.ticker, pos.entry_price) == ("GRAB", 18.40) and "GRAB" in replies[-1]
+
+
+def test_bought_without_price_uses_the_last_close(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought GRAB")
+    assert positions.open_positions(conn)[0].entry_price == 50.0
+
+
+def test_bought_with_a_bad_price_stores_nothing(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought GRAB abc")
+    assert positions.open_positions(conn) == [] and "/bought" in replies[-1]
+
+
+def test_bought_twice_is_refused(conn, replies):
+    tb._handle_message(conn, "/bought GRAB 18")
+    tb._handle_message(conn, "/bought GRAB 19")
+    assert "уже" in replies[-1]
+
+
+def test_sold_closes_and_unknown_sold_says_so(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought GRAB 18")
+    tb._handle_message(conn, "/sold GRAB")
+    assert positions.open_positions(conn) == []
+    tb._handle_message(conn, "/sold GRAB")
+    assert "нет открытой" in replies[-1]
+
+
+def test_positions_lists_open_positions(conn, replies):
+    tb._handle_message(conn, "/bought GRAB 40")
+    tb._handle_message(conn, "/positions")
+    assert "GRAB" in replies[-1] and "+25.0%" in replies[-1]
