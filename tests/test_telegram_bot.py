@@ -212,3 +212,49 @@ def test_bought_with_no_quote_stores_the_price_and_notes_it(conn, replies):
     tb._handle_message(conn, "/bought ORK 12.5")
     assert positions.open_positions(conn)[0].entry_price == 12.5
     assert "стоп-лосс" in replies[-1] and "не отслеживается" in replies[-1]
+
+
+# ------------------------------------------------------- Oslo pricing (EQNR bug)
+#
+# EQNR is both Equinor's real Oslo listing and an unrelated US OTC pink-sheet
+# ticker. telegram_bot used to price /bought against source=None (bare US
+# ticker) even when the position would end up stored with source=NORWAY (read
+# from signal_journal by positions.open_position) -- so a correct NOK price got
+# refused as "too far from the market", or a price-less /bought stored the
+# wrong (US) close. positions.position_source() is the one place this is now
+# resolved, and telegram_bot must use it BEFORE pricing, not just at storage
+# time.
+
+def _norway_journal(conn, ticker):
+    import db
+    db.journal_signal(conn, {"source": "NORWAY", "kind": "cluster", "ticker": ticker,
+                             "tier": "strong", "members": "[]"})
+
+
+def test_bought_oslo_ticker_with_a_correct_price_is_accepted(conn, monkeypatch):
+    """Without the fix, last_close("EQNR", None) prices the bare US ticker (25.0)
+    via _yahoo_close, so the genuine Oslo price 270 looks "too far from the
+    market" and gets refused. Deliberately does NOT use the `replies` fixture,
+    which stubs positions.last_close itself -- this test needs the real
+    last_close -> yahoo_symbol -> _yahoo_close path to exercise the bug."""
+    import positions
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: True)
+    _norway_journal(conn, "EQNR")
+    prices = {"EQNR": 25.0, "EQNR.OL": 270.0}
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: prices.get(symbol))
+    tb._handle_message(conn, "/bought EQNR 270")
+    [pos] = positions.open_positions(conn)
+    assert pos.ticker == "EQNR" and pos.entry_price == 270.0 and pos.source == "NORWAY"
+
+
+def test_bought_oslo_ticker_without_a_price_uses_its_own_close(conn, monkeypatch):
+    """Without the fix, the stored entry price is last_close("EQNR", None) == 25.0
+    -- the wrong, unrelated US quote -- instead of the real Oslo close."""
+    import positions
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: True)
+    _norway_journal(conn, "EQNR")
+    prices = {"EQNR": 25.0, "EQNR.OL": 270.0}
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: prices.get(symbol))
+    tb._handle_message(conn, "/bought EQNR")
+    [pos] = positions.open_positions(conn)
+    assert pos.entry_price == 270.0 and pos.source == "NORWAY"

@@ -118,6 +118,26 @@ def test_open_position_explicit_source_overrides_signal_journal(conn):
     assert pos.source == "CRYPTO"
 
 
+# --------------------------------------------------------------- position_source
+def test_position_source_is_crypto_for_a_crypto_ticker(conn):
+    assert positions.position_source(conn, "CRYPTO:BTC") == "CRYPTO"
+
+
+def test_position_source_reads_the_latest_strong_journal_row(conn):
+    _strong_journal(conn, "EQNR", ["Boss Person"], source="NORWAY")
+    assert positions.position_source(conn, "EQNR") == "NORWAY"
+
+
+def test_position_source_is_none_with_no_signal_and_not_crypto(conn):
+    assert positions.position_source(conn, "ZZZZ") is None
+
+
+def test_open_position_derives_source_from_position_source_when_not_given(conn):
+    _strong_journal(conn, "EQNR", ["Boss Person"], source="NORWAY")
+    pos = positions.open_position(conn, "EQNR", 270.0)
+    assert pos.source == "NORWAY"
+
+
 # ------------------------------------------------------- pricing by listing
 def test_last_close_uses_the_crypto_symbol(conn, monkeypatch):
     """positions.last_close must never price a crypto position through the bare

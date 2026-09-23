@@ -160,7 +160,7 @@ def _handle_positions_command(conn, text: str) -> bool:
             telegram_notify.send_text(POSITIONS_USAGE)
             return True
 
-    source = "CRYPTO" if crypto.is_crypto(ticker) else None
+    source = positions.position_source(conn, ticker)
     market_price = positions.last_close(ticker, source)
     note = ""
     if user_price is not None:

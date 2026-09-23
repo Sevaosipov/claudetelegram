@@ -76,24 +76,42 @@ def open_positions(conn) -> list[Position]:
         f"SELECT {_COLS} FROM positions WHERE closed_at IS NULL ORDER BY opened_at")]
 
 
+def position_source(conn, ticker: str) -> str | None:
+    """The source to price `ticker` against: "CRYPTO" for a crypto ticker,
+    otherwise the source of the latest strong signal_journal row for it,
+    otherwise None.
+
+    The one definition of this lookup -- open_position uses it to decide what to
+    store, and telegram_bot's /bought needs the identical answer BEFORE storing,
+    to price the ticker against the same listing open_position will save it
+    under. Without that, an Oslo-only ticker sharing its letters with a US one
+    (EQNR/DNB/FRO/NRC) prices as the wrong, unrelated US quote."""
+    ticker = ticker.strip().upper()
+    if crypto.is_crypto(ticker):
+        return "CRYPTO"
+    row = conn.execute(
+        "SELECT source FROM signal_journal WHERE ticker = ? AND tier = 'strong' "
+        "ORDER BY emitted_at DESC, id DESC LIMIT 1", (ticker,)).fetchone()
+    return row[0] if row else None
+
+
 def open_position(conn, ticker: str, entry_price: float, today: dt.date | None = None,
                   source: str | None = None) -> Position:
-    """`source` overrides whatever signal_journal would otherwise supply -- callers
-    that know it (telegram_bot passes "CRYPTO" for a crypto ticker) can set it even
-    when there was no strong signal to read it off of, which last_close() then needs
-    to price the right listing."""
+    """`source` overrides what position_source() would otherwise resolve --
+    telegram_bot passes it explicitly, having already resolved it itself to
+    price against the same listing before storing."""
     ticker = ticker.strip().upper()
     if any(p.ticker == ticker for p in open_positions(conn)):
         raise ValueError(f"position in {ticker} is already open")
     sig = conn.execute(
-        "SELECT id, source, members FROM signal_journal WHERE ticker = ? AND tier = 'strong' "
+        "SELECT id, members FROM signal_journal WHERE ticker = ? AND tier = 'strong' "
         "ORDER BY emitted_at DESC, id DESC LIMIT 1", (ticker,)).fetchone()
-    signal_id, sig_source, members = sig if sig else (None, None, "[]")
+    signal_id, members = sig if sig else (None, "[]")
     conn.execute(
         "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, signal_id) "
         "VALUES (?,?,?,?,?,?)",
-        (ticker, source or sig_source, (today or dt.date.today()).isoformat(), float(entry_price),
-         members or "[]", signal_id))
+        (ticker, source or position_source(conn, ticker), (today or dt.date.today()).isoformat(),
+         float(entry_price), members or "[]", signal_id))
     conn.commit()
     return next(p for p in open_positions(conn) if p.ticker == ticker)
 
