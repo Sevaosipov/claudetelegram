@@ -53,8 +53,10 @@ def show_research(conn) -> None:
     print("Собираю: база бота, цены, отчётность SEC, новости — может занять минуту...")
     try:
         print(research.format_report(research.build(conn, key)))
-    except ValueError:
+    except research.NotATicker:
         print("Не похоже на тикер. Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета).")
+    except Exception as e:  # any other failure: say so, and keep the menu running
+        print(f"Ошибка: {type(e).__name__}: {e}")
 
 
 def main() -> None:

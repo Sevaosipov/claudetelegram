@@ -7,6 +7,7 @@ import pytest
 
 import assets
 import crypto_research
+import outlook
 import crypto_treasury as ct
 import db
 from conftest import add_house_txn
@@ -19,14 +20,16 @@ TODAY = dt.date.today()
 def offline(monkeypatch):
     closes = [50_000.0 * (1.001 ** i) for i in range(400)]
     bars = [((TODAY - dt.timedelta(days=399 - i)).isoformat(), c) for i, c in enumerate(closes)]
-    monkeypatch.setattr(crypto_research.sources, "price_history", lambda a, days=800: (bars, "Binance"))
+    monkeypatch.setattr(crypto_research.sources, "price_history",
+                        lambda a, days=800: (bars, "Binance") if days == outlook.LOOKUP_DAYS else (None, None))
     monkeypatch.setattr(crypto_research.sources, "current_price", lambda a: (None, None))
     monkeypatch.setattr(crypto_research.sources, "indicators", lambda a, closes=None: (None, None))
     monkeypatch.setattr(crypto_research.sources, "news", lambda a, name=None: (
         [{"title": "Bitcoin climbs", "publisher": "CoinDesk", "published": "2026-09-22", "url": "u"}],
         "CoinDesk/Cointelegraph"))
     monkeypatch.setattr(crypto_research.sources, "coin_name", lambda conn, s: "Bitcoin")
-    monkeypatch.setattr(crypto_research.outlook, "lookup", lambda conn, a: {"status": "no_table"})
+    monkeypatch.setattr(crypto_research.outlook, "lookup",
+                        lambda conn, a, bars=None, source=None: {"status": "no_table"})
     return closes
 
 
@@ -41,6 +44,14 @@ def test_build_collects_price_trend_and_the_bots_own_data(conn, offline):
     assert rep["changes"]["30 дней"] == pytest.approx((1.001 ** 30 - 1) * 100)
     assert rep["trend"] == "up" and rep["sources"]["prices"] == "Binance"
     assert rep["treasury"][0][1] == "Strategy Inc" and rep["political"]
+
+
+def test_the_outlook_reuses_the_dossiers_bars(conn, offline, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(crypto_research.outlook, "lookup", lambda conn, a, bars=None, source=None:
+                        seen.update(bars=bars, source=source) or {"status": "no_table"})
+    crypto_research.build(conn, BTC)
+    assert [c for _d, c in seen["bars"]] == offline and seen["source"] == "Binance"
 
 
 def test_report_texts(conn, offline):

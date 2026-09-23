@@ -14,6 +14,7 @@ import datetime as dt
 import email.utils
 import html
 import re
+import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 
@@ -46,7 +47,8 @@ def first_available(attempts: list[tuple[str, Callable]]):
         try:
             data = fetch()
         except Exception as e:  # any failure of one source just means: try the next
-            print(f"[sources] {name} недоступен: {type(e).__name__}: {str(e)[:120]}")
+            print(f"[sources] {name} недоступен: {type(e).__name__}: {str(e)[:120]}",
+                  file=sys.stderr)   # stderr: stdout is research.py's report / Claude's brief
             continue
         if data:
             return data, name
@@ -326,14 +328,23 @@ def indicators(asset, closes: list[float] | None = None):
 
 
 # ------------------------------------------------------------- analyst targets
+def _price_or_none(value) -> float | None:
+    """Nasdaq's numbers arrive as numbers or as text ("$1,334.90", "N/A")."""
+    try:
+        return float(str(value).replace("$", "").replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def nasdaq_analyst(symbol: str) -> dict | None:
     data = _get(f"https://api.nasdaq.com/api/analyst/{symbol}/targetprice").json()
     ov = (((data or {}).get("data") or {}).get("consensusOverview")) or {}
-    if not ov.get("priceTarget"):
+    mean = _price_or_none(ov.get("priceTarget"))
+    if not mean:
         return None
     return {
-        "price_targets": {"mean": float(ov["priceTarget"]), "low": ov.get("lowPriceTarget"),
-                          "high": ov.get("highPriceTarget")},
+        "price_targets": {"mean": mean, "low": _price_or_none(ov.get("lowPriceTarget")),
+                          "high": _price_or_none(ov.get("highPriceTarget"))},
         "recommendations": [{"strongBuy": 0, "buy": int(ov.get("buy") or 0),
                              "hold": int(ov.get("hold") or 0), "sell": int(ov.get("sell") or 0),
                              "strongSell": 0}],
@@ -396,7 +407,7 @@ def _crypto_feed_news(symbol: str, name: str | None) -> list[dict]:
         try:
             items = _rss_items(url)
         except (requests.RequestException, ET.ParseError) as e:
-            print(f"[sources] {publisher} недоступен: {type(e).__name__}")
+            print(f"[sources] {publisher} недоступен: {type(e).__name__}", file=sys.stderr)
             continue
         for it in items:
             title = it["title"].lower()

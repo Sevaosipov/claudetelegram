@@ -347,6 +347,44 @@ def test_lookup_reports_the_tables_asset_count(conn, market):
     assert outlook.lookup(conn, assets.stock_asset("AAA"))["assets"] == 2
 
 
+def test_one_kinds_universe_failing_does_not_stop_the_other(conn, market, monkeypatch, capsys):
+    def universe(conn, kind):
+        if kind == "stock":
+            raise ConnectionError("wikipedia down")
+        return ["AAA-USD"]
+    crypto_bars = _bars(_path(1500, wiggle=0.02))
+    monkeypatch.setattr(outlook, "_universe", universe)
+    monkeypatch.setattr(outlook.sources, "price_history", lambda asset, days=800: (crypto_bars, "Yahoo"))
+    outlook.refresh(conn, ["stock", "crypto"])
+    assert outlook.load_table(conn, "stock") == ({}, None)
+    assert outlook.load_table(conn, "crypto")[0]
+    assert "wikipedia down" in capsys.readouterr().err
+
+
+def test_todays_open_bar_is_not_stored(conn, monkeypatch):
+    """Today's bar is still moving; stored, it would differ from the final close and
+    trip the rescale check at the next top-up."""
+    today = dt.datetime.now(dt.timezone.utc).date()
+    bars = [((today - dt.timedelta(days=i)).isoformat(), 100.0 + i) for i in range(3, -2, -1)]
+    monkeypatch.setattr(outlook.sources, "price_history", lambda asset, days=800: (bars, "Yahoo"))
+    outlook._top_up(conn, assets.stock_asset("AAA"))
+    stored = outlook.load_bars(conn, "AAA")
+    assert [d for d, _c in stored] == [d for d, _c in bars if d < today.isoformat()]
+    outlook._top_up(conn, assets.stock_asset("AAA"))          # the top-up path, too
+    assert outlook.load_bars(conn, "AAA") == stored
+
+
+def test_lookup_reuses_the_dossiers_bars(conn, market, monkeypatch):
+    outlook.refresh(conn, ["stock"])
+    fetched = []
+    monkeypatch.setattr(outlook.sources, "price_history",
+                        lambda asset, days=800: fetched.append(days) or (None, None))
+    res = outlook.lookup(conn, assets.stock_asset("AAA"), bars=_bars(_path(400)), source="Nasdaq")
+    assert fetched == [] and res["status"] == "ok" and res["source"] == "Nasdaq"
+    outlook.lookup(conn, assets.stock_asset("AAA"), bars=_bars(_path(100)), source="Nasdaq")
+    assert fetched == [outlook.LOOKUP_DAYS]                    # too short: fetched after all
+
+
 def test_lookup_without_a_table(conn, market):
     assert outlook.lookup(conn, assets.stock_asset("AAA"))["status"] == "no_table"
 

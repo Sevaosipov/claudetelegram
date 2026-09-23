@@ -38,7 +38,7 @@ def _treasury(conn, symbol: str) -> list:
 def build(conn, asset) -> dict:
     import research
     name = sources.coin_name(conn, asset.symbol)
-    bars, price_src = sources.price_history(asset, 400)
+    bars, price_src = sources.price_history(asset, outlook.LOOKUP_DAYS)   # the outlook reuses them
     closes = [c for _d, c in bars or []]
     current = closes[-1] if closes else None
     if current is None:
@@ -66,7 +66,7 @@ def build(conn, asset) -> dict:
         "political": research.political_trades(conn, ticker),
         "onchain": [s for s in cluster.find_onchain_signals(conn, ignore_alert_state=True)
                     if s.ticker == ticker],
-        "outlook": outlook.lookup(conn, asset),
+        "outlook": outlook.lookup(conn, asset, bars=bars, source=price_src),
     }
 
 

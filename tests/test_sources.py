@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
+import requests
 
 import assets
 import sources
@@ -46,7 +47,8 @@ def test_first_available_takes_the_first_source_that_answers(capsys):
     result = sources.first_available([("A", boom), ("B", lambda: None), ("C", lambda: [1]),
                                       ("D", lambda: [2])])
     assert result == ([1], "C")
-    assert "A недоступен" in capsys.readouterr().out
+    out, err = capsys.readouterr()
+    assert "A недоступен" in err and out == ""      # kept out of research.py's output
 
 
 def test_first_available_when_everything_fails():
@@ -272,6 +274,14 @@ def test_nasdaq_analyst_converts_to_the_yahoo_shape(monkeypatch):
                                          "strongSell": 0}
 
 
+def test_nasdaq_analyst_casts_every_target_to_a_float(monkeypatch):
+    monkeypatch.setattr(sources, "_get", lambda url, **p: _Resp({"data": {"consensusOverview": {
+        "lowPriceTarget": "245.00", "highPriceTarget": "N/A", "priceTarget": "$1,334.90",
+        "buy": 15, "sell": 4, "hold": 9}}}))
+    assert sources.nasdaq_analyst("AAPL")["price_targets"] == {"mean": 1334.9, "low": 245.0,
+                                                              "high": None}
+
+
 def test_nasdaq_analyst_without_coverage_is_none(monkeypatch):
     monkeypatch.setattr(sources, "_get", lambda url, **p: _Resp(
         {"data": {"consensusOverview": {"priceTarget": None}}}))
@@ -284,6 +294,17 @@ def test_google_news_parses_rss(monkeypatch):
     assert items[0] == {"title": "Bitcoin climbs as ETF inflows return", "publisher": "Wire A",
                         "published": "2026-09-22", "url": "https://example.test/a"}
     assert items[1]["publisher"] == "Google News"
+
+
+def test_a_failing_crypto_feed_is_logged_to_stderr(monkeypatch, capsys):
+    def fake(url, **p):
+        if "coindesk" in url:
+            raise requests.ConnectionError("x")
+        return _Resp(content=RSS)
+    monkeypatch.setattr(sources, "_get", fake)
+    assert sources._crypto_feed_news("BTC", "Bitcoin")[0]["publisher"] == "Cointelegraph"
+    out, err = capsys.readouterr()
+    assert "CoinDesk недоступен" in err and out == ""
 
 
 def test_crypto_feeds_keep_only_matching_headlines_once(monkeypatch):

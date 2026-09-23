@@ -252,24 +252,32 @@ def _asset_for(kind: str, yahoo_symbol: str):
             else assets.crypto_asset(yahoo_symbol[:-len("-USD")]))
 
 
+def _closed_bars(asset, days: int) -> list[tuple[str, float]]:
+    """Daily closes without today's (UTC) bar: it is still moving, and stored it would
+    differ from the final close and trip the rescale check at the next top-up."""
+    bars, _src = sources.price_history(asset, days)
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    return [(d, c) for d, c in bars or [] if d < today]
+
+
 def _top_up(conn, asset) -> None:
     """Fetch only the new days -- or everything again when the overlap shows the
     history was rescaled (a split or dividend adjustment)."""
     stored = load_bars(conn, asset.yahoo)
     if not stored:
-        bars, _src = sources.price_history(asset, FULL_HISTORY_DAYS)
+        bars = _closed_bars(asset, FULL_HISTORY_DAYS)
         if bars:
             save_bars(conn, asset.yahoo, bars)
         return
     last = dt.date.fromisoformat(stored[-1][0])
     days = (dt.date.today() - last).days + TOP_UP_OVERLAP_DAYS
-    bars, _src = sources.price_history(asset, days)
+    bars = _closed_bars(asset, days)
     if not bars:
         return
     old = dict(stored)
     rescaled = any(d in old and abs(c / old[d] - 1) > SPLIT_TOLERANCE for d, c in bars)
     if rescaled:
-        bars, _src = sources.price_history(asset, FULL_HISTORY_DAYS)
+        bars = _closed_bars(asset, FULL_HISTORY_DAYS)
         if not bars:
             return
         # The delete and the reinsert must land together: if the write after the
@@ -288,8 +296,13 @@ def _top_up(conn, asset) -> None:
 
 def refresh(conn, kinds=("stock", "crypto")) -> None:
     for kind in kinds:
+        try:
+            symbols = _universe(conn, kind)
+        except Exception as e:  # e.g. universe.load() failing must not stop the other kind
+            print(f"[outlook] {kind} universe: {type(e).__name__}: {e}", file=sys.stderr)
+            continue
         obs, n_assets = [], 0
-        for symbol in _universe(conn, kind):
+        for symbol in symbols:
             asset = _asset_for(kind, symbol)
             try:
                 _top_up(conn, asset)
@@ -318,14 +331,17 @@ def refresh_if_stale(conn) -> None:
 
 
 # ------------------------------------------------------------------------- lookup
-def lookup(conn, asset) -> dict:
+def lookup(conn, asset, bars=None, source=None) -> dict:
+    """`bars` / `source`: the caller's own daily closes for the asset, reused when
+    they are long enough to place it (MIN_HISTORY) instead of fetching them again."""
     if asset.is_isin:
         return {"status": "no_prices"}
     kind, h = asset.kind, HORIZON[asset.kind]
     table, _built_at = load_table(conn, kind)
     if not table:
         return {"status": "no_table"}
-    bars, source = sources.price_history(asset, LOOKUP_DAYS)
+    if not bars or len(bars) < MIN_HISTORY:
+        bars, source = sources.price_history(asset, LOOKUP_DAYS)
     key = None
     if bars and len(bars) >= MIN_HISTORY:
         key = situation([c for _d, c in bars], h)

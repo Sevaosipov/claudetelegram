@@ -812,13 +812,18 @@ def _analyst_raw(asset):
     return sources.first_available(attempts)
 
 
+class NotATicker(ValueError):
+    """What the user typed isn't shaped like a ticker at all -- the one error the
+    terminal entry points answer with the lookup hint."""
+
+
 def build(conn, text: str) -> dict:
     """Dossier for any stock, ETF, coin or ISIN (see assets.resolve). Raises
-    ValueError when `text` isn't shaped like a ticker at all."""
+    NotATicker when `text` isn't shaped like a ticker at all."""
     asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn),
                            stocks=sources.stock_universe_symbols)
     if asset is None:
-        raise ValueError(f"not a ticker: {text!r}")
+        raise NotATicker(f"not a ticker: {text!r}")
     if asset.kind == "crypto":
         import crypto_research
         return crypto_research.build(conn, asset)
@@ -1024,7 +1029,7 @@ def main() -> None:
     conn = db.connect(DB_PATH)
     try:
         print(format_report(build(conn, args.ticker)))
-    except ValueError:
+    except NotATicker:
         print("Не похоже на тикер. Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета).")
         raise SystemExit(2)
 
