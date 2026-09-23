@@ -276,6 +276,25 @@ def test_refresh_if_stale_does_nothing_when_fresh(conn, market):
     assert len(market) == before
 
 
+def test_refresh_if_stale_rebuilds_only_an_old_table(conn, market, monkeypatch):
+    rows = outlook.build_table(_obs("up|flat|normal", 5, lambda i: True))
+    outlook.save_table(conn, "stock", rows, 2)
+    outlook.save_table(conn, "crypto", rows, 3)
+    old = (dt.datetime.now() - dt.timedelta(days=outlook.TABLE_MAX_AGE_DAYS + 1)).isoformat()
+    conn.execute("UPDATE outlook_table SET built_at = ? WHERE table_name = 'stock'", (old,))
+    conn.commit()
+    _crypto_rows, crypto_built = outlook.load_table(conn, "crypto")
+    rebuilt = []
+    real_refresh = outlook.refresh
+    monkeypatch.setattr(outlook, "refresh", lambda conn, kinds: rebuilt.append(list(kinds))
+                        or real_refresh(conn, kinds))
+    outlook.refresh_if_stale(conn)
+    assert rebuilt == [["stock"]]
+    stock, stock_built = outlook.load_table(conn, "stock")
+    assert stock_built > old and next(iter(stock.values()))["assets"] == 2   # the market's AAA, BBB
+    assert outlook.load_table(conn, "crypto")[1] == crypto_built
+
+
 def test_a_split_triggers_a_full_refetch(conn, market, monkeypatch):
     outlook.save_bars(conn, "AAA", [(d, c * 2) for d, c in _bars(_path(4000))])   # stale scale
     outlook.refresh(conn, ["stock"])

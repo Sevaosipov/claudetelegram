@@ -8,6 +8,7 @@ it stays fast and can't fail because a source is down.
 from __future__ import annotations
 
 import pathlib
+import socket
 import sys
 
 import pytest
@@ -26,6 +27,22 @@ def fixture_bytes(name: str) -> bytes:
 
 def fixture_text(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch):
+    """Holds the suite to the promise above: any connection attempt fails as if the
+    machine were offline, so a test that only passes while some site is up fails here
+    instead. yfinance talks through curl_cffi (libcurl), which never touches Python's
+    socket module, so its session is refused too."""
+    def refuse(*args, **kwargs):
+        raise ConnectionRefusedError("the test suite runs offline")
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    try:
+        import curl_cffi.requests
+    except ImportError:
+        return
+    monkeypatch.setattr(curl_cffi.requests.Session, "request", refuse)
 
 
 @pytest.fixture

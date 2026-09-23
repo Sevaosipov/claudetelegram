@@ -12,8 +12,15 @@ import pytest
 import db
 import opinion
 import research
+import tradingview
 from conftest import (add_bafin_txn, add_sec_purchase, add_sec_sale, add_stake,
                       add_sweden_txn)
+
+
+@pytest.fixture(autouse=True)
+def _no_tradingview(monkeypatch):
+    """TradingView resolves ISINs, so even the ISIN builds below would ask its scanner."""
+    monkeypatch.setattr(tradingview, "fetch_snapshot", lambda query, session=None: None)
 
 
 def test_insider_activity_returns_buys_and_sells(conn):
@@ -346,7 +353,7 @@ def test_new_sections_absent_from_isin_report(conn):
     assert "tradingview" in rep
 
 
-def test_build_includes_annual_report_for_a_us_ticker(conn, monkeypatch):
+def test_build_includes_annual_report_for_a_us_ticker(conn, offline_stock, monkeypatch):
     monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: {"marker": True})
     rep = research.build(conn, "AAPL")
     assert rep["annual_report"] == {"marker": True}
@@ -360,7 +367,7 @@ def test_build_skips_annual_report_for_an_isin(conn, monkeypatch):
     assert rep["annual_report"] is None
 
 
-def test_format_report_includes_the_annual_report_section_when_present(conn, monkeypatch):
+def test_format_report_includes_the_annual_report_section_when_present(conn, offline_stock, monkeypatch):
     monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: {"marker": True})
     monkeypatch.setattr(research.annual_report, "format_report",
                         lambda rep: "ANNUAL-REPORT-MARKER-TEXT" if rep else "")
@@ -368,7 +375,7 @@ def test_format_report_includes_the_annual_report_section_when_present(conn, mon
     assert "ANNUAL-REPORT-MARKER-TEXT" in text
 
 
-def test_format_report_omits_the_annual_report_section_when_absent(conn, monkeypatch):
+def test_format_report_omits_the_annual_report_section_when_absent(conn, offline_stock, monkeypatch):
     monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: None)
     text = research.format_report(research.build(conn, "AAPL"))
     assert "ANNUAL-REPORT-MARKER-TEXT" not in text
@@ -399,7 +406,7 @@ def test_corroboration_summary_excludes_aged_out_sources_from_recent(conn):
     assert summary["recent_sources"] == ["SEC"]
 
 
-def test_format_report_shows_the_corroboration_summary_when_present(conn, monkeypatch):
+def test_format_report_shows_the_corroboration_summary_when_present(conn, offline_stock, monkeypatch):
     db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
     monkeypatch.setattr(research, "corroboration_summary",
                         lambda conn, ticker: {"all_sources": ["SEC", "SENATE"],
@@ -410,7 +417,7 @@ def test_format_report_shows_the_corroboration_summary_when_present(conn, monkey
     assert "за последние" not in text
 
 
-def test_format_report_omits_the_corroboration_summary_when_absent(conn, monkeypatch):
+def test_format_report_omits_the_corroboration_summary_when_absent(conn, offline_stock, monkeypatch):
     db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
     monkeypatch.setattr(research, "corroboration_summary", lambda conn, ticker: None)
     text = research.format_report(research.build(conn, "AAPL"))
@@ -418,7 +425,7 @@ def test_format_report_omits_the_corroboration_summary_when_absent(conn, monkeyp
     assert "Сигналы, которые бот уже присылал" in text
 
 
-def test_format_report_shows_recent_sources_subline_when_differs(conn, monkeypatch):
+def test_format_report_shows_recent_sources_subline_when_differs(conn, offline_stock, monkeypatch):
     """When recent_sources != all_sources, the '(за последние N дней: ...)'
     sub-line must appear with the recent sources list."""
     db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
@@ -432,7 +439,7 @@ def test_format_report_shows_recent_sources_subline_when_differs(conn, monkeypat
     assert "за последние 30 дней: SEC, SENATE" in text
 
 
-def test_corroboration_line_never_renders_a_verdict(conn, monkeypatch):
+def test_corroboration_line_never_renders_a_verdict(conn, offline_stock, monkeypatch):
     """The dossier's corroboration line says only "another source had activity
     here" -- same discipline as test_report_never_renders_a_verdict above, but
     for the corroboration line specifically (the design spec's Testing section
