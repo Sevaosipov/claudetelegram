@@ -110,3 +110,43 @@ def price_usd(conn, symbol: str, session: requests.Session | None = None) -> flo
     if conn is not None:
         db.save_cached_value(conn, key, price)
     return price
+
+
+TREND_TTL_SECONDS = 12 * 3600
+
+
+def _daily_closes(symbol: str) -> list[float] | None:
+    """Daily USD closes, oldest first, or None. Crypto trades every day, so seven
+    closes back is seven calendar days back."""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(f"{symbol.upper()}-USD").history(period="3mo")["Close"].dropna()
+    except Exception:
+        return None
+    closes = [float(x) for x in hist]
+    return closes if len(closes) >= 21 else None
+
+
+def price_trend(conn, symbol: str) -> dict | None:
+    """The 7-day return (percent) and whether the last close is above the 20-day
+    average -- the check that turns a big crypto inflow into a "Сильный" signal (see
+    strategy.py). Cached for half a day; None when there's no price history."""
+    symbol = symbol.upper()
+    k_ret, k_above = f"crypto_trend_ret7_{symbol}", f"crypto_trend_above20_{symbol}"
+    ret = db.get_cached_value(conn, k_ret, TREND_TTL_SECONDS)
+    above = db.get_cached_value(conn, k_above, TREND_TTL_SECONDS)
+    if ret is not None and above is not None:
+        return {"ret_7d": ret, "above_ma20": bool(above)}
+    closes = _daily_closes(symbol)
+    if not closes or len(closes) < 21:
+        return None
+    last = closes[-1]
+    ret = (last / closes[-8] - 1) * 100
+    above = last > sum(closes[-20:]) / 20
+    db.save_cached_value(conn, k_ret, ret)
+    db.save_cached_value(conn, k_above, 1.0 if above else 0.0)
+    return {"ret_7d": ret, "above_ma20": above}
+
+
+def trend_confirms(trend: dict | None) -> bool:
+    return bool(trend) and trend["ret_7d"] > 0 and trend["above_ma20"]

@@ -340,3 +340,34 @@ def test_tradingview_quotes_the_usd_pair():
             raise tradingview.requests.RequestException("offline")
     tradingview.fetch_snapshot("CRYPTO:BTC", Session())
     assert seen["symbol"] == "CRYPTO:BTCUSD"
+
+
+# --------------------------------------------------------------- price trend
+def _closes(monkeypatch, series):
+    calls = []
+    monkeypatch.setattr(crypto, "_daily_closes", lambda sym: calls.append(sym) or series)
+    return calls
+
+
+def test_rising_price_above_its_average_confirms(conn, monkeypatch):
+    _closes(monkeypatch, [100.0] * 20 + [101, 102, 103, 104, 105, 106, 107, 110])
+    trend = crypto.price_trend(conn, "BTC")
+    assert trend["ret_7d"] == pytest.approx((110 / 101 - 1) * 100)
+    assert trend["above_ma20"] and crypto.trend_confirms(trend)
+
+
+def test_falling_price_does_not_confirm(conn, monkeypatch):
+    _closes(monkeypatch, [100.0] * 20 + [99, 98, 97, 96, 95, 94, 93, 92])
+    assert not crypto.trend_confirms(crypto.price_trend(conn, "BTC"))
+
+
+def test_trend_is_cached_between_calls(conn, monkeypatch):
+    calls = _closes(monkeypatch, [100.0] * 28)
+    crypto.price_trend(conn, "ETH")
+    crypto.price_trend(conn, "ETH")
+    assert calls == ["ETH"]
+
+
+def test_no_price_history_means_no_trend(conn, monkeypatch):
+    _closes(monkeypatch, None)
+    assert crypto.price_trend(conn, "BTC") is None and not crypto.trend_confirms(None)
