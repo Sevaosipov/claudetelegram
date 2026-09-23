@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import re
 import sys
 
 import pandas as pd
@@ -35,6 +36,13 @@ SPLIT_TOLERANCE = 0.01          # an overlap day off by more than 1% means histo
 LOOKUP_DAYS = 800
 CRYPTO_UNIVERSE_TOP = 50
 CRYPTO_MIN_HISTORY_DAYS = 730
+# Majors run at 2-5% a day; a coin pegged to a dollar, a fund or gold moves ~0.1%.
+PEGGED_DAILY_STD = 0.005
+_COIN_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,10}$")
+# Copies and wrappers of another asset (WBTC, stETH), and tokenised dollars, funds and
+# gold: no price of their own to count, and they would inflate n.
+_NOT_A_FREE_COIN = ("wrapped", "staked", "bridged", "restaked", "liquid staking", "usd",
+                    "dollar", "treasury", "gold", "yield", "fund")
 _TREND = {"up": "тренд вверх", "down": "тренд вниз", "mixed": "тренд смешанный"}
 _MOVE = {"strong_up": "месяц сильный рост", "strong_down": "месяц сильное падение",
          "flat": "месяц без резких движений"}
@@ -161,24 +169,26 @@ def has_edge(row: dict) -> bool:
 
 
 # ------------------------------------------------------------------- storage
-def save_table(conn, name: str, rows: dict) -> None:
+def save_table(conn, name: str, rows: dict, n_assets: int | None) -> None:
+    """`n_assets`: how many assets the observations came from (the message names it)."""
     built_at = dt.datetime.now().isoformat(timespec="seconds")
     conn.execute("DELETE FROM outlook_table WHERE table_name = ?", (name,))
     conn.executemany(
         "INSERT INTO outlook_table (table_name, situation, n, up, base_rate, oos_n, "
-        "oos_brier_s, oos_brier_base, built_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "oos_brier_s, oos_brier_base, assets, built_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         [(name, k, r["n"], r["up"], r["base_rate"], r["oos_n"], r["oos_brier_s"],
-          r["oos_brier_base"], built_at) for k, r in rows.items()])
+          r["oos_brier_base"], n_assets, built_at) for k, r in rows.items()])
     conn.commit()
 
 
 def load_table(conn, name: str) -> tuple[dict, str | None]:
     rows = conn.execute(
-        "SELECT situation, n, up, base_rate, oos_n, oos_brier_s, oos_brier_base, built_at "
-        "FROM outlook_table WHERE table_name = ?", (name,)).fetchall()
+        "SELECT situation, n, up, base_rate, oos_n, oos_brier_s, oos_brier_base, assets, "
+        "built_at FROM outlook_table WHERE table_name = ?", (name,)).fetchall()
     table = {k: {"n": n, "up": up, "base_rate": b, "oos_n": on, "oos_brier_s": bs,
-                 "oos_brier_base": bb} for k, n, up, b, on, bs, bb, _at in rows}
-    return table, (rows[0][7] if rows else None)
+                 "oos_brier_base": bb, "assets": na}
+             for k, n, up, b, on, bs, bb, na, _at in rows}
+    return table, (rows[0][-1] if rows else None)
 
 
 def save_bars(conn, symbol: str, bars: list[tuple[str, float]]) -> None:
@@ -199,8 +209,15 @@ def _universe(conn, kind: str) -> list[str]:
         import universe
         return sorted({t.replace(".", "-") for t in universe.load()["tickers"]})
     coins = [r for r in sources.cached_coins(conn)
-             if r[0] not in sources.STABLECOINS and r[3] is not None]
+             if r[0] not in sources.STABLECOINS and r[3] is not None
+             and _COIN_SYMBOL_RE.match(r[0])
+             and not any(w in (r[2] or "").lower() for w in _NOT_A_FREE_COIN)]
     return [f"{sym}-USD" for sym, *_rest in sorted(coins, key=lambda r: r[3])[:CRYPTO_UNIVERSE_TOP]]
+
+
+def _pegged(bars: list[tuple[str, float]]) -> bool:
+    rets = pd.Series([c for _d, c in bars[-365:]], dtype=float).pct_change().dropna()
+    return len(rets) > 0 and rets.std(ddof=0) < PEGGED_DAILY_STD
 
 
 def _asset_for(kind: str, yahoo_symbol: str):
@@ -244,7 +261,7 @@ def _top_up(conn, asset) -> None:
 
 def refresh(conn, kinds=("stock", "crypto")) -> None:
     for kind in kinds:
-        obs = []
+        obs, n_assets = [], 0
         for symbol in _universe(conn, kind):
             asset = _asset_for(kind, symbol)
             try:
@@ -252,12 +269,14 @@ def refresh(conn, kinds=("stock", "crypto")) -> None:
             except Exception as e:  # one symbol failing must not stop the table
                 print(f"[outlook] {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
             bars = load_bars(conn, asset.yahoo)
-            if kind == "crypto" and len(bars) < CRYPTO_MIN_HISTORY_DAYS:
+            if kind == "crypto" and (len(bars) < CRYPTO_MIN_HISTORY_DAYS or _pegged(bars)):
                 continue
-            obs += observations(bars, HORIZON[kind])
+            own = observations(bars, HORIZON[kind])
+            obs += own
+            n_assets += bool(own)
         if obs:
-            save_table(conn, kind, build_table(obs))
-            print(f"[outlook] {kind}: {len(obs)} observations")
+            save_table(conn, kind, build_table(obs), n_assets)
+            print(f"[outlook] {kind}: {len(obs)} observations from {n_assets} assets")
 
 
 def refresh_if_stale(conn) -> None:
@@ -296,6 +315,7 @@ def lookup(conn, asset) -> dict:
               "source": source, "n": row.get("n", 0),
               "p": row["up"] / row["n"] if row.get("n") else None,
               "base_rate": next(iter(table.values()))["base_rate"],
+              "assets": next(iter(table.values())).get("assets"),
               "edge": has_edge(row), "european": kind == "stock" and asset.exchange is not None}
     if not is_pooled:
         own = [up for _y, k, up in observations(load_bars(conn, asset.yahoo), h) if k == key]
@@ -336,7 +356,8 @@ def format_outlook(result: dict, symbol: str) -> str:
     if result.get("european"):
         notes.append("таблица по акциям США")
     if result.get("table") == "crypto":
-        notes.append("по ~30 крупнейшим монетам")
+        coins = result.get("assets")
+        notes.append(f"по {coins} крупнейшим монетам" if coins else "по крупнейшим монетам")
     if result.get("source") not in (None, "Yahoo"):
         notes.append(f"цены: {result['source']}")
     lines.append("   частота в прошлом, не гарантия" + ("".join(f" · {n}" for n in notes)))

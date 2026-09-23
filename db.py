@@ -486,6 +486,7 @@ CREATE TABLE IF NOT EXISTS outlook_table (
     oos_n           INTEGER NOT NULL,
     oos_brier_s     REAL,
     oos_brier_base  REAL,
+    assets          INTEGER,        -- how many assets the table was counted from
     built_at        TEXT NOT NULL,
     PRIMARY KEY (table_name, situation)
 );
@@ -509,6 +510,7 @@ _ADDED_COLUMNS = [
     ("company_facts", "avg_daily_value", "REAL"),
     ("signal_journal", "corroborated_by", "TEXT"),
     ("signal_journal", "tier", "TEXT"),
+    ("outlook_table", "assets", "INTEGER"),
 ]
 
 

@@ -97,11 +97,30 @@ def test_table_includes_pooled_rows():
 
 def test_tables_and_bars_round_trip(conn):
     rows = outlook.build_table(_obs("up|flat|normal", 5, lambda i: True))
-    outlook.save_table(conn, "stock", rows)
+    outlook.save_table(conn, "stock", rows, 97)
     loaded, built_at = outlook.load_table(conn, "stock")
     assert loaded["up|flat|normal"]["n"] == 60 and built_at
+    assert loaded["up|flat|normal"]["assets"] == 97
     outlook.save_bars(conn, "AAA", [("2026-01-02", 1.0), ("2026-01-05", 2.0)])
     assert outlook.load_bars(conn, "AAA") == [("2026-01-02", 1.0), ("2026-01-05", 2.0)]
+
+
+def test_an_older_outlook_table_gains_the_new_columns(tmp_path):
+    import sqlite3
+
+    import db
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE outlook_table (table_name TEXT NOT NULL, situation TEXT NOT NULL, "
+                "n INTEGER NOT NULL, up INTEGER NOT NULL, base_rate REAL, oos_n INTEGER NOT NULL, "
+                "oos_brier_s REAL, oos_brier_base REAL, built_at TEXT NOT NULL, "
+                "PRIMARY KEY (table_name, situation))")
+    old.commit()
+    old.close()
+    conn = db.connect(path)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(outlook_table)")}
+    conn.close()
+    assert "assets" in columns
 
 
 def test_walk_forward_folds_boundaries_are_correct():
@@ -213,6 +232,34 @@ def test_refresh_logs_a_failed_split_write_and_keeps_going(conn, market, monkeyp
     assert outlook.load_bars(conn, "BBB")                       # the other symbol still ran
 
 
+# ---------------------------------------------------------------- crypto universe
+def test_crypto_universe_drops_wrapped_staked_and_pegged_tokens(conn, monkeypatch):
+    monkeypatch.setattr(outlook.sources, "cached_coins", lambda conn: [
+        ("BTC", "bitcoin", "Bitcoin", 1), ("WBTC", "wrapped-bitcoin", "Wrapped Bitcoin", 2),
+        ("STETH", "staked-ether", "Lido Staked Ether", 3), ("SOL", "solana", "Solana", 4),
+        ("FIGR_HELOC", "figure-heloc", "Figure Heloc", 5), ("USDG", "global-dollar", "Global Dollar", 6),
+        ("USDT", "tether", "Tether", 7)])
+    assert outlook._universe(conn, "crypto") == ["BTC-USD", "SOL-USD"]
+
+
+def test_refresh_skips_a_flat_priced_coin(conn, market, monkeypatch):
+    series = {"AAA-USD": _bars(_path(1500, wiggle=0.02)),
+              "PEG-USD": _bars(_path(1500, daily=0.0, wiggle=0.0005))}
+    monkeypatch.setattr(outlook, "_universe", lambda conn, kind: sorted(series) if kind == "crypto" else [])
+    monkeypatch.setattr(outlook.sources, "price_history",
+                        lambda asset, days=800: (series[asset.yahoo], "Yahoo"))
+    outlook.refresh(conn, ["crypto"])
+    table, _at = outlook.load_table(conn, "crypto")
+    only_aaa = outlook.build_table(outlook.observations(series["AAA-USD"], outlook.HORIZON["crypto"]))
+    assert {k: r["n"] for k, r in table.items()} == {k: r["n"] for k, r in only_aaa.items()}
+    assert next(iter(table.values()))["assets"] == 1
+
+
+def test_lookup_reports_the_tables_asset_count(conn, market):
+    outlook.refresh(conn, ["stock"])
+    assert outlook.lookup(conn, assets.stock_asset("AAA"))["assets"] == 2
+
+
 def test_lookup_without_a_table(conn, market):
     assert outlook.lookup(conn, assets.stock_asset("AAA"))["status"] == "no_table"
 
@@ -270,6 +317,13 @@ def test_message_notes():
                                    "pooled": True, "situation": "up|flat|*"}, "SAP.DE")
     assert "(без учёта волатильности)" in text and "таблица по акциям США" in text
     assert "цены: TradingView" in text
+
+
+def test_message_names_the_crypto_tables_coin_count():
+    crypto = {**OK, "table": "crypto", "assets": 31}
+    assert "по 31 крупнейшим монетам" in outlook.format_outlook(crypto, "SOL")
+    assert "по крупнейшим монетам" in outlook.format_outlook({**crypto, "assets": None}, "SOL")
+    assert "монетам" not in outlook.format_outlook({**OK, "assets": 97}, "NVDA")
 
 
 @pytest.mark.parametrize("status,words", [("no_table", "ещё не готов"),
