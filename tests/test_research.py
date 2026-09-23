@@ -564,11 +564,53 @@ def test_format_report_shows_not_found_message_for_an_unrecognised_symbol(conn, 
     that renders through format_report (menu.py's option 2 and `python research.py`
     both call research.format_report -- neither is duplicated here). Applies the
     same way to an ISIN report with found == False -- the check is on `found`,
-    not on `is_isin`."""
+    not on `is_isin`.
+
+    Also drops analyst coverage (offline_stock's default Nasdaq stub has a
+    consensus target, which alone would make found True per the fix-round-1
+    ruling below) so this stays a genuine no-evidence-at-all case."""
     monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    monkeypatch.setattr(sources, "nasdaq_analyst", lambda s: None)
     rep = research.build(conn, "NVDA")
     assert rep["found"] is False
     text = research.format_report(rep)
     assert text == f"Не нашёл такой тикер: NVDA\n{research._NOT_FOUND_HINT}"
     assert "Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета)." in text
     assert "Инсайдеры" not in text and "ISIN, а не тикер" not in text
+
+
+# ------------------------------------------------ found round 1 fix: analyst/financials
+#
+# Plan-mandated finding from the round-1 review: `found` was computed only from
+# prices/insiders/european/stakes/political/tradingview, ignoring `analyst` and
+# `financials`, which are fetched independently of the price chain. If the whole
+# price chain and indicators fail for a real, covered ticker with nothing in the
+# bot's own DB, the old formula discarded the analyst/financials data it did fetch
+# and showed the not-found reply anyway. News is deliberately NOT counted: Google
+# News returns results for almost any query, including a made-up ticker.
+
+def test_found_is_true_from_analyst_coverage_alone(conn, offline_stock, monkeypatch):
+    """Price chain and indicators both fail; offline_stock's default Nasdaq stub
+    still answers with a consensus target -- that alone must make found True, and
+    format_report must render the normal dossier, not the not-found reply."""
+    monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, None))
+    rep = research.build(conn, "NVDA")
+    assert rep["prices"]["current"] is None and rep["tradingview"] is None
+    assert rep["analyst"] is not None
+    assert rep["found"] is True
+    assert "Не нашёл такой тикер" not in research.format_report(rep)
+
+
+def test_found_is_false_without_price_analyst_or_financials(conn, offline_stock, monkeypatch):
+    """Converse: price chain, indicators AND analyst (Yahoo empty via offline_stock,
+    Nasdaq now stubbed to no-coverage too) all fail, financials is None (offline_stock
+    default) and nothing is in the bot's own DB -- found stays False and the
+    not-found reply still renders."""
+    monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, None))
+    monkeypatch.setattr(sources, "nasdaq_analyst", lambda s: None)
+    rep = research.build(conn, "NVDA")
+    assert rep["analyst"] is None and rep["financials"] is None
+    assert rep["found"] is False
+    assert "Не нашёл такой тикер: NVDA" in research.format_report(rep)

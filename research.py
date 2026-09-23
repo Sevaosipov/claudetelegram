@@ -790,9 +790,12 @@ def _build_stock(conn, asset) -> dict:
     rep["opinion"] = opinion.score(rep)
     if rep["opinion"]:
         db.journal_opinion(conn, ticker, rep["opinion"])
+    # News is deliberately excluded: Google News returns results for almost any
+    # query, including a made-up ticker, so it is no evidence the symbol is real.
     rep["found"] = bool(prices.get("current") is not None or rep["insiders"]["buys"]
                         or rep["insiders"]["sells"] or european or rep["stakes"]
-                        or rep["political"] or rep["tradingview"])
+                        or rep["political"] or rep["tradingview"]
+                        or rep["analyst"] or rep["financials"])
     return rep
 
 
