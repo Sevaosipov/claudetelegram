@@ -225,6 +225,10 @@ def format_condensed(rep: dict) -> str:
     same rule the disclosure-signal formatters above follow, and the reason
     format_sec_line & co. (print-only, never sent to Telegram) don't need to.
     """
+    if rep.get("kind") == "crypto":
+        import crypto_research
+        return crypto_research.format_condensed(rep)
+
     import opinion
     import research
     import tradingview
@@ -237,6 +241,10 @@ def format_condensed(rep: dict) -> str:
     entry_target = research.format_entry_target(rep)
     if entry_target:
         L.append(entry_target)
+
+    if rep.get("outlook"):
+        import outlook
+        L.append(_esc(outlook.format_outlook(rep["outlook"], t)))
 
     buys, sells = rep["insiders"]["buys"], rep["insiders"]["sells"]
     if buys or sells:

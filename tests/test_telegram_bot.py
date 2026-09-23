@@ -11,6 +11,13 @@ import pytest
 import telegram_bot as tb
 
 
+@pytest.fixture(autouse=True)
+def _offline_lookup(monkeypatch):
+    import sources
+    monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "ETH", "SOL"})
+    monkeypatch.setattr(sources, "current_price", lambda asset: (100.0, "Yahoo"))
+
+
 def test_extract_ticker_accepts_plain_and_dollar_prefixed():
     assert tb._extract_ticker("AAPL") == "AAPL"
     assert tb._extract_ticker("$aapl") == "AAPL"
@@ -38,7 +45,7 @@ def test_handle_message_enqueues_before_running(conn, monkeypatch):
     import db
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
     tb._handle_message(conn, "AAPL")
-    assert [t for _, t in db.pending_analysis(conn)] == ["AAPL"]  # stays pending; only
+    assert [t for _, t in db.pending_analysis(conn)] == ["$AAPL"]  # stays pending; only
     # run_claude_analysis.sh itself marks a row processed, on a confirmed send
 
 
@@ -258,3 +265,41 @@ def test_bought_oslo_ticker_without_a_price_uses_its_own_close(conn, monkeypatch
     tb._handle_message(conn, "/bought EQNR")
     [pos] = positions.open_positions(conn)
     assert pos.entry_price == 270.0 and pos.source == "NORWAY"
+
+
+# ------------------------------------------------------------- any-asset lookup
+def test_a_coin_is_queued_as_a_coin(conn, monkeypatch):
+    import db
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
+    tb._handle_message(conn, "btc")
+    tb._handle_message(conn, "$BTC")
+    assert [t for _, t in db.pending_analysis(conn)] == ["CRYPTO:BTC", "$BTC"]
+
+
+def test_an_unknown_stock_is_not_queued(conn, monkeypatch):
+    import db
+    import sources
+    sent = []
+    monkeypatch.setattr(sources, "current_price", lambda asset: (None, None))
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    tb._handle_message(conn, "ZZZZQ")
+    assert db.pending_analysis(conn) == [] and "Не нашёл такой тикер: ZZZZQ" in sent[0]
+
+
+def test_not_a_ticker_gets_the_hint(conn, monkeypatch):
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    tb._handle_message(conn, "#$%")
+    assert "BTC" in sent[0] and "EQNR.OL" in sent[0]
+
+
+def test_crypto_fallback_reply_uses_the_crypto_format(conn, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stderr="x"))
+    monkeypatch.setattr("research.build", lambda conn, text: {
+        "kind": "crypto", "ticker": "BTC", "name": "Bitcoin", "current": 1.0, "changes": {},
+        "trend": None, "treasury": [], "etf_flows": [], "political": [], "onchain": [],
+        "outlook": {"status": "no_table"}})
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    tb._handle_message(conn, "BTC")
+    assert sent[0].startswith("<b>BTC — Bitcoin</b>") and "Прогноз на месяц" in sent[0]
