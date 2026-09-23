@@ -231,8 +231,12 @@ def _handle_message(conn, text: str) -> None:
         telegram_notify.send_text(f"Не похоже на тикер: {telegram_notify._esc(text[:40])}. "
                                   + LOOKUP_HINT)
         return
-    if asset.kind == "stock" and not asset.is_isin and sources.current_price(asset)[0] is None:
-        telegram_notify.send_text(f"Не нашёл такой тикер: {asset.symbol}. " + LOOKUP_HINT)
+    # Spec §1.6: an unrecognised symbol is not queued. A coin in the coin list is known
+    # to exist; anything else (a stock, CRYPTO:FOO, FOO-USD) needs a price somewhere.
+    listed_coin = asset.kind == "crypto" and asset.symbol in sources.cached_coin_symbols(conn)
+    if not asset.is_isin and not listed_coin and sources.current_price(asset)[0] is None:
+        telegram_notify.send_text(f"Не нашёл такой тикер: {telegram_notify._esc(asset.symbol)} "
+                                  "(или источники цен сейчас не отвечают). " + LOOKUP_HINT)
         return
     ticker = asset.key
     db.enqueue_analysis(conn, ticker)

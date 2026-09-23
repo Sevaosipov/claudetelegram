@@ -282,3 +282,28 @@ def test_format_ticker_backtest_empty_when_no_price_history():
     result = {"ticker": "ZZZZ", "n_purchases": 0, "by_horizon": {}}
     text = tn.format_ticker_backtest(result)
     assert "Недостаточно" in text
+
+
+# ------------------------------------------------ format_condensed (stock path)
+def _stock_rep(**overrides):
+    import assets
+    rep = {"ticker": "BTC", "asset": assets.stock_asset("BTC"), "kind": "stock",
+           "opinion": None, "prices": {"current": 42.0}, "analyst": None,
+           "insiders": {"buys": [], "sells": []}, "stakes": [], "political": [],
+           "tradingview": None, "outlook": {"status": "no_table"}, "sources": {}}
+    rep.update(overrides)
+    return rep
+
+
+def test_condensed_stock_reply_shows_the_outlook():
+    text = tn.format_condensed(_stock_rep())
+    assert "📈 Прогноз на месяц: ещё не готов" in text
+
+
+def test_condensed_stock_reply_points_to_the_stock_report_not_the_coin():
+    """"$BTC" is the Grayscale ETF; a bare "BTC" in the hint would open the coin."""
+    assert tn.format_condensed(_stock_rep()).splitlines()[-1] == \
+        "Полный отчёт: python research.py '$BTC'"
+    rep = _stock_rep(ticker="AAPL")
+    del rep["asset"]
+    assert tn.format_condensed(rep).splitlines()[-1] == "Полный отчёт: python research.py 'AAPL'"

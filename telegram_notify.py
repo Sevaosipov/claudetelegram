@@ -276,7 +276,10 @@ def format_condensed(rep: dict) -> str:
         # filer-supplied free text -- safe to embed unescaped.
         L.append(tradingview.format_view(rep["tradingview"]))
 
-    L.append(f"\nПолный отчёт: python research.py {_esc(t)}")
+    # The resolved key, quoted: a bare "BTC" would open the coin's report, not the
+    # $BTC stock's, and an unquoted "$BTC" would be expanded away by the shell.
+    key = rep["asset"].key if "asset" in rep else t
+    L.append(f"\nПолный отчёт: python research.py '{_esc(key)}'")
     return "\n".join(L)
 
 
