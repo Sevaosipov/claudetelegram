@@ -228,7 +228,17 @@ def _top_up(conn, asset) -> None:
         bars, _src = sources.price_history(asset, FULL_HISTORY_DAYS)
         if not bars:
             return
-        conn.execute("DELETE FROM price_bars WHERE symbol = ?", (asset.yahoo,))
+        # The delete and the reinsert must land together: if the write after the
+        # delete fails, roll back so the old rows survive rather than sitting
+        # deleted-but-uncommitted until some other symbol's later commit makes the
+        # loss permanent (refresh() only logs this exception and moves on).
+        try:
+            conn.execute("DELETE FROM price_bars WHERE symbol = ?", (asset.yahoo,))
+            save_bars(conn, asset.yahoo, bars)
+        except Exception:
+            conn.rollback()
+            raise
+        return
     save_bars(conn, asset.yahoo, bars)
 
 

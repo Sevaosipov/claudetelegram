@@ -178,6 +178,41 @@ def test_a_split_triggers_a_full_refetch(conn, market, monkeypatch):
     assert outlook.load_bars(conn, "AAA")[-1][1] == pytest.approx(_path(4000)[-1])
 
 
+def test_a_failed_write_after_a_split_keeps_the_old_bars(conn, market, monkeypatch):
+    """If the reinsert after the split's DELETE fails, the DELETE must roll back too --
+    otherwise it sits uncommitted until some unrelated later commit makes it permanent."""
+    stale = [(d, c * 2) for d, c in _bars(_path(4000))]
+    outlook.save_bars(conn, "AAA", stale)
+    monkeypatch.setattr(outlook, "save_bars",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        outlook._top_up(conn, assets.stock_asset("AAA"))
+    assert outlook.load_bars(conn, "AAA") == stale
+
+    # An unrelated commit elsewhere on the same connection must not resurrect a
+    # half-finished DELETE that was left pending in the open transaction.
+    conn.execute("INSERT OR REPLACE INTO price_bars (symbol, date, close) VALUES (?,?,?)",
+                 ("ZZZ", "2020-01-01", 1.0))
+    conn.commit()
+    assert outlook.load_bars(conn, "AAA") == stale
+
+
+def test_refresh_logs_a_failed_split_write_and_keeps_going(conn, market, monkeypatch, capsys):
+    stale = [(d, c * 2) for d, c in _bars(_path(4000))]
+    outlook.save_bars(conn, "AAA", stale)
+    real_save_bars = outlook.save_bars
+
+    def flaky(conn, symbol, bars):
+        if symbol == "AAA":
+            raise RuntimeError("boom")
+        real_save_bars(conn, symbol, bars)
+    monkeypatch.setattr(outlook, "save_bars", flaky)
+    outlook.refresh(conn, ["stock"])
+    assert "AAA" in capsys.readouterr().err
+    assert outlook.load_bars(conn, "AAA") == stale
+    assert outlook.load_bars(conn, "BBB")                       # the other symbol still ran
+
+
 def test_lookup_without_a_table(conn, market):
     assert outlook.lookup(conn, assets.stock_asset("AAA"))["status"] == "no_table"
 
