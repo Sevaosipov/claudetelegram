@@ -270,6 +270,8 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
     for s in pre:
         t = _crypto_tier(conn, s) if hasattr(s, "crypto_kind") else _stock_tier(s)
         if t is not None:
+            if s.source == "NORWAY" and s.ticker.upper() in getattr(t212, "unchecked", ()):
+                t.missed.append("Trading 212 не проверен: не удалось узнать ISIN")
             s.tier = t.tier
             tiered.append(t)
     # A candidate stock below CANDIDATE_MIN_SCORE isn't worth showing -- crypto

@@ -27,6 +27,17 @@ LIST_URL = API_BASE + "/v1/newsreader/list"
 MESSAGE_URL = API_BASE + "/v1/newsreader/message"
 MANAGERS_TRANSACTION_CATEGORY = 1102
 
+# Newsweb names an issuer only by its Oslo ticker, but Trading 212 sells Norwegian
+# companies solely as EUR listings in Frankfurt, keyed by ISIN (trading212.py) -- so
+# the ticker has to be turned into an ISIN. Euronext's own instrument search does
+# that exactly; yfinance's `isin` does not (it returned an Indian ISIN for Orkla).
+EURONEXT_SEARCH_URL = "https://live.euronext.com/en/instrumentSearch/searchJSON"
+# Oslo's markets: the main list, Euronext Expand, Euronext Growth. Anything else in a
+# search result -- DOSL (Oslo derivatives), another exchange -- is another instrument.
+OSLO_MICS = {"XOSL", "XOAS", "MERK"}
+ISIN_MISS_TTL_DAYS = 7     # re-ask about a ticker Euronext didn't know after a week
+_SYMBOL_RE = re.compile(r"class='symbol'>([^<]+)<")
+
 _ACTION_RE = re.compile(r"\b(acquired|purchased|bought|kjøpt|sold|solgt)\b", re.I)
 # Both number patterns require the match to END on a digit -- without that, a
 # sentence-ending period right after the real number ("...NOK 218.50. Following
@@ -228,3 +239,45 @@ def scan_new_filings(from_date: dt.date, to_date: dt.date, seen_message_ids: set
                 "source_url": f"https://newsweb.oslobors.no/message/{mid}",
             })
         yield mid, txn
+
+
+def isin_for_ticker(ticker: str, session=None) -> str | None:
+    """The ISIN of the Oslo listing with exactly this symbol; "" when Euronext has no
+    such listing; None when the search couldn't be done (unknown is not "none").
+
+    Only an exact symbol on an Oslo market counts: searching "BORR" also returns
+    Borregaard (BRG), and "ORK" returns Orkla's stock options on DOSL.
+    """
+    try:
+        resp = (session or requests).get(EURONEXT_SEARCH_URL, params={"q": ticker},
+                                          headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        resp.raise_for_status()
+        results = resp.json()
+    except (requests.RequestException, ValueError):
+        return None
+    want = ticker.strip().upper()
+    for r in results if isinstance(results, list) else []:
+        m = _SYMBOL_RE.search(r.get("label") or "")
+        if (r.get("mic") in OSLO_MICS and r.get("isin") and m
+                and m.group(1).strip().upper() == want):
+            return r["isin"].strip().upper()
+    return ""
+
+
+def cached_isin(conn, ticker: str, session=None) -> str | None:
+    """isin_for_ticker with a database cache: an ISIN is kept for good, a "no such
+    listing" answer for ISIN_MISS_TTL_DAYS, a failed search not at all."""
+    ticker = ticker.strip().upper()
+    row = conn.execute("SELECT isin, fetched_at FROM oslo_isins WHERE ticker = ?",
+                       (ticker,)).fetchone()
+    if row:
+        isin, fetched = row
+        age = dt.datetime.now() - dt.datetime.fromisoformat(fetched)
+        if isin or age.days < ISIN_MISS_TTL_DAYS:
+            return isin
+    isin = isin_for_ticker(ticker, session)
+    if isin is not None:
+        conn.execute("INSERT OR REPLACE INTO oslo_isins (ticker, isin, fetched_at) VALUES (?,?,?)",
+                     (ticker, isin, dt.datetime.now().isoformat(timespec="seconds")))
+        conn.commit()
+    return isin

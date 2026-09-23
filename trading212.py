@@ -17,20 +17,23 @@ treating every stock as unavailable.
 
 Matching: an ISIN (how BaFin and Finansinspektionen signals name an issuer) against
 the ISIN column; a US ticker against Trading 212's "<SYMBOL>_US_EQ" instruments; an
-Oslo ticker against NOK-quoted instruments' short names. Crypto isn't sold on
+Oslo ticker by its ISIN (norway.cached_isin) -- Trading 212 has no NOK instruments
+at all and sells Norwegian companies only as EUR listings in Frankfurt. Crypto isn't sold on
 Trading 212 Invest; crypto signals are not filtered here.
 """
 from __future__ import annotations
 
 import base64
 import os
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
 
 import crypto
 import db
+import norway
 
 INSTRUMENTS_URL = "https://live.trading212.com/api/v0/equity/metadata/instruments"
 CACHE_TTL_SECONDS = 24 * 3600
@@ -44,6 +47,11 @@ class Availability:
     isins: set[str]
     us_symbols: set[str]
     nok_symbols: set[str]
+    # Oslo ticker -> ISIN: the ISIN, "" for none, None when it couldn't be looked up.
+    norway_isin: Callable[[str], str | None] | None = None
+    # Oslo tickers kept only because their ISIN couldn't be looked up -- strategy.py
+    # says so on the signal rather than presenting them as checked.
+    unchecked: set[str] = field(default_factory=set)
 
     def can_buy(self, ticker: str, source: str) -> bool:
         t = (ticker or "").strip().upper()
@@ -54,7 +62,13 @@ class Availability:
         if len(t) == 12 and t[:2].isalpha() and t[2:].isalnum():   # ISIN
             return t in self.isins
         if source == "NORWAY":
-            return t in self.nok_symbols
+            if self.norway_isin is None:
+                return t in self.nok_symbols
+            isin = self.norway_isin(t)
+            if isin is None:        # unknown is not "not sold"
+                self.unchecked.add(t)
+                return True
+            return isin in self.isins or t in self.nok_symbols
         if source in US_SOURCES:
             return t in self.us_symbols or t.replace("-", ".") in self.us_symbols
         return t in self.us_symbols or t in self.nok_symbols
@@ -144,4 +158,5 @@ def availability(conn, session: requests.Session | None = None) -> Availability 
                 us.add(short.upper())
         elif currency == "NOK" and short:
             nok.add(short.upper())
-    return Availability(isins=isins, us_symbols=us, nok_symbols=nok)
+    return Availability(isins=isins, us_symbols=us, nok_symbols=nok,
+                        norway_isin=lambda t: norway.cached_isin(conn, t))

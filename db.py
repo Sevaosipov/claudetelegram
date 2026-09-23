@@ -415,6 +415,14 @@ CREATE TABLE IF NOT EXISTS crypto_etf_snapshots (
     PRIMARY KEY (fund, as_of)
 );
 
+-- Oslo ticker -> ISIN, from Euronext's instrument search (norway.cached_isin).
+-- isin '' = Euronext has no Oslo listing with that symbol (re-checked after a week).
+CREATE TABLE IF NOT EXISTS oslo_isins (
+    ticker      TEXT PRIMARY KEY,
+    isin        TEXT NOT NULL,
+    fetched_at  TEXT NOT NULL
+);
+
 -- Trading 212's tradable instruments (trading212.py), replaced wholesale on each
 -- daily refresh.
 CREATE TABLE IF NOT EXISTS t212_instruments (
