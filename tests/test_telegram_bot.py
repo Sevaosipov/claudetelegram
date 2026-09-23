@@ -112,10 +112,23 @@ def test_get_updates_still_raises_on_connection_errors():
 # ------------------------------------------------------- position commands
 @pytest.fixture
 def replies(monkeypatch):
+    """No market price by default -- most of these tests care about the command
+    parsing, not the sanity check against a real last close (see the dedicated
+    tests below for that). Tests that need an actual number override this."""
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
-    monkeypatch.setattr("positions.last_close", lambda ticker: 50.0)
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: None)
     return sent
+
+
+def test_position_ticker_maps_crypto_symbols():
+    """A bare crypto symbol or "CRYPTO:XXX" input both map to this project's
+    ticker convention; anything not in crypto.SYMBOLS is rejected rather than
+    silently treated as an equity ticker."""
+    assert tb._position_ticker("BTC") == "CRYPTO:BTC"
+    assert tb._position_ticker("eth") == "CRYPTO:ETH"
+    assert tb._position_ticker("CRYPTO:btc") == "CRYPTO:BTC"
+    assert tb._position_ticker("CRYPTO:ZZZ") is None
 
 
 def test_bought_with_price_opens_a_position(conn, replies):
@@ -125,8 +138,9 @@ def test_bought_with_price_opens_a_position(conn, replies):
     assert (pos.ticker, pos.entry_price) == ("GRAB", 18.40) and "GRAB" in replies[-1]
 
 
-def test_bought_without_price_uses_the_last_close(conn, replies):
+def test_bought_without_price_uses_the_last_close(conn, replies, monkeypatch):
     import positions
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
     tb._handle_message(conn, "/bought GRAB")
     assert positions.open_positions(conn)[0].entry_price == 50.0
 
@@ -152,7 +166,8 @@ def test_sold_closes_and_unknown_sold_says_so(conn, replies):
     assert "нет открытой" in replies[-1]
 
 
-def test_positions_lists_open_positions(conn, replies):
+def test_positions_lists_open_positions(conn, replies, monkeypatch):
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
     tb._handle_message(conn, "/bought GRAB 40")
     tb._handle_message(conn, "/positions")
     assert "GRAB" in replies[-1] and "+25.0%" in replies[-1]
@@ -163,3 +178,37 @@ def test_bought_with_non_finite_price_stores_nothing(conn, replies, non_finite):
     import positions
     tb._handle_message(conn, f"/bought GRAB {non_finite}")
     assert positions.open_positions(conn) == [] and "/bought" in replies[-1]
+
+
+def test_bought_crypto_symbol_opens_the_project_ticker_with_crypto_source(conn, replies):
+    """/bought BTC must open CRYPTO:BTC, priced as crypto -- not a position in the
+    literal string "BTC", which positions.last_close would otherwise price as the
+    Grayscale Bitcoin Mini Trust ETF instead of the coin."""
+    import positions
+    tb._handle_message(conn, "/bought BTC 60000")
+    [pos] = positions.open_positions(conn)
+    assert pos.ticker == "CRYPTO:BTC" and pos.source == "CRYPTO"
+
+
+def test_bought_price_far_from_last_close_is_refused(conn, replies, monkeypatch):
+    import positions
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 100.0)
+    tb._handle_message(conn, "/bought GRAB 50")
+    assert positions.open_positions(conn) == []
+    assert "отличается" in replies[-1] and "100" in replies[-1] and "50" in replies[-1]
+
+
+def test_bought_price_within_tolerance_of_last_close_is_accepted(conn, replies, monkeypatch):
+    import positions
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 100.0)
+    tb._handle_message(conn, "/bought GRAB 70")
+    assert positions.open_positions(conn)[0].entry_price == 70.0
+
+
+def test_bought_with_no_quote_stores_the_price_and_notes_it(conn, replies):
+    """When last_close can't find a price at all (already the fixture's default),
+    the user's price is still stored -- only the stop-loss check is affected."""
+    import positions
+    tb._handle_message(conn, "/bought ORK 12.5")
+    assert positions.open_positions(conn)[0].entry_price == 12.5
+    assert "стоп-лосс" in replies[-1] and "не отслеживается" in replies[-1]

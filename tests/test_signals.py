@@ -735,12 +735,12 @@ def test_send_digest_commits_signals_and_close_alerts_only_on_success(conn, monk
     sig.tier = strategy.STRONG
     sel = strategy.Selection([strategy.Tiered(sig, strategy.STRONG, ["x"], [])], [], True)
     pos = positions.open_position(conn, "ZZZ", 10.0, today=TODAY - dt.timedelta(days=100))
-    closes = positions.check_exits(conn, price_fn=lambda t: None)
+    closes = positions.check_exits(conn, price_fn=lambda t, s=None: None)
 
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: False)
     assert bot._send_digest(conn, sel, closes) is False
     assert db.get_alert_state(conn, "SEC", "AAA") is None
-    assert positions.check_exits(conn, price_fn=lambda t: None)       # not marked yet
+    assert positions.check_exits(conn, price_fn=lambda t, s=None: None)       # not marked yet
 
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
@@ -748,7 +748,7 @@ def test_send_digest_commits_signals_and_close_alerts_only_on_success(conn, monk
     assert "Сильные" in sent[0] and "ZZZ" in sent[0]
     assert db.get_alert_state(conn, "SEC", "AAA") is not None
     assert conn.execute("SELECT tier FROM signal_journal").fetchone()[0] == "strong"
-    assert positions.check_exits(conn, price_fn=lambda t: None) == []
+    assert positions.check_exits(conn, price_fn=lambda t, s=None: None) == []
 
 
 def test_send_digest_sends_nothing_when_there_is_nothing(conn, monkeypatch):

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import cluster
 import crypto
+import marketcap
 
 EXIT_MAX_DAYS = 90
 EXIT_STOP_LOSS_PCT = 15.0
@@ -75,18 +76,23 @@ def open_positions(conn) -> list[Position]:
         f"SELECT {_COLS} FROM positions WHERE closed_at IS NULL ORDER BY opened_at")]
 
 
-def open_position(conn, ticker: str, entry_price: float, today: dt.date | None = None) -> Position:
+def open_position(conn, ticker: str, entry_price: float, today: dt.date | None = None,
+                  source: str | None = None) -> Position:
+    """`source` overrides whatever signal_journal would otherwise supply -- callers
+    that know it (telegram_bot passes "CRYPTO" for a crypto ticker) can set it even
+    when there was no strong signal to read it off of, which last_close() then needs
+    to price the right listing."""
     ticker = ticker.strip().upper()
     if any(p.ticker == ticker for p in open_positions(conn)):
         raise ValueError(f"position in {ticker} is already open")
     sig = conn.execute(
         "SELECT id, source, members FROM signal_journal WHERE ticker = ? AND tier = 'strong' "
         "ORDER BY emitted_at DESC, id DESC LIMIT 1", (ticker,)).fetchone()
-    signal_id, source, members = sig if sig else (None, None, "[]")
+    signal_id, sig_source, members = sig if sig else (None, None, "[]")
     conn.execute(
         "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, signal_id) "
         "VALUES (?,?,?,?,?,?)",
-        (ticker, source, (today or dt.date.today()).isoformat(), float(entry_price),
+        (ticker, source or sig_source, (today or dt.date.today()).isoformat(), float(entry_price),
          members or "[]", signal_id))
     conn.commit()
     return next(p for p in open_positions(conn) if p.ticker == ticker)
@@ -105,14 +111,41 @@ def close_position(conn, ticker: str, reason: str = "manual",
     return pos
 
 
-def last_close(ticker: str) -> float | None:
-    """Most recent daily close from Yahoo, or None (an ISIN, a delisting, no network)."""
+def yahoo_symbol(ticker: str, source: str | None = None) -> str | None:
+    """The Yahoo Finance symbol that prices `ticker` as `source` discloses it, or
+    None when there isn't a reliable one.
+
+    Crypto quotes as BTC-USD regardless of source. Otherwise the venue comes from
+    marketcap.SOURCE_VENUE (e.g. NORWAY -> ".OL"); a source with no listed venue is
+    tried as a bare US ticker, matching marketcap._fetch's own convention. BaFin and
+    FI (Finansinspektionen) identify issuers by ISIN, not ticker, and an ISIN never
+    resolves on Yahoo -- pricing "BTC" as the Grayscale Bitcoin Mini Trust ETF, or a
+    German ISIN as whatever US ticker happens to share its characters, is exactly
+    the bug this function exists to avoid.
+    """
+    if crypto.is_crypto(ticker):
+        return crypto.yf_symbol(ticker)
+    if marketcap._looks_like_isin(ticker):
+        return None
+    suffix = marketcap.SOURCE_VENUE.get(source or "", "")
+    return (ticker if suffix else ticker.replace(".", "-")) + suffix
+
+
+def _yahoo_close(symbol: str) -> float | None:
+    """Isolated network seam so tests can monkeypatch just the HTTP call."""
     try:
         import yfinance as yf
-        hist = yf.Ticker(crypto.yf_symbol(ticker)).history(period="5d")["Close"].dropna()
+        hist = yf.Ticker(symbol).history(period="5d")["Close"].dropna()
     except Exception:
         return None
     return float(hist.iloc[-1]) if len(hist) else None
+
+
+def last_close(ticker: str, source: str | None = None) -> float | None:
+    """Most recent daily close from Yahoo for the listing `source` trades the
+    ticker on, or None (an ISIN, a delisting, no network)."""
+    symbol = yahoo_symbol(ticker, source)
+    return _yahoo_close(symbol) if symbol else None
 
 
 def _insider_sale(conn, pos: Position) -> str | None:
@@ -143,7 +176,7 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None) -> list[Close
         if pos.close_alerted_at:
             continue
         sale = _insider_sale(conn, pos)
-        price = price_fn(pos.ticker)
+        price = price_fn(pos.ticker, pos.source)
         if sale:
             alerts.append(CloseAlert(pos, "insider_sell", sale, price))
             continue

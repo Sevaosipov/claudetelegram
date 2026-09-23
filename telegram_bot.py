@@ -52,6 +52,7 @@ from pathlib import Path
 import requests
 
 import backtest
+import crypto
 import db
 import positions
 import research
@@ -109,7 +110,17 @@ def _extract_ticker(text: str) -> str | None:
 
 
 def _position_ticker(arg: str) -> str | None:
+    """A ticker positions.py can track, or None. Bare crypto symbols ("BTC") and
+    the "CRYPTO:BTC" form both map to this project's crypto ticker convention --
+    without this, /bought BTC would open a position in "BTC" the literal string,
+    which positions.last_close would then price as the Grayscale Bitcoin Mini
+    Trust ETF instead of the coin."""
     t = arg.strip().lstrip("$").upper()
+    if t.startswith(crypto.PREFIX):
+        sym = crypto.symbol_of(t)
+        return crypto.ticker(sym) if sym in crypto.SYMBOLS else None
+    if t in crypto.SYMBOLS:
+        return crypto.ticker(t)
     return t if (_TICKER_RE.match(t) or _ISIN_RE.match(t)) else None
 
 
@@ -133,28 +144,46 @@ def _handle_positions_command(conn, text: str) -> bool:
         telegram_notify.send_text(f"Позиция {ticker} закрыта." if pos
                                   else f"По {ticker} нет открытой позиции.")
         return True
-    price = None
+    user_price = None
     if len(parts) > 2:
         try:
-            price = float(parts[2].replace(",", "."))
+            user_price = float(parts[2].replace(",", "."))
         except ValueError:
             telegram_notify.send_text(POSITIONS_USAGE)
             return True
-        if not math.isfinite(price) or price <= 0:
+        if not math.isfinite(user_price) or user_price <= 0:
             telegram_notify.send_text(POSITIONS_USAGE)
             return True
-    price = price or positions.last_close(ticker)
+
+    source = "CRYPTO" if crypto.is_crypto(ticker) else None
+    market_price = positions.last_close(ticker, source)
+    note = ""
+    if user_price is not None:
+        if market_price and abs(user_price / market_price - 1) > 0.4:
+            symbol = positions.yahoo_symbol(ticker, source)
+            telegram_notify.send_text(
+                f"Цена {user_price:,.2f} сильно отличается от последнего закрытия "
+                f"{ticker} ({symbol}): {market_price:,.2f} — стоп-лосс будет считаться "
+                f"неверно. Проверьте тикер/цену.")
+            return True
+        if not market_price:
+            note = (" (стоп-лосс не отслеживается для этого тикера — только "
+                    "инсайдерские продажи и 90-дн. срок)")
+        price = user_price
+    else:
+        price = market_price
     if not price:
         telegram_notify.send_text(f"Не нашёл цену {ticker} — укажите её: /bought {ticker} 12.34")
         return True
     try:
-        pos = positions.open_position(conn, ticker, price)
+        pos = positions.open_position(conn, ticker, price, source=source)
     except ValueError:
         telegram_notify.send_text(f"Позиция {ticker} уже открыта. /sold {ticker}, чтобы закрыть.")
         return True
-    who = (f"слежу за продажами: {', '.join(pos.insiders)}" if pos.insiders
+    insiders = ", ".join(telegram_notify._esc(n) for n in pos.insiders)
+    who = (f"слежу за продажами: {insiders}" if pos.insiders
            else "сильного сигнала по нему не было — слежу только за сроком и стоп-лоссом")
-    telegram_notify.send_text(f"Записал {ticker} по {price:,.2f}; {who}.")
+    telegram_notify.send_text(f"Записал {ticker} по {price:,.2f}; {who}{note}.")
     return True
 
 

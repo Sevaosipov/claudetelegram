@@ -45,5 +45,5 @@ def test_plain_text_has_no_html_tags():
 
 
 def test_positions_show_return_and_days():
-    text = telegram_notify.format_positions([_pos(entry=100.0)], lambda t: 112.0)
+    text = telegram_notify.format_positions([_pos(entry=100.0)], lambda t, s: 112.0)
     assert "AAA" in text and "+12.0%" in text

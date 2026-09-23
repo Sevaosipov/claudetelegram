@@ -609,7 +609,7 @@ def format_positions(positions: list, price_fn) -> str:
     today = dt.date.today()
     lines = ["Открытые позиции:"]
     for p in positions:
-        price = price_fn(p.ticker)
+        price = price_fn(p.ticker, p.source)
         change = f"{(price / p.entry_price - 1) * 100:+.1f}%" if price else "цена недоступна"
         days = (today - dt.date.fromisoformat(p.opened_at)).days
         lines.append(f"• {p.ticker}: вход {p.entry_price:,.2f}, сейчас "

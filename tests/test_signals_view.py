@@ -155,7 +155,7 @@ def _shown(capsys) -> str:
 
 @pytest.fixture
 def no_prices(monkeypatch):
-    monkeypatch.setattr("positions.last_close", lambda ticker: None)
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: None)
 
 
 def test_view_keeps_recent_buyable_stocks_and_crypto(conn, keyed, scored, no_prices, capsys,
@@ -196,7 +196,7 @@ def test_view_without_a_key_says_so_and_keeps_stocks(conn, scored, no_prices, ca
 def test_view_lists_open_positions(conn, keyed, scored, capsys, monkeypatch):
     import positions
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
-    monkeypatch.setattr("positions.last_close", lambda ticker: 110.0)
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 110.0)
     positions.open_position(conn, "AAPL", 100.0)
     menu.show_signals(conn)
     assert "Открытые позиции" in _shown(capsys)
