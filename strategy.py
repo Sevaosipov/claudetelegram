@@ -25,6 +25,7 @@ FLOOR_MIN_MCAP_EUR = 300e6
 FLOOR_MIN_ADV_EUR = 1e6
 STRONG_MIN_INSIDERS = 3             # rule (a)
 TOP_EXEC_MIN_INSIDERS = 2           # rule (b)
+TOP_EXEC_MIN_EUR = 250_000          # rule (b)
 CONVICTION_MIN_EUR = 250_000        # rule (c)
 CONVICTION_MIN_INCREASE_PCT = 10.0  # rule (c)
 MAX_CANDIDATES = 10
@@ -85,8 +86,10 @@ def _stock_tier(sig) -> Tiered | None:
     rules = []
     if len(insiders) >= STRONG_MIN_INSIDERS:
         rules.append(f"{len(insiders)} инсайдера(ов) из руководства")
-    if len(insiders) >= TOP_EXEC_MIN_INSIDERS and tops:
-        rules.append(f"{_ROLE_LABEL[tops[0].role]} среди покупателей")
+    big_tops = [b for b in tops if b.total_eur >= TOP_EXEC_MIN_EUR]
+    if len(insiders) >= TOP_EXEC_MIN_INSIDERS and big_tops:
+        top = big_tops[0]
+        rules.append(f"{_ROLE_LABEL[top.role]} среди покупателей (€{_short(top.total_eur)})")
     for b in insiders:
         if (b.role in ("ceo", "cfo") and b.total_eur >= CONVICTION_MIN_EUR
                 and (b.increase_pct or 0) >= CONVICTION_MIN_INCREASE_PCT):

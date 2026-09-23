@@ -38,7 +38,9 @@ inflows). Exit signals and crypto outflows never appear as buy signals.
 - Size and liquidity known and above the floors.
 - At least one of:
   - **(a) Broad cluster**: ≥ 3 distinct buyers with insider roles in the window.
-  - **(b) Top-exec cluster**: ≥ 2 insiders, one of them CEO, CFO or Chair.
+  - **(b) Top-exec cluster**: ≥ 2 insiders, including a CEO, CFO or Chair who
+    bought ≥ €250k themselves (`TOP_EXEC_MIN_EUR`) -- their presence in the
+    cluster alone isn't enough.
   - **(c) Top-exec conviction**: one CEO or CFO buying ≥ €250k that grows their
     holding by ≥ 10% (`position_increase_pct`).
 

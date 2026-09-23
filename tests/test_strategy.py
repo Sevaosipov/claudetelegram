@@ -61,11 +61,22 @@ def test_rule_a_three_insiders_is_strong(conn, sized):
     assert strong == {"AAA"}
 
 
-def test_rule_b_two_insiders_with_the_ceo_is_strong(conn, sized):
-    _buy(conn, "AAA", "Boss", officer=1, director=0, title="Chief Executive Officer")
+def test_rule_b_two_insiders_with_a_250k_ceo_is_strong(conn, sized):
+    # $350,000 -> ~€301,700 at the offline fallback FX rate, above TOP_EXEC_MIN_EUR.
+    _buy(conn, "AAA", "Boss", usd=350_000, officer=1, director=0, title="Chief Executive Officer")
     _buy(conn, "AAA", "Board")
     [t] = _select(conn).strong
     assert any("CEO" in m for m in t.met)
+
+
+def test_rule_b_ceo_below_top_exec_min_is_only_a_candidate(conn, sized):
+    """Two insiders including a CEO used to be enough for rule (b) regardless of
+    how much the CEO actually bought -- the user asked for a real conviction
+    purchase (>= TOP_EXEC_MIN_EUR), not just the CEO's presence in the cluster."""
+    _buy(conn, "AAA", "Boss", officer=1, director=0, title="Chief Executive Officer")  # ~€100k
+    _buy(conn, "AAA", "Board")
+    sel = _select(conn)
+    assert _tiers(sel) == (set(), {"AAA"}) and sel.candidates[0].missed
 
 
 def test_two_directors_without_a_top_exec_is_a_candidate(conn, sized):
