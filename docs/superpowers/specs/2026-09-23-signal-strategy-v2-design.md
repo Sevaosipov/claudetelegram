@@ -117,8 +117,7 @@ The alert names the trigger. The position is marked `close_alerted` and closes o
 on `/sold`, so the user stays in control. Parameters are `EXIT_*` constants in
 `positions.py`: `EXIT_MAX_DAYS = 90`, `EXIT_STOP_LOSS_PCT = 15`.
 
-Table `positions`: `id, ticker, source, opened_at, entry_price, currency,
-insiders (JSON), signal_id (the `signal_journal` row of the Сильный signal it came from,
+Table `positions`: `id, ticker, source, opened_at, entry_price, insiders (JSON), signal_id (the `signal_journal` row of the Сильный signal it came from,
 or NULL), closed_at, close_reason, close_alerted_at`.
 
 ## Components
