@@ -156,3 +156,10 @@ def test_positions_lists_open_positions(conn, replies):
     tb._handle_message(conn, "/bought GRAB 40")
     tb._handle_message(conn, "/positions")
     assert "GRAB" in replies[-1] and "+25.0%" in replies[-1]
+
+
+@pytest.mark.parametrize("non_finite", ["nan", "inf", "-inf"])
+def test_bought_with_non_finite_price_stores_nothing(conn, replies, non_finite):
+    import positions
+    tb._handle_message(conn, f"/bought GRAB {non_finite}")
+    assert positions.open_positions(conn) == [] and "/bought" in replies[-1]

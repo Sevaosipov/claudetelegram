@@ -41,6 +41,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import subprocess
@@ -113,7 +114,7 @@ def _position_ticker(arg: str) -> str | None:
 
 
 def _handle_positions_command(conn, text: str) -> bool:
-    """/bought, /sold, /positions -- the positions positions.py tracks for close
+    """/bought, /sold, /positions -- the positions that positions.py tracks for close
     alerts. Returns False for anything else."""
     parts = text.split()
     cmd = parts[0].lower().split("@")[0] if parts else ""
@@ -139,7 +140,7 @@ def _handle_positions_command(conn, text: str) -> bool:
         except ValueError:
             telegram_notify.send_text(POSITIONS_USAGE)
             return True
-        if price <= 0:
+        if not math.isfinite(price) or price <= 0:
             telegram_notify.send_text(POSITIONS_USAGE)
             return True
     price = price or positions.last_close(ticker)
