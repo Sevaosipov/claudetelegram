@@ -56,12 +56,15 @@ warnings.filterwarnings("ignore")
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 import annual_report
+import assets
 import cluster
 import db
 import datefmt
 import fx
 import marketcap
 import opinion
+import outlook
+import sources
 import termstyle
 import tradingview
 
@@ -70,7 +73,6 @@ DB_PATH = BASE_DIR / "data" / "disclosures.db"
 
 BENCHMARK = "SPY"
 PRICE_WINDOWS = ((21, "1 month"), (63, "3 months"), (126, "6 months"), (252, "1 year"))
-NEWS_LIMIT = 8
 FILINGS_LIMIT = 8
 
 # Form types worth surfacing in a company's own filing history. Everything else
@@ -222,7 +224,7 @@ def price_context(ticker: str) -> dict:
     """
     import yfinance as yf
     try:
-        hist = yf.Ticker(ticker.replace(".", "-")).history(period="2y")["Close"].dropna()
+        hist = yf.Ticker(ticker).history(period="2y")["Close"].dropna()
         bench = yf.Ticker(BENCHMARK).history(period="2y")["Close"].dropna()
     except Exception:
         return {"windows": [], "current": None}
@@ -308,7 +310,7 @@ def _fetch_analyst_data(ticker: str) -> dict:
     analyst fields are the stalest of the lot.
     """
     import yfinance as yf
-    t = yf.Ticker(ticker.replace(".", "-"))
+    t = yf.Ticker(ticker)
     out = {"price_targets": {}, "recommendations": [], "upgrades_downgrades": []}
     try:
         pt = t.analyst_price_targets or {}
@@ -432,30 +434,6 @@ def _format_analyst(view: dict) -> str:
         L.append(f"    {a['date']}  {a['firm']}{grade}")
     L.append("  Это то, что публикует sell-side, а не прогноз этого бота.")
     return "\n".join(L)
-
-
-def recent_news(ticker: str) -> list:
-    """Recent headlines. Publisher is kept and shown: this feed mixes wire services
-    with message-board-adjacent sites, and the difference matters to a reader."""
-    import yfinance as yf
-    try:
-        items = yf.Ticker(ticker.replace(".", "-")).news or []
-    except Exception:
-        return []
-    out = []
-    for item in items[:NEWS_LIMIT]:
-        content = item.get("content", item)
-        provider = content.get("provider")
-        publisher = (provider.get("displayName") if isinstance(provider, dict)
-                     else content.get("publisher")) or "?"
-        url = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
-        out.append({
-            "title": content.get("title") or "",
-            "publisher": publisher,
-            "published": (content.get("pubDate") or "")[:10],
-            "url": url.get("url") if isinstance(url, dict) else (url or ""),
-        })
-    return out
 
 
 # ------------------------------------------------------- financial snapshot
@@ -718,8 +696,8 @@ def _format_earnings(data: dict) -> str:
 
 
 # ------------------------------------------------------------------ assembly
-def build(conn, ticker: str) -> dict:
-    ticker = ticker.strip().upper()
+def _build_stock(conn, asset) -> dict:
+    ticker = asset.symbol
     import cik_map
 
     # An ISIN is how BaFin and Finansinspektionen name an issuer, and it is a
@@ -727,7 +705,7 @@ def build(conn, ticker: str) -> dict:
     # price series for one anyway, and there is no way to confirm the series belongs
     # to the issuer being asked about -- so price, news and SEC filings are skipped
     # rather than shown with a silent chance of describing a different company.
-    is_isin = marketcap._looks_like_isin(ticker)
+    is_isin = asset.is_isin
 
     try:
         cik = None if is_isin else cik_map.CikMap().cik(ticker)
@@ -735,13 +713,18 @@ def build(conn, ticker: str) -> dict:
         cik = None
 
     european = european_activity(conn, ticker)
-    prices = {"windows": [], "current": None} if is_isin else price_context(ticker)
-    analyst = (None if is_isin
-               else analyst_view(_fetch_analyst_data(ticker), prices.get("current")))
+    prices = {"windows": [], "current": None} if is_isin else price_context(asset.yahoo)
+    source_notes = {}
+    if prices.get("current") is None and not is_isin:
+        prices["current"], source_notes["prices"] = sources.current_price(asset)
+    analyst = None
+    if not is_isin:
+        raw, source_notes["analyst"] = _analyst_raw(asset)
+        analyst = analyst_view(raw, prices.get("current")) if raw else None
     filings_result = recent_filings(ticker, cik) if not is_isin else []
 
     # TradingView resolves ISINs, so it runs either way. The rest are US-ticker only.
-    tv = tradingview.analyze(tradingview.fetch_snapshot(ticker))
+    tv, source_notes["indicators"] = sources.indicators(asset)
     if is_isin:
         fin = dilution = own = short = earnings = annual = None
     else:
@@ -768,6 +751,10 @@ def build(conn, ticker: str) -> dict:
             (ticker, ticker),
         ).fetchone()
         sec_name = sec_name[0] if sec_name else None
+
+    headlines = None
+    if not is_isin:   # news is skipped for an ISIN on purpose, not unavailable
+        headlines, source_notes["news"] = sources.news(asset, sec_name)
 
     rep = {
         "ticker": ticker,
@@ -796,15 +783,100 @@ def build(conn, ticker: str) -> dict:
         "short": short,
         "earnings": earnings,
         "filings": filings,
-        "news": [] if is_isin else recent_news(ticker),
+        "news": headlines or [],
+        "kind": "stock",
+        "asset": asset,
+        "outlook": outlook.lookup(conn, asset),
+        "sources": source_notes,
     }
     rep["opinion"] = opinion.score(rep)
     if rep["opinion"]:
         db.journal_opinion(conn, ticker, rep["opinion"])
+    # News is deliberately excluded: Google News returns results for almost any
+    # query, including a made-up ticker, so it is no evidence the symbol is real.
+    rep["found"] = bool(prices.get("current") is not None or rep["insiders"]["buys"]
+                        or rep["insiders"]["sells"] or european or rep["stakes"]
+                        or rep["political"] or rep["tradingview"]
+                        or rep["analyst"] or rep["financials"])
     return rep
 
 
+def _analyst_raw(asset):
+    """Yahoo's analyst data, falling back to Nasdaq's consensus (US listings only)."""
+    def yahoo():
+        raw = _fetch_analyst_data(asset.yahoo)
+        return raw if (raw["price_targets"] or raw["recommendations"]) else None
+    attempts = [("Yahoo", yahoo)]
+    if not asset.exchange:
+        attempts.append(("Nasdaq", lambda: sources.nasdaq_analyst(asset.symbol)))
+    return sources.first_available(attempts)
+
+
+class NotATicker(ValueError):
+    """What the user typed isn't shaped like a ticker at all -- the one error the
+    terminal entry points answer with the lookup hint."""
+
+
+def build(conn, text: str) -> dict:
+    """Dossier for any stock, ETF, coin or ISIN (see assets.resolve). Raises
+    NotATicker when `text` isn't shaped like a ticker at all."""
+    asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn),
+                           stocks=sources.stock_universe_symbols)
+    if asset is None:
+        raise NotATicker(f"not a ticker: {text!r}")
+    if asset.kind == "crypto":
+        import crypto_research
+        return crypto_research.build(conn, asset)
+    return _build_stock(conn, asset)
+
+
+# key -> (label, the chain's first source, what an empty chain means). No analyst
+# coverage looks the same as an outage, so an empty analyst chain reads "нет данных".
+_SOURCE_CHAINS = {"prices": ("цены", "Yahoo", "недоступно сейчас"),
+                  "analyst": ("аналитики", "Yahoo", "нет данных"),
+                  "indicators": ("индикаторы", "TradingView", "недоступно сейчас"),
+                  "news": ("новости", "Yahoo", "недоступно сейчас")}
+
+
+def _source_notes(rep: dict) -> list[str]:
+    """Only chains present in rep["sources"]: "prices" is set only when price_context
+    (Yahoo) failed, and an ISIN skips analysts and news on purpose."""
+    used = rep.get("sources") or {}
+    notes = [sources.source_note(label, used[k], first, empty)
+             for k, (label, first, empty) in _SOURCE_CHAINS.items() if k in used]
+    return [n for n in notes if n]
+
+
+_NOT_FOUND_HINT = "Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета)."
+
+
+def format_brief(rep: dict) -> str:
+    """What run_claude_analysis.sh hands Claude: the asset, the deterministic parts
+    and the headlines."""
+    if rep.get("kind") == "crypto":
+        import crypto_research
+        return crypto_research.format_brief(rep)
+    L = [f"АКТИВ: {rep['ticker']} (акция" + (f", {rep['name']}" if rep.get("name") else "") + ")"]
+    if rep.get("opinion"):
+        L.append(opinion.format_opinion(rep["opinion"]).strip())
+    entry_target = format_entry_target(rep)
+    if entry_target:
+        L.append(entry_target)
+    L.append(outlook.format_outlook(rep["outlook"], rep["ticker"]))
+    notes = _source_notes(rep)
+    if notes:
+        L.append("Источники: " + " · ".join(notes))
+    L.append("---NEWS---")
+    L += [f"{n['published']} [{n['publisher']}] {n['title']}" for n in rep["news"]]
+    return "\n".join(L)
+
+
 def format_report(rep: dict) -> str:
+    if rep.get("kind") == "crypto":
+        import crypto_research
+        return crypto_research.format_report(rep)
+    if not rep.get("found", True):
+        return f"Не нашёл такой тикер: {rep['ticker']}\n{_NOT_FOUND_HINT}"
     t = rep["ticker"]
     title = t + (f" — {rep['name']}" if rep["name"] else "")
     L = ["\n" + termstyle.header(title)]
@@ -829,6 +901,9 @@ def format_report(rep: dict) -> str:
     if entry_target:
         L.append("  " + entry_target)
 
+    if rep.get("outlook"):
+        L.append("\n" + outlook.format_outlook(rep["outlook"], t))
+
     if rep.get("is_isin"):
         L.append("\n  ISIN, а не тикер: цена, новости, отчётность SEC, финансы, владение,"
                  "\n  шорт и даты отчётов пропущены — сопоставить ISIN с торговым символом"
@@ -842,6 +917,9 @@ def format_report(rep: dict) -> str:
         for p in windows:
             rel = f"  ({p['excess']:+.1f} п.п. к {BENCHMARK})" if p["excess"] is not None else ""
             L.append(f"  {p['label']:10} {p['return']:+7.1f}%{rel}")
+    elif (rep.get("sources") or {}).get("prices", "x") is None and not rep.get("is_isin"):
+        L.append("\n" + termstyle.section("Цена"))    # the whole price chain failed
+        L.append("  недоступно сейчас")
 
     if rep.get("analyst"):
         L.append(_format_analyst(rep["analyst"]))
@@ -922,11 +1000,15 @@ def format_report(rep: dict) -> str:
             L.append(f"      {f['url']}")
 
     if rep["news"]:
-        L.append("\n" + termstyle.section("Новости (агрегатор Yahoo Finance)"))
+        L.append("\n" + termstyle.section("Новости"))
         for n in rep["news"]:
             L.append(f"  {n['published']}  [{n['publisher']}]  {n['title'][:70]}")
             if n["url"]:
                 L.append(f"      {n['url']}")
+
+    notes = _source_notes(rep)
+    if notes:
+        L.append("\n  Источники: " + " · ".join(notes))
 
     L.append("\n" + "-" * 72)
     if rep.get("opinion"):
@@ -942,10 +1024,14 @@ def format_report(rep: dict) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("ticker", help="ticker to research, e.g. INBX")
+    ap.add_argument("ticker", help="ticker, coin or ISIN, e.g. NVDA, BTC, EQNR.OL, $BTC")
     args = ap.parse_args()
     conn = db.connect(DB_PATH)
-    print(format_report(build(conn, args.ticker)))
+    try:
+        print(format_report(build(conn, args.ticker)))
+    except NotATicker:
+        print("Не похоже на тикер. Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета).")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

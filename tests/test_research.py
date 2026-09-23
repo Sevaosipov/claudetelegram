@@ -12,8 +12,15 @@ import pytest
 import db
 import opinion
 import research
+import tradingview
 from conftest import (add_bafin_txn, add_sec_purchase, add_sec_sale, add_stake,
                       add_sweden_txn)
+
+
+@pytest.fixture(autouse=True)
+def _no_tradingview(monkeypatch):
+    """TradingView resolves ISINs, so even the ISIN builds below would ask its scanner."""
+    monkeypatch.setattr(tradingview, "fetch_snapshot", lambda query, session=None: None)
 
 
 def test_insider_activity_returns_buys_and_sells(conn):
@@ -346,7 +353,7 @@ def test_new_sections_absent_from_isin_report(conn):
     assert "tradingview" in rep
 
 
-def test_build_includes_annual_report_for_a_us_ticker(conn, monkeypatch):
+def test_build_includes_annual_report_for_a_us_ticker(conn, offline_stock, monkeypatch):
     monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: {"marker": True})
     rep = research.build(conn, "AAPL")
     assert rep["annual_report"] == {"marker": True}
@@ -360,7 +367,7 @@ def test_build_skips_annual_report_for_an_isin(conn, monkeypatch):
     assert rep["annual_report"] is None
 
 
-def test_format_report_includes_the_annual_report_section_when_present(conn, monkeypatch):
+def test_format_report_includes_the_annual_report_section_when_present(conn, offline_stock, monkeypatch):
     monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: {"marker": True})
     monkeypatch.setattr(research.annual_report, "format_report",
                         lambda rep: "ANNUAL-REPORT-MARKER-TEXT" if rep else "")
@@ -368,7 +375,7 @@ def test_format_report_includes_the_annual_report_section_when_present(conn, mon
     assert "ANNUAL-REPORT-MARKER-TEXT" in text
 
 
-def test_format_report_omits_the_annual_report_section_when_absent(conn, monkeypatch):
+def test_format_report_omits_the_annual_report_section_when_absent(conn, offline_stock, monkeypatch):
     monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: None)
     text = research.format_report(research.build(conn, "AAPL"))
     assert "ANNUAL-REPORT-MARKER-TEXT" not in text
@@ -399,7 +406,7 @@ def test_corroboration_summary_excludes_aged_out_sources_from_recent(conn):
     assert summary["recent_sources"] == ["SEC"]
 
 
-def test_format_report_shows_the_corroboration_summary_when_present(conn, monkeypatch):
+def test_format_report_shows_the_corroboration_summary_when_present(conn, offline_stock, monkeypatch):
     db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
     monkeypatch.setattr(research, "corroboration_summary",
                         lambda conn, ticker: {"all_sources": ["SEC", "SENATE"],
@@ -410,7 +417,7 @@ def test_format_report_shows_the_corroboration_summary_when_present(conn, monkey
     assert "за последние" not in text
 
 
-def test_format_report_omits_the_corroboration_summary_when_absent(conn, monkeypatch):
+def test_format_report_omits_the_corroboration_summary_when_absent(conn, offline_stock, monkeypatch):
     db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
     monkeypatch.setattr(research, "corroboration_summary", lambda conn, ticker: None)
     text = research.format_report(research.build(conn, "AAPL"))
@@ -418,7 +425,7 @@ def test_format_report_omits_the_corroboration_summary_when_absent(conn, monkeyp
     assert "Сигналы, которые бот уже присылал" in text
 
 
-def test_format_report_shows_recent_sources_subline_when_differs(conn, monkeypatch):
+def test_format_report_shows_recent_sources_subline_when_differs(conn, offline_stock, monkeypatch):
     """When recent_sources != all_sources, the '(за последние N дней: ...)'
     sub-line must appear with the recent sources list."""
     db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAPL"})
@@ -432,7 +439,7 @@ def test_format_report_shows_recent_sources_subline_when_differs(conn, monkeypat
     assert "за последние 30 дней: SEC, SENATE" in text
 
 
-def test_corroboration_line_never_renders_a_verdict(conn, monkeypatch):
+def test_corroboration_line_never_renders_a_verdict(conn, offline_stock, monkeypatch):
     """The dossier's corroboration line says only "another source had activity
     here" -- same discipline as test_report_never_renders_a_verdict above, but
     for the corroboration line specifically (the design spec's Testing section
@@ -481,3 +488,175 @@ def test_format_entry_target_price_only_when_no_analyst_coverage():
 def test_format_entry_target_empty_when_nothing_available():
     assert research.format_entry_target({"prices": {"current": None}, "analyst": None}) == ""
     assert research.format_entry_target({"prices": {}, "analyst": None}) == ""
+
+
+# ---------------------------------------------------- any-asset lookup (plan Task 7)
+import assets  # noqa: E402
+import sources  # noqa: E402
+
+
+@pytest.fixture
+def offline_stock(monkeypatch):
+    """Every network step of a stock build stubbed out."""
+    import cik_map
+    import crypto_research
+
+    class _Cik:
+        def cik(self, ticker):
+            return None
+    monkeypatch.setattr(cik_map, "CikMap", _Cik)
+    monkeypatch.setattr(research, "price_context", lambda t: {"windows": [], "current": None})
+    monkeypatch.setattr(research, "_fetch_analyst_data", lambda t: {
+        "price_targets": {}, "recommendations": [], "upgrades_downgrades": []})
+    monkeypatch.setattr(research, "recent_filings", lambda t, cik: [])
+    monkeypatch.setattr(research, "_yf_info", lambda t: {})
+    for fn in ("financials", "ownership", "short_interest", "earnings_calendar"):
+        monkeypatch.setattr(research, fn, lambda *a: None)
+    monkeypatch.setattr(research, "share_count_history", lambda cik: None)
+    monkeypatch.setattr(research.annual_report, "build", lambda cik, session=None: None)
+    monkeypatch.setattr(research.marketcap, "facts", lambda conn, t, source=None: {})
+    monkeypatch.setattr(research.marketcap, "market_cap_eur", lambda conn, t, source=None: None)
+    monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "DASH"})
+    monkeypatch.setattr(sources, "stock_universe_symbols", lambda: set())
+    monkeypatch.setattr(sources, "current_price", lambda a: (123.0, "TradingView"))
+    monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, None))
+    monkeypatch.setattr(sources, "news", lambda a, name=None: (
+        [{"title": "Head", "publisher": "Google News", "published": "2026-09-22", "url": "u"}],
+        "Google News"))
+    monkeypatch.setattr(sources, "nasdaq_analyst", lambda s: {
+        "price_targets": {"mean": 150.0}, "recommendations": [
+            {"strongBuy": 0, "buy": 10, "hold": 2, "sell": 0, "strongSell": 0}],
+        "upgrades_downgrades": []})
+    monkeypatch.setattr(research.outlook, "lookup", lambda conn, a: {"status": "no_table"})
+    monkeypatch.setattr(crypto_research, "build", lambda conn, a: {"kind": "crypto", "ticker": a.symbol})
+
+
+def test_build_dispatches_crypto_to_the_crypto_dossier(conn, offline_stock):
+    assert research.build(conn, "BTC") == {"kind": "crypto", "ticker": "BTC"}
+
+
+def test_build_resolves_a_stock_universe_clash_to_the_stock(conn, offline_stock, monkeypatch):
+    assert research.build(conn, "DASH")["kind"] == "crypto"
+    monkeypatch.setattr(sources, "stock_universe_symbols", lambda: {"DASH"})
+    rep = research.build(conn, "DASH")
+    assert rep["kind"] == "stock" and rep["ticker"] == "DASH"
+
+
+def test_build_rejects_text_that_is_not_a_ticker(conn, offline_stock):
+    with pytest.raises(ValueError):
+        research.build(conn, "!!!")
+
+
+def test_stock_build_uses_the_fallback_chains(conn, offline_stock):
+    rep = research.build(conn, "NVDA")
+    assert rep["kind"] == "stock" and rep["found"]
+    assert rep["prices"]["current"] == 123.0 and rep["sources"]["prices"] == "TradingView"
+    assert rep["analyst"]["target_mean"] == 150.0 and rep["sources"]["analyst"] == "Nasdaq"
+    assert rep["news"][0]["title"] == "Head" and rep["sources"]["news"] == "Google News"
+    assert rep["outlook"] == {"status": "no_table"}
+
+
+def test_stock_report_shows_the_outlook_and_the_sources(conn, offline_stock):
+    text = research.format_report(research.build(conn, "NVDA"))
+    assert "📈 Прогноз на месяц" in text
+    assert ("Источники: цены: TradingView (Yahoo недоступен) · аналитики: Nasdaq (Yahoo недоступен)"
+            " · индикаторы: недоступно сейчас · новости: Google News (Yahoo недоступен)") in text
+
+
+def test_stock_brief_names_a_fallback_source(conn, offline_stock):
+    brief = research.format_brief(research.build(conn, "NVDA")).splitlines()
+    notes = brief[brief.index("---NEWS---") - 1]
+    assert notes.startswith("Источники: ") and "аналитики: Nasdaq (Yahoo недоступен)" in notes
+
+
+def test_a_failed_price_chain_says_unavailable(conn, offline_stock, monkeypatch):
+    """Spec §4/§5: a section whose whole chain failed says so; the rest still arrives
+    (the Nasdaq analyst stub keeps the report "found")."""
+    monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    rep = research.build(conn, "NVDA")
+    report = research.format_report(rep)
+    assert "Цена" in report and "\n  недоступно сейчас" in report
+    assert "цены: недоступно сейчас" in report
+    assert "цены: недоступно сейчас" in research.format_brief(rep)
+
+
+def test_no_analyst_coverage_reads_as_no_data(conn, offline_stock, monkeypatch):
+    monkeypatch.setattr(sources, "nasdaq_analyst", lambda s: None)
+    assert "аналитики: нет данных" in research.format_report(research.build(conn, "NVDA"))
+
+
+def test_yahoo_served_sections_have_no_note(conn, offline_stock, monkeypatch):
+    monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, "TradingView"))
+    monkeypatch.setattr(sources, "news", lambda a, name=None: ([], "Yahoo"))
+    monkeypatch.setattr(research, "price_context", lambda t: {"windows": [], "current": 5.0})
+    rep = research.build(conn, "NVDA")
+    assert research._source_notes(rep) == ["аналитики: Nasdaq (Yahoo недоступен)"]
+
+
+def test_brief_for_a_stock(conn, offline_stock):
+    brief = research.format_brief(research.build(conn, "$NVDA"))
+    assert brief.startswith("АКТИВ: NVDA (акция)") and "📈 Прогноз на месяц" in brief
+    assert brief.index("---NEWS---") < brief.index("Head")
+
+
+def test_isin_build_still_works_offline(conn):
+    rep = research.build(conn, "DE0007190001")
+    assert rep["is_isin"] and rep["outlook"] == {"status": "no_prices"} and rep["news"] == []
+
+
+def test_format_report_shows_not_found_message_for_an_unrecognised_symbol(conn, offline_stock, monkeypatch):
+    """Ruling 1 (progress.md): a stock report with found == False must show the
+    lookup-hint reply instead of the empty dossier sections, in every entry point
+    that renders through format_report (menu.py's option 2 and `python research.py`
+    both call research.format_report -- neither is duplicated here). Applies the
+    same way to an ISIN report with found == False -- the check is on `found`,
+    not on `is_isin`.
+
+    Also drops analyst coverage (offline_stock's default Nasdaq stub has a
+    consensus target, which alone would make found True per the fix-round-1
+    ruling below) so this stays a genuine no-evidence-at-all case."""
+    monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    monkeypatch.setattr(sources, "nasdaq_analyst", lambda s: None)
+    rep = research.build(conn, "NVDA")
+    assert rep["found"] is False
+    text = research.format_report(rep)
+    assert text == f"Не нашёл такой тикер: NVDA\n{research._NOT_FOUND_HINT}"
+    assert "Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета)." in text
+    assert "Инсайдеры" not in text and "ISIN, а не тикер" not in text
+
+
+# ------------------------------------------------ found round 1 fix: analyst/financials
+#
+# Plan-mandated finding from the round-1 review: `found` was computed only from
+# prices/insiders/european/stakes/political/tradingview, ignoring `analyst` and
+# `financials`, which are fetched independently of the price chain. If the whole
+# price chain and indicators fail for a real, covered ticker with nothing in the
+# bot's own DB, the old formula discarded the analyst/financials data it did fetch
+# and showed the not-found reply anyway. News is deliberately NOT counted: Google
+# News returns results for almost any query, including a made-up ticker.
+
+def test_found_is_true_from_analyst_coverage_alone(conn, offline_stock, monkeypatch):
+    """Price chain and indicators both fail; offline_stock's default Nasdaq stub
+    still answers with a consensus target -- that alone must make found True, and
+    format_report must render the normal dossier, not the not-found reply."""
+    monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, None))
+    rep = research.build(conn, "NVDA")
+    assert rep["prices"]["current"] is None and rep["tradingview"] is None
+    assert rep["analyst"] is not None
+    assert rep["found"] is True
+    assert "Не нашёл такой тикер" not in research.format_report(rep)
+
+
+def test_found_is_false_without_price_analyst_or_financials(conn, offline_stock, monkeypatch):
+    """Converse: price chain, indicators AND analyst (Yahoo empty via offline_stock,
+    Nasdaq now stubbed to no-coverage too) all fail, financials is None (offline_stock
+    default) and nothing is in the bot's own DB -- found stays False and the
+    not-found reply still renders."""
+    monkeypatch.setattr(sources, "current_price", lambda a: (None, None))
+    monkeypatch.setattr(sources, "indicators", lambda a, closes=None: (None, None))
+    monkeypatch.setattr(sources, "nasdaq_analyst", lambda s: None)
+    rep = research.build(conn, "NVDA")
+    assert rep["analyst"] is None and rep["financials"] is None
+    assert rep["found"] is False
+    assert "Не нашёл такой тикер: NVDA" in research.format_report(rep)

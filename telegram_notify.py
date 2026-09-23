@@ -225,6 +225,10 @@ def format_condensed(rep: dict) -> str:
     same rule the disclosure-signal formatters above follow, and the reason
     format_sec_line & co. (print-only, never sent to Telegram) don't need to.
     """
+    if rep.get("kind") == "crypto":
+        import crypto_research
+        return crypto_research.format_condensed(rep)
+
     import opinion
     import research
     import tradingview
@@ -237,6 +241,10 @@ def format_condensed(rep: dict) -> str:
     entry_target = research.format_entry_target(rep)
     if entry_target:
         L.append(entry_target)
+
+    if rep.get("outlook"):
+        import outlook
+        L.append(_esc(outlook.format_outlook(rep["outlook"], t)))
 
     buys, sells = rep["insiders"]["buys"], rep["insiders"]["sells"]
     if buys or sells:
@@ -268,7 +276,14 @@ def format_condensed(rep: dict) -> str:
         # filer-supplied free text -- safe to embed unescaped.
         L.append(tradingview.format_view(rep["tradingview"]))
 
-    L.append(f"\nПолный отчёт: python research.py {_esc(t)}")
+    notes = research._source_notes(rep)
+    if notes:
+        L.append("\nИсточники: " + _esc(" · ".join(notes)))
+
+    # The resolved key, quoted: a bare "BTC" would open the coin's report, not the
+    # $BTC stock's, and an unquoted "$BTC" would be expanded away by the shell.
+    key = rep["asset"].key if "asset" in rep else t
+    L.append(f"\nПолный отчёт: python research.py '{_esc(key)}'")
     return "\n".join(L)
 
 

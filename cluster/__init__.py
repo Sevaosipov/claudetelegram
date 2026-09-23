@@ -121,6 +121,7 @@ from .scoring import (  # noqa: F401
 from .crypto import (  # noqa: F401
     CryptoSignal,
     commit_crypto_alert,
+    daily_etf_flows,
     find_etf_flow_signals,
     find_onchain_signals,
     find_treasury_signals,

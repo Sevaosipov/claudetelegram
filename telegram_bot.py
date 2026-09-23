@@ -56,11 +56,13 @@ from pathlib import Path
 
 import requests
 
+import assets
 import backtest
 import crypto
 import db
 import positions
 import research
+import sources
 import telegram_notify
 
 BASE_DIR = Path(__file__).parent
@@ -80,12 +82,16 @@ POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупк�
                    "/sold TICKER — отметить продажу\n"
                    "/positions — открытые позиции")
 
+LOOKUP_HINT = ("Любой тикер или монета: NVDA, BTC, SOL, EQNR.OL, VOLV-B.ST. "
+               "$BTC — акция с таким тикером, BTC-USD — монета.")
+
 HELP_TEXT = ("Пришлите тикер (например, AAPL) — через ~30-90 сек придёт один "
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
              "что-то значить на уровне одного тикера).\n"
-             + POSITIONS_USAGE)
+             + POSITIONS_USAGE
+             + "\n" + LOOKUP_HINT)
 
 
 def _get_updates(token: str, offset: int | None, session: requests.Session) -> list:
@@ -219,11 +225,20 @@ def _handle_message(conn, text: str) -> None:
     if not text or text.startswith("/"):
         telegram_notify.send_text(HELP_TEXT)
         return
-    ticker = _extract_ticker(text)
-    if not ticker:
-        telegram_notify.send_text(
-            f"Не похоже на тикер: {text[:40]!r}. " + HELP_TEXT)
+    asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn),
+                           stocks=sources.stock_universe_symbols)
+    if asset is None:
+        telegram_notify.send_text(f"Не похоже на тикер: {telegram_notify._esc(text[:40])}. "
+                                  + LOOKUP_HINT)
         return
+    # Spec §1.6: an unrecognised symbol is not queued. A coin in the coin list is known
+    # to exist; anything else (a stock, CRYPTO:FOO, FOO-USD) needs a price somewhere.
+    listed_coin = asset.kind == "crypto" and asset.symbol in sources.cached_coin_symbols(conn)
+    if not asset.is_isin and not listed_coin and sources.current_price(asset)[0] is None:
+        telegram_notify.send_text(f"Не нашёл такой тикер: {telegram_notify._esc(asset.symbol)} "
+                                  "(или источники цен сейчас не отвечают). " + LOOKUP_HINT)
+        return
+    ticker = asset.key
     db.enqueue_analysis(conn, ticker)
     print(f"[telegram_bot] queued {ticker}, running claude-analysis synchronously")
     try:

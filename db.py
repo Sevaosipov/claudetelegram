@@ -457,6 +457,41 @@ CREATE TABLE IF NOT EXISTS positions (
     close_reason      TEXT,
     close_alerted_at  TEXT
 );
+
+-- The ~250 largest coins by market cap (sources.cached_coins), refreshed daily:
+-- how the resolver recognises "PEPE" as a coin.
+CREATE TABLE IF NOT EXISTS coin_list (
+    symbol   TEXT PRIMARY KEY,
+    coin_id  TEXT,
+    name     TEXT,
+    rank     INTEGER
+);
+
+-- Daily closes for the outlook universes (outlook.py), keyed by Yahoo symbol.
+CREATE TABLE IF NOT EXISTS price_bars (
+    symbol  TEXT NOT NULL,
+    date    TEXT NOT NULL,
+    close   REAL NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
+
+-- One row per situation per table ("stock" / "crypto"): how often the price was
+-- higher a month later, and the walk-forward check of that number.
+CREATE TABLE IF NOT EXISTS outlook_table (
+    table_name      TEXT NOT NULL,
+    situation       TEXT NOT NULL,
+    n               INTEGER NOT NULL,
+    up              INTEGER NOT NULL,
+    base_rate       REAL,
+    oos_n           INTEGER NOT NULL,
+    oos_brier_s     REAL,
+    oos_brier_base  REAL,
+    oos_folds       INTEGER,        -- test years with this situation in them
+    oos_fold_wins   INTEGER,        -- of those, years it beat the base rate's Brier
+    assets          INTEGER,        -- how many assets the table was counted from
+    built_at        TEXT NOT NULL,
+    PRIMARY KEY (table_name, situation)
+);
 """
 
 
@@ -477,6 +512,9 @@ _ADDED_COLUMNS = [
     ("company_facts", "avg_daily_value", "REAL"),
     ("signal_journal", "corroborated_by", "TEXT"),
     ("signal_journal", "tier", "TEXT"),
+    ("outlook_table", "assets", "INTEGER"),
+    ("outlook_table", "oos_folds", "INTEGER"),
+    ("outlook_table", "oos_fold_wins", "INTEGER"),
 ]
 
 

@@ -9,18 +9,15 @@ Check the disclosure-bot Telegram analysis queue and process any pending tickers
    most 10 per run -- leave any remainder for the next scheduled pass), in
    order:
 
-   a. Get that ticker's opinion.py score/factors and recent news headlines:
+   a. Get that ticker's opinion.py score/factors, entry/target, outlook and recent
+      news headlines. The command looks the ticker up by its queue id -- never
+      paste the ticker text itself into a command:
       python3 -c "
-import db, research, opinion
+import db, research
 conn = db.connect('data/disclosures.db')
-rep = research.build(conn, '<TICKER>')
-print(opinion.format_opinion(rep['opinion']))
-print(research.format_entry_target(rep))
-print('---NEWS---')
-for n in rep['news']:
-    print(n['published'], '[' + n['publisher'] + ']', n['title'])
+print(research.format_brief(research.build(conn, dict(db.pending_analysis(conn))[<ID>])))
 "
-      (substitute the real ticker for <TICKER>)
+      (substitute the real numeric id from step 1's output for <ID>)
 
    b. Read the printed headlines yourself and reason about them -- this is
       the actual point of this scheduled pass: a real qualitative read of
@@ -34,12 +31,20 @@ for n in rep['news']:
       Follow this exactly, it's an established project convention:
         - Bullet points throughout. Never prose paragraphs, never a sentence
           where a few words suffice.
-        - Start with an HTML bold ticker header: <b>TICKER</b>
+        - Start with an HTML bold header of the symbol from the first line
+          (`АКТИВ: …`), e.g. <b>NVDA</b> or <b>BTC — Bitcoin</b>.
         - Include the opinion.py factor breakdown from step (a) verbatim.
         - Include the entry/target line from step (a) verbatim, if it printed
           one (current price as entry reference, real analyst consensus
           target as the hold-until reference -- both genuine sourced
           numbers, never invent a price level yourself).
+        - Include the `📈 Прогноз на месяц` block verbatim. Present it as a
+          historical frequency, never as a promise or your own forecast.
+        - For a coin (`криптовалюта` on the first line) there is no opinion
+          score. Include the price/trend lines and the bot's own lines
+          (🪙 🏦 🟢 ⛓) instead. End the coin message's bullets with the
+          `Нужна акция? Напишите …` line from step (a) verbatim, just before
+          the Итоговый вердикт line.
         - Below it, your own qualitative news bullets: 1-3 bullets MAX, only
           the headlines that actually matter -- skip noise entirely, and
           skip this section altogether if nothing in the news is notable.

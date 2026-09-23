@@ -136,6 +136,9 @@ def _daily_etf_flows(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
             for coin, days in per_day.items()}
 
 
+daily_etf_flows = _daily_etf_flows   # public name for the crypto dossier (crypto_research.py)
+
+
 def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
                           streak_days: int = ETF_STREAK_DAYS,
                           streak_min_usd: float = ETF_STREAK_MIN_USD,

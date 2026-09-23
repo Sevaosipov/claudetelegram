@@ -45,13 +45,18 @@ def show_signals(conn) -> None:
 
 
 def show_research(conn) -> None:
-    """Сводка по одному тикеру или ISIN. Намеренно без вердикта «покупать или
-    нет» — см. пояснение в конце самого отчёта и в research.py."""
-    key = input("Тикер или ISIN: ").strip().upper()
+    """Сводка по одному тикеру, монете или ISIN. Намеренно без вердикта «покупать
+    или нет» — см. пояснение в конце самого отчёта и в research.py."""
+    key = input("Тикер, монета или ISIN (NVDA, BTC, EQNR.OL, $BTC): ").strip().upper()
     if not key:
         return
     print("Собираю: база бота, цены, отчётность SEC, новости — может занять минуту...")
-    print(research.format_report(research.build(conn, key)))
+    try:
+        print(research.format_report(research.build(conn, key)))
+    except research.NotATicker:
+        print("Не похоже на тикер. Примеры: NVDA, BTC, EQNR.OL, $BTC (акция), BTC-USD (монета).")
+    except Exception as e:  # any other failure: say so, and keep the menu running
+        print(f"Ошибка: {type(e).__name__}: {e}")
 
 
 def main() -> None:
@@ -60,7 +65,7 @@ def main() -> None:
         print()
         print(termstyle.header("disclosure-bot"))
         print("1) Сигналы")
-        print("2) Досье по тикеру")
+        print("2) Досье по тикеру или монете")
         print("0) Выход")
         choice = input("Выбор: ").strip()
 
