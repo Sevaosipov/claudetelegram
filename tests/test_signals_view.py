@@ -208,10 +208,15 @@ def test_view_shows_exit_signals_even_when_already_alerted(conn, keyed, scored, 
     already sent must still show up here."""
     from conftest import add_sec_sale
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
+    # Relative to TODAY (well inside EXIT_LOOKBACK_MONTHS = 12 months on any run
+    # date) rather than hardcoded absolute dates, which age out of the lookback
+    # window over time and make this test silently vacuous.
+    bought = (TODAY - dt.timedelta(days=60)).isoformat()
+    sold = (TODAY - dt.timedelta(days=10)).isoformat()
     for i in range(2):
-        add_sec_purchase(conn, "AAPL", f"Buyer {i}", 200_000, "2026-01-10")
-    add_sec_sale(conn, "AAPL", "Buyer 0", 200_000, "2026-05-10")
-    add_sec_sale(conn, "AAPL", "Buyer 1", 200_000, "2026-05-10")
+        add_sec_purchase(conn, "AAPL", f"Buyer {i}", 200_000, bought)
+    add_sec_sale(conn, "AAPL", "Buyer 0", 200_000, sold)
+    add_sec_sale(conn, "AAPL", "Buyer 1", 200_000, sold)
     [exit_sig] = cluster.find_sec_exit_signals(conn)
     cluster.commit_exit_alert(conn, exit_sig)
     assert cluster.find_sec_exit_signals(conn) == []   # already alerted

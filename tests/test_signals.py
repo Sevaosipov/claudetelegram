@@ -822,10 +822,16 @@ def test_run_cluster_pass_includes_exit_signals(conn, monkeypatch):
     import trading212
     monkeypatch.setattr(trading212, "availability", lambda conn: None)
 
+    # Relative to TODAY, well inside EXIT_LOOKBACK_MONTHS (12 months) on any run
+    # date -- hardcoded absolute dates (e.g. "2026-01-10") age out of the
+    # lookback window and make this test (and the no-exit-signals one below)
+    # silently vacuous once enough real time has passed.
+    bought = (TODAY - dt.timedelta(days=60)).isoformat()
+    sold = (TODAY - dt.timedelta(days=10)).isoformat()
     for i in range(2):
-        add_sec_purchase(conn, "BBB", f"Buyer {i}", 200_000, "2026-01-10")
-    add_sec_sale(conn, "BBB", "Buyer 0", 200_000, "2026-05-10")
-    add_sec_sale(conn, "BBB", "Buyer 1", 200_000, "2026-05-10")
+        add_sec_purchase(conn, "BBB", f"Buyer {i}", 200_000, bought)
+    add_sec_sale(conn, "BBB", "Buyer 0", 200_000, sold)
+    add_sec_sale(conn, "BBB", "Buyer 1", 200_000, sold)
 
     args = bot.build_parser().parse_args(["--once", "--no-market-context"])
     selection = bot.run_cluster_pass(conn, args)
@@ -836,10 +842,12 @@ def test_run_cluster_pass_respects_no_exit_signals(conn, monkeypatch):
     import trading212
     monkeypatch.setattr(trading212, "availability", lambda conn: None)
 
+    bought = (TODAY - dt.timedelta(days=60)).isoformat()
+    sold = (TODAY - dt.timedelta(days=10)).isoformat()
     for i in range(2):
-        add_sec_purchase(conn, "BBB", f"Buyer {i}", 200_000, "2026-01-10")
-    add_sec_sale(conn, "BBB", "Buyer 0", 200_000, "2026-05-10")
-    add_sec_sale(conn, "BBB", "Buyer 1", 200_000, "2026-05-10")
+        add_sec_purchase(conn, "BBB", f"Buyer {i}", 200_000, bought)
+    add_sec_sale(conn, "BBB", "Buyer 0", 200_000, sold)
+    add_sec_sale(conn, "BBB", "Buyer 1", 200_000, sold)
 
     args = bot.build_parser().parse_args(["--once", "--no-market-context", "--no-exit-signals"])
     selection = bot.run_cluster_pass(conn, args)

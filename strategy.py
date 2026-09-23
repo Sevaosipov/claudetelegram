@@ -104,7 +104,17 @@ def _stock_tier(sig) -> Tiered | None:
     if not insiders:
         missed.append("покупатели не из руководства компании")
     elif not rules:
-        missed.append("нет 3+ инсайдеров, CEO/CFO/Chair в кластере или крупной покупки CEO/CFO")
+        if tops:
+            # A top exec is in the cluster but didn't clear rule (b)'s own bar --
+            # say so specifically, naming the biggest of them by amount, rather
+            # than the generic line below, which would otherwise read as "no
+            # CEO/CFO/Chair in the cluster" while one is right there in `met`.
+            biggest = max(tops, key=lambda b: b.total_eur)
+            missed.append(f"{_ROLE_LABEL[biggest.role]} купил только на "
+                          f"€{_short(biggest.total_eur)} (< €{_short(TOP_EXEC_MIN_EUR)})")
+        else:
+            missed.append("нет 3+ инсайдеров, CEO/CFO/Chair с покупкой от €250 тыс "
+                          "или крупной покупки CEO/CFO")
     tier = STRONG if (rules and size_known and not is_coin) else CANDIDATE
     return Tiered(sig, tier, met, missed)
 

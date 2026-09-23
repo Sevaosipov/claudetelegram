@@ -72,18 +72,24 @@ def test_rule_b_two_insiders_with_a_250k_ceo_is_strong(conn, sized):
 def test_rule_b_ceo_below_top_exec_min_is_only_a_candidate(conn, sized):
     """Two insiders including a CEO used to be enough for rule (b) regardless of
     how much the CEO actually bought -- the user asked for a real conviction
-    purchase (>= TOP_EXEC_MIN_EUR), not just the CEO's presence in the cluster."""
+    purchase (>= TOP_EXEC_MIN_EUR), not just the CEO's presence in the cluster.
+    The ✗ line must say so specifically -- not the generic "no CEO/CFO/Chair in
+    the cluster" line, which would be false here: the CEO IS in the cluster,
+    just under the euro bar."""
     _buy(conn, "AAA", "Boss", officer=1, director=0, title="Chief Executive Officer")  # ~€100k
     _buy(conn, "AAA", "Board")
     sel = _select(conn)
-    assert _tiers(sel) == (set(), {"AAA"}) and sel.candidates[0].missed
+    assert _tiers(sel) == (set(), {"AAA"})
+    assert sel.candidates[0].missed == ["CEO купил только на €100.0 тыс (< €250.0 тыс)"]
 
 
 def test_two_directors_without_a_top_exec_is_a_candidate(conn, sized):
     _buy(conn, "AAA", "Board One")
     _buy(conn, "AAA", "Board Two")
     sel = _select(conn)
-    assert _tiers(sel) == (set(), {"AAA"}) and sel.candidates[0].missed
+    assert _tiers(sel) == (set(), {"AAA"})
+    assert sel.candidates[0].missed == [
+        "нет 3+ инсайдеров, CEO/CFO/Chair с покупкой от €250 тыс или крупной покупки CEO/CFO"]
 
 
 def test_rule_c_ceo_conviction_buy_is_strong(conn, sized):
