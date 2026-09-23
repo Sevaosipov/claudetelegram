@@ -99,9 +99,30 @@ def test_rule_c_ceo_conviction_buy_is_strong(conn, sized):
 
 
 def test_small_ceo_buy_is_only_a_candidate(conn, sized):
+    """The lone CEO here clears TOP_EXEC_MIN_EUR (~€603.4k), so the ✗ line must
+    NOT claim they "only bought" too little -- that would be false. They fail
+    on insider COUNT (rule b) and on the increase_pct bar (rule c), not on
+    money, so the ✗ line has to name the actual gap, not the money one."""
     _buy(conn, "AAA", "Boss", usd=700_000, officer=1, director=0,
          title="Chief Executive Officer", shares=100, shares_owned_after=100_000)   # +0.1%
-    assert _tiers(_select(conn)) == (set(), {"AAA"})
+    sel = _select(conn)
+    assert _tiers(sel) == (set(), {"AAA"})
+    assert sel.candidates[0].missed == [
+        "один покупатель из руководства: нужно 2+ (с CEO/CFO/Chair от €250 тыс) "
+        "или рост позиции CEO/CFO от 10%"]
+
+
+def test_lone_chair_with_a_large_buy_is_only_a_candidate(conn, sized):
+    """A lone Chair buying a large amount clears TOP_EXEC_MIN_EUR too, but is
+    never eligible for rule (c) at all (CEO/CFO only) and fails rule (b) on
+    insider count alone -- same generic "not enough people/not the right rule"
+    line as the lone-CEO case above, not the "bought only €X" one."""
+    _buy(conn, "AAA", "Boss", usd=700_000, officer=0, director=1, title="Chairman")
+    sel = _select(conn)
+    assert _tiers(sel) == (set(), {"AAA"})
+    assert sel.candidates[0].missed == [
+        "один покупатель из руководства: нужно 2+ (с CEO/CFO/Chair от €250 тыс) "
+        "или рост позиции CEO/CFO от 10%"]
 
 
 def test_holders_only_is_a_candidate(conn, sized):

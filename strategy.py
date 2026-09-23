@@ -104,14 +104,25 @@ def _stock_tier(sig) -> Tiered | None:
     if not insiders:
         missed.append("покупатели не из руководства компании")
     elif not rules:
-        if tops:
+        if tops and not big_tops:
             # A top exec is in the cluster but didn't clear rule (b)'s own bar --
             # say so specifically, naming the biggest of them by amount, rather
-            # than the generic line below, which would otherwise read as "no
-            # CEO/CFO/Chair in the cluster" while one is right there in `met`.
+            # than a generic line, which would otherwise read as "no CEO/CFO/
+            # Chair in the cluster" while one is right there in `met`.
             biggest = max(tops, key=lambda b: b.total_eur)
             missed.append(f"{_ROLE_LABEL[biggest.role]} купил только на "
                           f"€{_short(biggest.total_eur)} (< €{_short(TOP_EXEC_MIN_EUR)})")
+        elif tops:
+            # A top exec IS here and DID clear TOP_EXEC_MIN_EUR -- since rules is
+            # still empty, len(insiders) must be < TOP_EXEC_MIN_INSIDERS (i.e. a
+            # lone insider: with 2+, big_tops alone would have fired rule (b)
+            # above), and rule (c) either doesn't apply to their role (Chair) or
+            # their position didn't grow enough. The "bought only €X" line above
+            # would be false here -- they cleared the money bar -- so state what
+            # the rules need in general instead of claiming this buyer fell short
+            # on amount.
+            missed.append("один покупатель из руководства: нужно 2+ (с CEO/CFO/Chair "
+                          "от €250 тыс) или рост позиции CEO/CFO от 10%")
         else:
             missed.append("нет 3+ инсайдеров, CEO/CFO/Chair с покупкой от €250 тыс "
                           "или крупной покупки CEO/CFO")
