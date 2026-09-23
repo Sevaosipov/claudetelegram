@@ -434,6 +434,21 @@ CREATE TABLE IF NOT EXISTS crypto_wallet_snapshots (
     taken_at    TEXT NOT NULL,           -- ISO datetime
     PRIMARY KEY (address, taken_at)
 );
+
+-- Positions the user reports via Telegram (/bought, /sold) -- positions.py. The bot
+-- never reads the brokerage account; this is only what the user tells it.
+CREATE TABLE IF NOT EXISTS positions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker            TEXT NOT NULL,
+    source            TEXT,
+    opened_at         TEXT NOT NULL,              -- ISO date
+    entry_price       REAL NOT NULL,
+    insiders          TEXT NOT NULL DEFAULT '[]', -- JSON names whose selling closes it
+    signal_id         INTEGER,                    -- signal_journal row it came from
+    closed_at         TEXT,
+    close_reason      TEXT,
+    close_alerted_at  TEXT
+);
 """
 
 
@@ -453,6 +468,7 @@ _ADDED_COLUMNS = [
     ("sec_sales", "filed_date", "TEXT"),
     ("company_facts", "avg_daily_value", "REAL"),
     ("signal_journal", "corroborated_by", "TEXT"),
+    ("signal_journal", "tier", "TEXT"),
 ]
 
 
@@ -724,7 +740,7 @@ def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
     cols = ("source", "kind", "ticker", "company", "buyer_count", "total_value_eur",
             "holder_only", "has_officer", "position_increase_pct", "first_buy",
             "lag_days", "market_cap_eur", "value_pct_of_mcap", "percent_of_class",
-            "score", "window_start", "window_end", "members", "corroborated_by")
+            "score", "window_start", "window_end", "members", "corroborated_by", "tier")
     conn.execute(
         f"INSERT INTO signal_journal ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
         tuple(row.get(c) for c in cols),
