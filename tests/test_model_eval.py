@@ -310,13 +310,13 @@ def test_run_produces_a_report_on_a_healthy_synthetic_corpus(conn, monkeypatch):
 
 def test_no_project_module_imports_model_eval():
     """The binding non-goal: nothing on the bot / signal / Telegram path imports
-    model_eval. menu.py is the one allowed consumer (same pattern it uses for
-    research / backtest). A bare docstring mention -- backtest.py has one, since it
-    hosts model_eval's data collectors -- is not an import and is fine."""
+    model_eval -- it is only ever run as its own CLI. A bare docstring mention --
+    backtest.py has one, since it hosts model_eval's data collectors -- is not an
+    import and is fine."""
     import ast
 
     root = pathlib.Path(__file__).resolve().parent.parent
-    allowed = {"model_eval.py", "menu.py"}
+    allowed = {"model_eval.py"}
     offenders = []
     for p in root.glob("*.py"):
         if p.name in allowed:

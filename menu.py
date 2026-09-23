@@ -9,12 +9,10 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-import backtest
 import cluster
 import congress_score
 import datefmt
 import db
-import model_eval
 import politician_report
 import research
 import telegram_notify
@@ -218,47 +216,11 @@ def _render_signals(conn) -> None:
         print()
 
 
-def _render_backtest(conn, horizon: int = 21) -> None:
-    """What happened to price after signals and after individual purchases.
-
-    Диагностика инструмента, а не рекомендация: маленькие выборки здесь ничего
-    не значат, и отчёт прямо помечает такие группы."""
-    print("Считаю доходность после сигналов — нужны цены с Yahoo Finance, "
-          "первый раз может занять минуту...")
-
-    data = backtest.collect_signals(conn, (horizon,))
-    if data:
-        backtest._report("все сигналы", {"все": data}, horizon)
-        backtest._report("по типу", backtest._group(data, lambda r: r["kind"]), horizon)
-        backtest._report("по числу покупателей",
-                          backtest._group(data, lambda r: "1 (соло)" if r["buyers"] <= 1
-                                          else "2" if r["buyers"] == 2 else "3+"), horizon)
-    else:
-        print("\nЖурнал сигналов пока пуст — он заполняется по мере отправки сигналов.")
-
-    purchases = backtest.collect_purchases(conn, (horizon,))
-    if purchases:
-        backtest._report("отдельные покупки (SEC)", {"все": purchases}, horizon)
-        backtest._report("обычные акции vs деривативы",
-                          backtest._group(purchases, lambda r: "дериватив" if r["derivative"]
-                                          else "обычные акции"), horizon)
-    print(f"\nГруппы меньше n={backtest.MIN_MEANINGFUL_N} — это шум. Наблюдения здесь "
-          f"не независимы\n(покупки скапливаются в одних и тех же бумагах и в одном "
-          f"периоде рынка), поэтому p\nзавышает уверенность. Прошлое поведение — не "
-          f"прогноз, и это не инвестиционный совет.")
-
-
-def _render_model_eval(conn, corpus: str = "both", horizon: int = 21) -> None:
-    """Walk-forward оценка того, есть ли у признаков предсказательная сила.
-    Не прогноз и не рекомендация — см. подпись внизу отчёта."""
-    print("Считаю (нужны исторические цены — политический прогон может занять минуту)...")
-    print(model_eval.run(conn, corpus, horizon))
-
-
 def show_full_report(conn) -> None:
     """Everything the bot knows, one section after another: insiders, top
-    politicians, current signals, historical backtest, and the walk-forward
-    model evaluation -- all with sensible defaults, no prompts in between.
+    politicians and current signals -- all with sensible defaults, no prompts in
+    between. The backtest and the model evaluation are run on their own
+    (`python backtest.py`, `python model_eval.py`).
     The one interactive follow-up (a politician's detail report) is offered
     once, at the end."""
     print()
@@ -275,14 +237,6 @@ def show_full_report(conn) -> None:
     print()
     print(termstyle.section("Текущие сигналы"))
     _render_signals(conn)
-
-    print()
-    print(termstyle.section("Проверка сигналов на истории"))
-    _render_backtest(conn)
-
-    print()
-    print(termstyle.section("Оценка предсказательной силы (walk-forward)"))
-    _render_model_eval(conn)
 
     if top:
         print()
@@ -309,7 +263,7 @@ def main() -> None:
     while True:
         print()
         print(termstyle.header("disclosure-bot"))
-        print("1) Полный отчёт — инсайдеры, политики, сигналы, бэктест, оценка модели")
+        print("1) Полный отчёт — инсайдеры, политики, сигналы")
         print("2) Досье по тикеру")
         print("0) Выход")
         choice = input("Выбор: ").strip()
