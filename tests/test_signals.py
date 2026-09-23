@@ -757,3 +757,27 @@ def test_send_digest_sends_nothing_when_there_is_nothing(conn, monkeypatch):
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     assert bot._send_digest(conn, strategy.Selection([], [], True), []) is False
     assert sent == []
+
+
+# --------------------------------------------------------- run_cluster_pass
+def test_run_cluster_pass_tiers_a_fresh_director_cluster(conn, monkeypatch):
+    """End-to-end through real argparse defaults (bot.build_parser): a genuine
+    3-director SEC cluster, filed yesterday, must come back in .strong once the
+    network-reaching steps (enrich_signals, Trading 212, TradingView) are stubbed
+    or disabled."""
+    import trading212
+
+    def fake_enrich(conn, signals):
+        for s in signals:
+            s.market_cap_eur, s.avg_daily_value, s.score = 5e9, 5e7, 100.0
+        return signals
+    monkeypatch.setattr(cluster, "enrich_signals", fake_enrich)
+    monkeypatch.setattr(trading212, "availability", lambda conn: None)
+
+    yesterday = (TODAY - dt.timedelta(days=1)).isoformat()
+    for name in ("Director One", "Director Two", "Director Three"):
+        add_sec_purchase(conn, "AAA", name, 200_000, yesterday, filed_date=yesterday)
+
+    args = bot.build_parser().parse_args(["--once", "--no-market-context"])
+    selection = bot.run_cluster_pass(conn, args)
+    assert "AAA" in [t.signal.ticker for t in selection.strong]

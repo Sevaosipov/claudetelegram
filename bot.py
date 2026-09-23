@@ -359,7 +359,11 @@ def run_healthcheck(conn, args) -> int:
     return 1
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """Split out of main() so tests (and anything else that wants a real, fully-
+    defaulted args object for run_cluster_pass) can do
+    `bot.build_parser().parse_args([...])` instead of hand-maintaining a
+    SimpleNamespace that has to be kept in sync with every flag added here."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--once", action="store_true", help="run a single pass and exit")
     ap.add_argument("--interval", type=int, default=900, help="seconds between polls (default 900 = 15min)")
@@ -515,7 +519,11 @@ def main():
                      help="don't compute exit signals (people who bought a ticker together later "
                           "selling it together -- see EXIT_* constants in cluster/common.py)")
     ap.add_argument("--no-telegram", action="store_true", help="skip sending Telegram alerts")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_handle = _open_log()
