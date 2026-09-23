@@ -147,3 +147,22 @@ def test_cached_coins_fall_back_to_the_builtin_list(conn, monkeypatch):
     monkeypatch.setattr(sources, "_coingecko_coins", lambda: None)
     monkeypatch.setattr(sources, "_coinpaprika_coins", lambda: None)
     assert {"BTC", "ETH"} <= sources.cached_coin_symbols(conn)
+
+
+def test_cached_coins_negative_caching_avoids_retries(conn, monkeypatch):
+    calls = []
+
+    def failing_coins():
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(sources, "_coingecko_coins", failing_coins)
+    monkeypatch.setattr(sources, "_coinpaprika_coins", failing_coins)
+    # First call should attempt to fetch (2 calls: CoinGecko + CoinPaprika)
+    result1 = sources.cached_coins(conn)
+    assert len(calls) == 2
+    assert {"BTC", "ETH"} <= {r[0] for r in result1}
+    # Second call within the hour should NOT attempt to fetch
+    result2 = sources.cached_coins(conn)
+    assert len(calls) == 2  # No additional calls
+    assert result1 == result2

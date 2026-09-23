@@ -22,7 +22,9 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 _TIMEOUT = 20
 COIN_LIST_SIZE = 250
 COIN_LIST_TTL_SECONDS = 24 * 3600
+COIN_LIST_RETRY_SECONDS = 3600
 _COIN_LIST_KEY = "coin_list_fetched"
+_COIN_LIST_FAILED_KEY = "coin_list_failed"
 # Coins pegged to a currency or to gold: no free-moving price to have a direction.
 STABLECOINS = {"USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD", "USDD", "BUSD",
                "USDS", "USD1", "USDP", "GUSD", "FRAX", "LUSD", "EURC", "XAUT", "PAXG",
@@ -183,17 +185,24 @@ def coin_list():
 
 def cached_coins(conn) -> list[tuple]:
     """(symbol, coin_id, name, rank) by rank, refreshed daily; the built-in list when
-    no source has ever answered."""
-    if db.get_cached_value(conn, _COIN_LIST_KEY, COIN_LIST_TTL_SECONDS) is None:
-        coins, _source = coin_list()
-        if coins:
-            best: dict[str, tuple] = {}
-            for sym, coin_id, name, rank in sorted(coins, key=lambda r: (r[3] is None, r[3] or 0)):
-                best.setdefault(sym, (sym, coin_id, name, rank))
-            conn.execute("DELETE FROM coin_list")
-            conn.executemany("INSERT INTO coin_list (symbol, coin_id, name, rank) VALUES (?,?,?,?)",
-                             list(best.values()))
-            db.save_cached_value(conn, _COIN_LIST_KEY, 1.0)
+    no source has ever answered. When all sources fail, remember the failure for 1 hour
+    to avoid repeated HTTP timeouts."""
+    # Skip refresh if a recent failure is cached
+    if db.get_cached_value(conn, _COIN_LIST_FAILED_KEY, COIN_LIST_RETRY_SECONDS) is None:
+        # Refresh needed only if both the success and failure caches are expired
+        if db.get_cached_value(conn, _COIN_LIST_KEY, COIN_LIST_TTL_SECONDS) is None:
+            coins, _source = coin_list()
+            if coins:
+                best: dict[str, tuple] = {}
+                for sym, coin_id, name, rank in sorted(coins, key=lambda r: (r[3] is None, r[3] or 0)):
+                    best.setdefault(sym, (sym, coin_id, name, rank))
+                conn.execute("DELETE FROM coin_list")
+                conn.executemany("INSERT INTO coin_list (symbol, coin_id, name, rank) VALUES (?,?,?,?)",
+                                 list(best.values()))
+                db.save_cached_value(conn, _COIN_LIST_KEY, 1.0)
+            else:
+                # Remember the failure for 1 hour
+                db.save_cached_value(conn, _COIN_LIST_FAILED_KEY, 1.0)
     rows = conn.execute("SELECT symbol, coin_id, name, rank FROM coin_list "
                         "ORDER BY rank IS NULL, rank").fetchall()
     return rows or [(s, crypto.COINGECKO_IDS.get(s), None, None) for s in sorted(crypto.SYMBOLS)]
