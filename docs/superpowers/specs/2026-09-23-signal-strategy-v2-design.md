@@ -46,8 +46,9 @@ inflows). Exit signals and crypto outflows never appear as buy signals.
 
 **Кандидат**: every other signal that passes the floors, including >10%-holder
 clusters, 13D activist stakes (run_daily's tuning: ≥ 10%, 13D, new positions),
-Congress, and European insiders. Ranked by the existing `score_signal`; the top 10
-are shown.
+Congress, and European insiders. Ranked by the existing `score_signal`; a stock
+candidate below `CANDIDATE_MIN_SCORE` (50) is dropped entirely -- crypto
+candidates are exempt from this floor. The top 10 (after that cut) are shown.
 
 Top-exec detection needs structured roles. The finders keep, next to
 `member_names`, a parallel `member_roles` list with a normalised role

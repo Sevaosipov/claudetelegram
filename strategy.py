@@ -29,6 +29,7 @@ TOP_EXEC_MIN_EUR = 250_000          # rule (b)
 CONVICTION_MIN_EUR = 250_000        # rule (c)
 CONVICTION_MIN_INCREASE_PCT = 10.0  # rule (c)
 MAX_CANDIDATES = 10
+CANDIDATE_MIN_SCORE = 50.0
 CRYPTO_TREASURY_BIG_EUR = 50e6
 
 STRONG, CANDIDATE = "strong", "candidate"
@@ -208,8 +209,14 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
         if t is not None:
             s.tier = t.tier
             tiered.append(t)
+    # A candidate stock below CANDIDATE_MIN_SCORE isn't worth showing -- crypto
+    # candidates (CryptoSignal, and CRYPTO: tickers such as congressional crypto
+    # clusters) are exempt, and Сильный is never scored against this at all.
+    candidates = [t for t in tiered if t.tier == CANDIDATE
+                 and (crypto.is_crypto(t.signal.ticker)
+                      or getattr(t.signal, "score", 0) >= CANDIDATE_MIN_SCORE)]
     return Selection(
         strong=[t for t in tiered if t.tier == STRONG],
-        candidates=[t for t in tiered if t.tier == CANDIDATE][:MAX_CANDIDATES],
+        candidates=candidates[:MAX_CANDIDATES],
         t212_checked=t212 is not None,
     )

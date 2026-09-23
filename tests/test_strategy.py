@@ -166,6 +166,47 @@ def test_candidates_are_capped(conn, sized):
     assert len(_select(conn).candidates) == strategy.MAX_CANDIDATES
 
 
+def _scored_enrich(monkeypatch, score):
+    """Like `sized`, but every signal gets the same fixed score instead of one
+    derived from list position -- for testing the CANDIDATE_MIN_SCORE cutoff
+    itself rather than the ordering `sized` is built for."""
+    def fake(conn, signals):
+        for s in signals:
+            if not getattr(s, "crypto_kind", None):
+                s.market_cap_eur, s.avg_daily_value = BIG, LIQUID
+            s.score = score
+        return signals
+    monkeypatch.setattr(cluster, "enrich_signals", fake)
+
+
+def test_stock_candidate_below_min_score_is_dropped(conn, monkeypatch):
+    _scored_enrich(monkeypatch, strategy.CANDIDATE_MIN_SCORE - 1)
+    _buy(conn, "AAA", "Board One")
+    _buy(conn, "AAA", "Board Two")
+    assert _tiers(_select(conn)) == (set(), set())
+
+
+def test_stock_candidate_at_min_score_is_kept(conn, monkeypatch):
+    _scored_enrich(monkeypatch, strategy.CANDIDATE_MIN_SCORE)
+    _buy(conn, "AAA", "Board One")
+    _buy(conn, "AAA", "Board Two")
+    assert _tiers(_select(conn)) == (set(), {"AAA"})
+
+
+def test_min_score_does_not_apply_to_strong_signals(conn, monkeypatch):
+    _scored_enrich(monkeypatch, 0.0)
+    for o in ("A", "B", "C"):
+        _buy(conn, "AAA", o)
+    assert _tiers(_select(conn)) == ({"AAA"}, set())
+
+
+def test_crypto_candidate_is_exempt_from_min_score(conn, monkeypatch):
+    _scored_enrich(monkeypatch, 0.0)
+    _trend(monkeypatch, None)   # "цена не проверена" -> candidate
+    [t] = strategy.select(conn, [_etf()], _T212()).candidates
+    assert t.signal.ticker == "CRYPTO:BTC"
+
+
 def test_selected_signals_carry_their_tier(conn, sized):
     for o in ("A", "B", "C"):
         _buy(conn, "AAA", o)
