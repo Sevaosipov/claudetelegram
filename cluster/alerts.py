@@ -31,6 +31,8 @@ def should_alert(conn, source: str, ticker: str, member_names, total_value: floa
     if prev["total_value"] is None and len(member_names) > prev["count"]:
         return True
     return False
+
+
 def should_alert_exit(conn, source: str, ticker: str, seller_names) -> bool:
     """Same idea as should_alert, for exit signals: re-fire when someone who hadn't
     sold before now has. Value growth is not a useful trigger here -- the event is a
@@ -39,6 +41,8 @@ def should_alert_exit(conn, source: str, ticker: str, seller_names) -> bool:
     if prev is None:
         return True
     return bool(set(seller_names) - prev["members"])
+
+
 def commit_alert(conn, signal: ClusterSignal) -> None:
     db.save_cluster_alert_state(conn, signal.source, signal.ticker, signal.buyer_count,
                                  signal.member_names, signal.total_value)

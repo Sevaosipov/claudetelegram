@@ -84,6 +84,8 @@ def score_signal(sig, corroborated_by: list[str] | None = None) -> float:
     if corroborated_by:
         score += min(W_PER_CORROBORATING_SOURCE * len(corroborated_by), CAP_CORROBORATION)
     return round(score, 1)
+
+
 def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WINDOW_DAYS) -> None:
     """Which OTHER disclosure-source regimes also show activity on each
     signal's ticker within `window_days` -- this run's own batch, plus
@@ -134,6 +136,8 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
         all_sources = batch_sources[sig.ticker] | journal_sources[sig.ticker]
         own_regime = _regime(sig.source)
         sig.corroborated_by = sorted(s for s in all_sources if _regime(s) != own_regime)
+
+
 def enrich_signals(conn, signals: list) -> list:
     """Attach company context to signals and score them, newest-first by score.
 

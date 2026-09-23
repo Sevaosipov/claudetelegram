@@ -40,6 +40,8 @@ from .alerts import should_alert
 
 def _clean_asset_name(asset: str) -> str:
     return _ASSET_SUFFIX_RE.sub("", asset).strip()
+
+
 def _sec_role(o: dict) -> str:
     """Display role for a Form 4 filer, most specific first. The 10%-owner case
     matters: an institution adding to a stake (Cascade buying $50M of RSG) is a
@@ -54,6 +56,8 @@ def _sec_role(o: dict) -> str:
     if o["is_ten_pct"]:
         return "10%+ Owner"
     return "Insider"
+
+
 def find_sec_clusters(conn, window_days: int = SEC_WINDOW_DAYS, min_buyers: int = SEC_MIN_BUYERS,
                        min_value: float = MIN_CLUSTER_VALUE, solo_threshold: float = SEC_SOLO_THRESHOLD,
                        ignore_alert_state: bool = False, include_derivatives: bool = False,
@@ -156,6 +160,8 @@ def find_sec_clusters(conn, window_days: int = SEC_WINDOW_DAYS, min_buyers: int 
             lag_days=_median([l for o in by_owner.values() for l in o["lags"]]),
         ))
     return signals
+
+
 def _lag_days(txn_date: str, filed_date: str | None) -> float | None:
     """Days between the trade and its disclosure.
 
@@ -169,12 +175,16 @@ def _lag_days(txn_date: str, filed_date: str | None) -> float | None:
         return (dt.date.fromisoformat(filed_date) - dt.date.fromisoformat(txn_date)).days
     except ValueError:
         return None
+
+
 def _median(values: list[float]) -> float | None:
     vals = sorted(v for v in values if v is not None)
     if not vals:
         return None
     mid = len(vals) // 2
     return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
 def _position_increase(owner: dict) -> float | None:
     """The purchase as a percentage of what the buyer already held.
 
@@ -189,6 +199,8 @@ def _position_increase(owner: dict) -> float | None:
     if before <= 0:
         return 100.0
     return min(bought / before * 100, 1000.0)
+
+
 def _is_first_buy(conn, ticker: str, member_names: list[str], since: str) -> bool:
     """True when nobody in this cluster had bought this ticker before the window.
 
@@ -214,6 +226,8 @@ def _is_first_buy(conn, ticker: str, member_names: list[str], since: str) -> boo
         (ticker, since, *member_names),
     ).fetchone()[0]
     return prior == 0
+
+
 def _tight_purchase_window(dated_members: list[tuple], span_days: int,
                             min_buyers: int):
     """Does some sub-window of width <= span_days contain purchases from at least
@@ -237,6 +251,8 @@ def _tight_purchase_window(dated_members: list[tuple], span_days: int,
         if len(names) >= min_buyers:
             return items[left][0], items[right][0], names
     return None
+
+
 def find_house_clusters(conn, window_days: int = HOUSE_WINDOW_DAYS, min_buyers: int = HOUSE_MIN_BUYERS,
                          min_value: float = MIN_CLUSTER_VALUE, solo_threshold: float = HOUSE_SOLO_THRESHOLD,
                          cluster_span_days: int = HOUSE_CLUSTER_SPAN_DAYS,
@@ -335,6 +351,8 @@ def find_house_clusters(conn, window_days: int = HOUSE_WINDOW_DAYS, min_buyers: 
             member_names=member_names,
         ))
     return signals
+
+
 def find_senate_clusters(conn, **kwargs) -> list[ClusterSignal]:
     """Senate PTR buy clusters. Same logic as the House -- see find_house_clusters."""
     kwargs.setdefault("window_days", SENATE_WINDOW_DAYS)
@@ -342,6 +360,8 @@ def find_senate_clusters(conn, **kwargs) -> list[ClusterSignal]:
     kwargs.setdefault("cluster_span_days", SENATE_CLUSTER_SPAN_DAYS)
     return find_house_clusters(conn, table="senate_purchases", source="SENATE",
                                 date_format=None, **kwargs)
+
+
 def find_bafin_clusters(conn, window_days: int = BAFIN_WINDOW_DAYS, min_buyers: int = BAFIN_MIN_BUYERS,
                          min_value: float = MIN_CLUSTER_VALUE, solo_threshold: float = BAFIN_SOLO_THRESHOLD,
                          ignore_alert_state: bool = False) -> list[ClusterSignal]:
@@ -399,6 +419,8 @@ def find_bafin_clusters(conn, window_days: int = BAFIN_WINDOW_DAYS, min_buyers: 
             member_names=member_names,
         ))
     return signals
+
+
 def find_norway_clusters(conn, window_days: int = NORWAY_WINDOW_DAYS, min_buyers: int = NORWAY_MIN_BUYERS,
                           min_value: float = MIN_CLUSTER_VALUE, solo_threshold: float = NORWAY_SOLO_THRESHOLD,
                           ignore_alert_state: bool = False) -> list[ClusterSignal]:
@@ -450,6 +472,8 @@ def find_norway_clusters(conn, window_days: int = NORWAY_WINDOW_DAYS, min_buyers
             member_names=member_names,
         ))
     return signals
+
+
 def find_sweden_clusters(conn, window_days: int = SWEDEN_WINDOW_DAYS, min_buyers: int = SWEDEN_MIN_BUYERS,
                           min_value: float = MIN_CLUSTER_VALUE, solo_threshold: float = SWEDEN_SOLO_THRESHOLD,
                           ignore_alert_state: bool = False, include_share_programs: bool = False,

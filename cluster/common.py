@@ -11,6 +11,7 @@ import sec_edgar
 
 SEC_WINDOW_DAYS = 14
 SEC_MIN_BUYERS = 2
+
 HOUSE_WINDOW_DAYS = 45  # STOCK Act PTRs are due 30-45 days after the trade -- how
                         # far back to scan for source rows at all, not how close
                         # together a cluster's members must have bought (see
@@ -22,15 +23,19 @@ HOUSE_CLUSTER_SPAN_DAYS = 14  # members must buy within ~2 weeks of EACH OTHER t
 
 BAFIN_WINDOW_DAYS = 14  # same rationale as SEC -- corporate insiders, not politicians
 BAFIN_MIN_BUYERS = 2
+
 NORWAY_WINDOW_DAYS = 14  # same rationale as SEC/BaFin -- corporate insiders, not politicians
 NORWAY_MIN_BUYERS = 2
+
 SWEDEN_WINDOW_DAYS = 14  # same rationale again -- corporate insiders, not politicians
 SWEDEN_MIN_BUYERS = 2
+
 # The Senate files under the same STOCK Act deadline as the House, so it gets the
 # same window rather than the corporate-insider one.
 SENATE_WINDOW_DAYS = HOUSE_WINDOW_DAYS
 SENATE_MIN_BUYERS = 2
 SENATE_CLUSTER_SPAN_DAYS = HOUSE_CLUSTER_SPAN_DAYS
+
 # Every threshold below, and every amount a signal displays, is in EUR -- source
 # amounts are converted via fx.py before any comparison, so one constant means the
 # same real bar for all four sources. (The raw purchase log keeps native currency.)
@@ -40,6 +45,7 @@ SENATE_CLUSTER_SPAN_DAYS = HOUSE_CLUSTER_SPAN_DAYS
 # (e.g. "$1,001 - $15,000"), so for House this is the sum of each buyer's *lower*
 # bound -- a conservative, understating estimate rather than an exact figure.
 MIN_CLUSTER_VALUE = 100_000
+
 # A single person buying enough on their own also counts as a signal, even without
 # a second distinct buyer -- we don't have shares-outstanding data to measure "% of
 # the company", so this is a flat money bar for "clearly a large bet" instead.
@@ -48,6 +54,7 @@ HOUSE_SOLO_THRESHOLD = 500_000
 BAFIN_SOLO_THRESHOLD = 500_000
 NORWAY_SOLO_THRESHOLD = 500_000
 SWEDEN_SOLO_THRESHOLD = 500_000
+
 # Exit signal: fires when a meaningful fraction of the people who bought a ticker
 # later sell it -- e.g. 5 people bought AAPL, 3 of those same 5 later sold it.
 # A signal whose member set hasn't changed still re-fires once its total value has
@@ -55,6 +62,7 @@ SWEDEN_SOLO_THRESHOLD = 500_000
 # never re-fire at all (their buyer count is 1 and stays 1, however much more they
 # buy), and a cluster that doubles its money without adding a name stays silent.
 ALERT_VALUE_GROWTH = 1.5
+
 # Schedule 13D/G stake signals (see sec_13dg.py). A holder crossing 5% must file, so
 # STAKE_MIN_PERCENT below that would only catch positions being wound down.
 STAKE_MIN_PERCENT = 5.0
@@ -62,26 +70,33 @@ STAKE_MIN_PERCENT = 5.0
 # again. 13G/A amendments are filed constantly by index funds drifting a tenth of a
 # point; those are noise, not news.
 STAKE_MIN_INCREASE_PP = 1.0
+
 # How long the database must already cover before "this person had never bought this
 # ticker before" means anything. On a fresh database every purchase is a first
 # purchase, which would make the feature fire on everything and mean nothing.
 FIRST_BUY_MIN_HISTORY_DAYS = 180
+
 # A Form 144 (notice of intent to sell) counts toward exit signals only if the
 # intended sale is at least this large in USD -- routine vesting-and-selling is
 # most of the volume. See sec_144.py.
 FORM_144_MIN_VALUE = 100_000
+
 EXIT_LOOKBACK_MONTHS = 12   # how far back to look for the original buyers
 EXIT_MIN_BUYERS = 2         # need at least this many distinct buyers to track
 EXIT_MIN_SELLERS = 2        # ...and at least this many of them selling later
 EXIT_SELL_FRACTION = 0.5    # ...which must also be >= half the original buyers
+
 # sec_edgar.clean_ticker nulls these at parse time now, but rows collected before
 # that still carry them, and House/Norway tickers come from other parsers entirely
 # -- so every ticker-keyed query filters them out in SQL as well.
 _JUNK_TICKER_SQL = ("UPPER(TRIM(ticker)) NOT IN ("
                     + ",".join(f"'{t}'" for t in sec_edgar.JUNK_TICKERS) + ")")
+
 # Suffixes that carry no identity, dropped before comparing names across forms.
 _NAME_SUFFIXES = {"JR", "SR", "II", "III", "IV", "MD", "PHD", "ESQ"}
 _NAME_PUNCT_RE = re.compile(r"[.,'\"()]")
+
+
 def name_key(name: str) -> str:
     """Comparison key for a person's name across two SEC forms that write names
     differently. Form 4 files them surname-first and upper-cased ("CROOK NATHANIEL
@@ -103,8 +118,12 @@ def name_key(name: str) -> str:
     tokens = _NAME_PUNCT_RE.sub(" ", (name or "").upper()).split()
     tokens = [t for t in tokens if t not in _NAME_SUFFIXES]
     return " ".join(sorted(tokens))
+
+
 _ASSET_SUFFIX_RE = re.compile(r"\s*\([A-Za-z.]{1,6}\)\s*\[\w+\]\s*$")
 _AMOUNT_RE = re.compile(r"\$([\d,]+)")
+
+
 def parse_amount_low(amount_range: str) -> float:
     """Lower bound of a House PTR amount range/value, e.g. '$1,001 - $15,000' -> 1001.0.
     Stays in the source's USD -- callers convert if they need EUR."""
@@ -112,6 +131,8 @@ def parse_amount_low(amount_range: str) -> float:
     if not matches:
         return 0.0
     return float(matches[0].replace(",", ""))
+
+
 def _bracket_to_eur(amount_range: str, conn=None) -> str:
     """Rewrite every dollar figure inside a House PTR bracket string as EUR,
     keeping the bracket shape: '$1,001 - $15,000' -> '€864 - €12,942'. House
@@ -121,6 +142,8 @@ def _bracket_to_eur(amount_range: str, conn=None) -> str:
         return f"€{fx.to_eur(usd, 'USD', conn):,.0f}"
 
     return _AMOUNT_RE.sub(repl, amount_range)
+
+
 # Ranking weights. These decide the ORDER signals are presented in, nothing else --
 # they are not a prediction of return, and no claim is made that a higher-scoring
 # signal is a better trade. They encode the reasoning the tool was built on (several
@@ -147,11 +170,13 @@ P_UNKNOWN_SIZE = -5.0        # size couldn't be resolved: less is known, not les
 P_ILLIQUID = -12.0           # trades less than ILLIQUID_BELOW_EUR of value per day
 ILLIQUID_BELOW_EUR = 250_000
 W_FULL_UNWIND = 20.0         # every buyer in the cluster has now sold, not just some
+
 # A single insider cannot buy more of a company than the company is worth. Past
 # this, the market cap or the reported value is wrong -- usually a stale quote on a
 # nano-cap after a split -- so the ratio is discarded rather than trusted, the same
 # way sweden.py discards an implausible notional.
 MAX_CREDIBLE_PCT_OF_MCAP = 100.0
+
 # Corroboration: does another, independent disclosure regime also show activity
 # on this ticker recently? Not a claim that sources agree -- an exit on one
 # regime and a buy on another both count, see find_corroboration below and the
@@ -159,6 +184,7 @@ MAX_CREDIBLE_PCT_OF_MCAP = 100.0
 CORROBORATION_WINDOW_DAYS = 30
 W_PER_CORROBORATING_SOURCE = 15.0   # per distinct other source active on this ticker
 CAP_CORROBORATION = 30.0            # caps at 2 corroborating sources' worth
+
 # SEC13DG (a 13D/G stake filing) and SEC (a Form 4 insider cluster) can both
 # come from the same >10%-holder's single position change, so they don't count
 # as independent corroboration of each other. HOUSE and SENATE are both
@@ -166,8 +192,12 @@ CAP_CORROBORATION = 30.0            # caps at 2 corroborating sources' worth
 # so they're collapsed too, a weaker case (genuinely different filers) but
 # the same regime for this purpose. Everything else maps to itself.
 _REGIME = {"SEC13DG": "SEC", "SENATE": "HOUSE"}
+
+
 def _regime(source: str) -> str:
     return _REGIME.get(source, source)
+
+
 @dataclass
 class ClusterSignal:
     source: str  # "SEC", "HOUSE", "BAFIN" or "NORWAY"

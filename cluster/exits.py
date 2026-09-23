@@ -34,6 +34,8 @@ class ExitSignal:
     # Plain seller names, for the same reason ClusterSignal carries member_names.
     seller_names: list[str] = field(default_factory=list)
     corroborated_by: list[str] = field(default_factory=list)
+
+
 def find_sec_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
                            min_buyers: int = EXIT_MIN_BUYERS, min_sellers: int = EXIT_MIN_SELLERS,
                            sell_fraction: float = EXIT_SELL_FRACTION,
@@ -122,6 +124,8 @@ def find_sec_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
             seller_count=len(matched), lines=lines, seller_names=seller_names,
         ))
     return signals
+
+
 def find_house_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
                              min_buyers: int = EXIT_MIN_BUYERS, min_sellers: int = EXIT_MIN_SELLERS,
                              sell_fraction: float = EXIT_SELL_FRACTION,
@@ -190,10 +194,14 @@ def find_house_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
             seller_count=len(matched), lines=lines, seller_names=seller_names,
         ))
     return signals
+
+
 def find_senate_exit_signals(conn, **kwargs) -> list[ExitSignal]:
     """Senate PTR exit signals. Same logic as the House -- see find_house_exit_signals."""
     return find_house_exit_signals(conn, table="senate_purchases", source="SENATE",
                                     date_format=None, **kwargs)
+
+
 def find_bafin_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
                              min_buyers: int = EXIT_MIN_BUYERS, min_sellers: int = EXIT_MIN_SELLERS,
                              sell_fraction: float = EXIT_SELL_FRACTION,
@@ -259,6 +267,8 @@ def find_bafin_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
             seller_count=len(matched), lines=lines, seller_names=seller_names,
         ))
     return signals
+
+
 def find_norway_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
                               min_buyers: int = EXIT_MIN_BUYERS, min_sellers: int = EXIT_MIN_SELLERS,
                               sell_fraction: float = EXIT_SELL_FRACTION,
@@ -318,6 +328,8 @@ def find_norway_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
             seller_count=len(matched), lines=lines, seller_names=seller_names,
         ))
     return signals
+
+
 def find_sweden_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
                               min_buyers: int = EXIT_MIN_BUYERS, min_sellers: int = EXIT_MIN_SELLERS,
                               sell_fraction: float = EXIT_SELL_FRACTION,
@@ -377,6 +389,8 @@ def find_sweden_exit_signals(conn, lookback_months: int = EXIT_LOOKBACK_MONTHS,
             seller_count=len(matched), lines=lines, seller_names=seller_names,
         ))
     return signals
+
+
 def commit_exit_alert(conn, signal: ExitSignal) -> None:
     db.save_cluster_alert_state(conn, f"{signal.source}_EXIT", signal.ticker, signal.seller_count,
                                  signal.seller_names)

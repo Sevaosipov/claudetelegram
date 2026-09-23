@@ -39,6 +39,8 @@ class StakeSignal:
     @property
     def is_activist(self) -> bool:
         return self.form_type.startswith("SCHEDULE 13D")
+
+
 def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
                         min_increase_pp: float = STAKE_MIN_INCREASE_PP,
                         activist_only: bool = False,
@@ -162,6 +164,8 @@ def find_stake_signals(conn, min_percent: float = STAKE_MIN_PERCENT,
             co_filer_names=co_filer_names,
         ))
     return signals
+
+
 def commit_stake_alert(conn, signal: StakeSignal) -> None:
     """Records alert-state for `signal.person` AND every name in
     co_filer_names -- a merged signal's un-recorded co-filer would otherwise
