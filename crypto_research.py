@@ -75,6 +75,8 @@ def _title(rep: dict) -> str:
 
 
 def _source_notes(rep: dict) -> list[str]:
+    # Prices come from the history chain (Yahoo first, when it agrees with an exchange
+    # spot); the exchanges-first current-price chain only fills in when that fails.
     notes = []
     for key, label, first in (("prices", "цены", "Yahoo"), ("indicators", "индикаторы", "TradingView"),
                               ("news", "новости", "Yahoo")):

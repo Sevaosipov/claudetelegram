@@ -35,6 +35,10 @@ STABLECOINS = {"USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD", "USDD", 
                "USDTB", "USDX"}
 _KRAKEN_NAMES = {"BTC": "XBT", "DOGE": "XDG"}
 _DAY_MS = 86_400_000
+# Yahoo's crypto series is kept only when its last close is within 10% of an exchange's
+# spot price: Yahoo files a clashing coin under a numbered ticker, so SYM-USD can be
+# another token (M-USD closed at 0.00029 while MemeCore traded at 1.22).
+CRYPTO_SPOT_TOLERANCE = 0.10
 
 
 def first_available(attempts: list[tuple[str, Callable]]):
@@ -125,12 +129,23 @@ def _kraken_history(symbol: str, days: int):
     return [b for b in bars if b[0] >= cutoff]
 
 
+def _yahoo_crypto_history(asset, days: int):
+    """Yahoo first for its depth (the table's 5-year walk-forward needs it), but only
+    when the series agrees with an exchange spot -- see CRYPTO_SPOT_TOLERANCE."""
+    bars = _yahoo_history(asset.yahoo, days)
+    if bars:
+        spot = _crypto_spot(asset.symbol)
+        if spot and abs(bars[-1][1] / spot - 1) > CRYPTO_SPOT_TOLERANCE:
+            raise ValueError(f"Yahoo {asset.yahoo} is a different coin")
+    return bars
+
+
 def price_history(asset, days: int = 800):
     """Daily closes [(iso_date, close)], oldest first."""
     if asset.is_isin or not asset.yahoo:
         return None, None
     if asset.kind == "crypto":
-        attempts = [("Yahoo", lambda: _yahoo_history(asset.yahoo, days)),
+        attempts = [("Yahoo", lambda: _yahoo_crypto_history(asset, days)),
                     ("Binance", lambda: _binance_history(asset.symbol, days)),
                     ("Bybit", lambda: _bybit_history(asset.symbol, days)),
                     ("Kraken", lambda: _kraken_history(asset.symbol, days))]
@@ -157,15 +172,39 @@ def _binance_price(symbol: str):
                       symbol=f"{symbol}USDT").json()["price"])
 
 
+def _bybit_price(symbol: str):
+    data = _get("https://api.bybit.com/v5/market/tickers", category="spot",
+                symbol=f"{symbol}USDT").json()
+    return float(data["result"]["list"][0]["lastPrice"])
+
+
+def _crypto_spot(symbol: str) -> float | None:
+    """An exchange's spot price, quietly: None when none answers. Never raises."""
+    for fetch in (lambda: _binance_price(symbol), lambda: _bybit_price(symbol),
+                  lambda: crypto.price_usd(None, symbol)):
+        try:
+            price = float(fetch())
+        except Exception:  # any failure just means: ask the next exchange
+            continue
+        if price > 0:
+            return price
+    return None
+
+
 def current_price(asset):
     if asset.is_isin:
         return None, None
+    if asset.kind == "crypto":
+        # Exchanges first: Yahoo's SYM-USD can be a different coin (CRYPTO_SPOT_TOLERANCE).
+        attempts = [("Binance", lambda: _binance_price(asset.symbol)),
+                    ("Bybit", lambda: _bybit_price(asset.symbol)),
+                    ("CoinGecko", lambda: crypto.price_usd(None, asset.symbol)),
+                    ("TradingView", lambda: _tradingview_close(asset)),
+                    ("Yahoo", lambda: _last(_yahoo_history(asset.yahoo, 10)))]
+        return first_available(attempts)
     attempts = [("Yahoo", lambda: _last(_yahoo_history(asset.yahoo, 10))),
                 ("TradingView", lambda: _tradingview_close(asset))]
-    if asset.kind == "crypto":
-        attempts += [("CoinGecko", lambda: crypto.price_usd(None, asset.symbol)),
-                     ("Binance", lambda: _binance_price(asset.symbol))]
-    elif not asset.exchange:
+    if not asset.exchange:
         attempts.append(("Nasdaq", lambda: _last(_nasdaq_history(asset.symbol, 10))))
     return first_available(attempts)
 

@@ -24,9 +24,10 @@ class _Resp:
         return self.payload
 
 
-def _stub_history(monkeypatch, **results):
+def _stub_history(monkeypatch, spot=None, **results):
     """Each history provider returns its given value, raises it if it's an exception,
-    or returns None when not given."""
+    or returns None when not given. `spot` is the exchange price Yahoo's crypto bars
+    are checked against (None: no spot available)."""
     for name in ("_yahoo_history", "_nasdaq_history", "_binance_history",
                  "_bybit_history", "_kraken_history"):
         value = results.get(name)
@@ -36,6 +37,7 @@ def _stub_history(monkeypatch, **results):
                 raise _v
             return _v
         monkeypatch.setattr(sources, name, fake)
+    monkeypatch.setattr(sources, "_crypto_spot", lambda symbol: spot)
 
 
 def test_first_available_takes_the_first_source_that_answers(capsys):
@@ -78,12 +80,73 @@ def test_current_price_falls_back_to_tradingview(monkeypatch):
     assert sources.current_price(EQNR) == (42.0, "TradingView")
 
 
-def test_crypto_current_price_falls_back_to_binance(monkeypatch):
-    _stub_history(monkeypatch, _yahoo_history=None)
-    monkeypatch.setattr(sources, "_tradingview_close", lambda asset: None)
-    monkeypatch.setattr(sources.crypto, "price_usd", lambda conn, sym: None)
-    monkeypatch.setattr(sources, "_binance_price", lambda sym: 86000.0)
+def test_yahoo_crypto_bars_far_from_the_spot_fall_through(monkeypatch):
+    """Yahoo lists a clashing coin under a numbered ticker, so the plain SYM-USD can be
+    another token entirely (M-USD at 0.00029 while MemeCore trades at 1.22)."""
+    binance = [("2026-09-22", 100.0)]
+    _stub_history(monkeypatch, spot=100.0, _yahoo_history=BARS, _binance_history=binance)
+    assert sources.price_history(BTC, 30) == (binance, "Binance")
+
+
+def test_yahoo_crypto_bars_within_ten_percent_are_accepted(monkeypatch):
+    _stub_history(monkeypatch, spot=11.9, _yahoo_history=BARS, _binance_history=[("x", 1.0)])
+    assert sources.price_history(BTC, 30) == (BARS, "Yahoo")
+
+
+def test_yahoo_crypto_bars_are_accepted_without_a_spot(monkeypatch):
+    _stub_history(monkeypatch, spot=None, _yahoo_history=BARS, _binance_history=[("x", 1.0)])
+    assert sources.price_history(BTC, 30) == (BARS, "Yahoo")
+
+
+def _stub_crypto_prices(monkeypatch, **prices):
+    """Each current-price provider returns its given value (default None)."""
+    monkeypatch.setattr(sources, "_binance_price", lambda sym: prices.get("binance"))
+    monkeypatch.setattr(sources, "_bybit_price", lambda sym: prices.get("bybit"))
+    monkeypatch.setattr(sources.crypto, "price_usd", lambda conn, sym: prices.get("coingecko"))
+    monkeypatch.setattr(sources, "_tradingview_close", lambda asset: prices.get("tradingview"))
+    monkeypatch.setattr(sources, "_yahoo_history",
+                        lambda sym, days: [("2026-09-22", prices["yahoo"])] if "yahoo" in prices else None)
+
+
+def test_crypto_current_price_asks_the_exchanges_first(monkeypatch):
+    _stub_crypto_prices(monkeypatch, binance=86000.0, bybit=1.0, coingecko=2.0,
+                        tradingview=3.0, yahoo=4.0)
     assert sources.current_price(BTC) == (86000.0, "Binance")
+    _stub_crypto_prices(monkeypatch, bybit=1.0, coingecko=2.0, tradingview=3.0, yahoo=4.0)
+    assert sources.current_price(BTC) == (1.0, "Bybit")
+    _stub_crypto_prices(monkeypatch, coingecko=2.0, tradingview=3.0, yahoo=4.0)
+    assert sources.current_price(BTC) == (2.0, "CoinGecko")
+    _stub_crypto_prices(monkeypatch, tradingview=3.0, yahoo=4.0)
+    assert sources.current_price(BTC) == (3.0, "TradingView")
+    _stub_crypto_prices(monkeypatch, yahoo=4.0)
+    assert sources.current_price(BTC) == (4.0, "Yahoo")
+
+
+def test_crypto_spot_takes_the_first_exchange_that_answers_and_never_raises(monkeypatch, capsys):
+    def down(sym):
+        raise ConnectionError("x")
+    monkeypatch.setattr(sources, "_binance_price", down)
+    monkeypatch.setattr(sources, "_bybit_price", lambda sym: 1.22)
+    monkeypatch.setattr(sources.crypto, "price_usd", lambda conn, sym: 9.0)
+    assert sources._crypto_spot("M") == 1.22
+    monkeypatch.setattr(sources, "_bybit_price", down)
+    monkeypatch.setattr(sources.crypto, "price_usd", lambda conn, sym: None)
+    assert sources._crypto_spot("M") is None
+    assert capsys.readouterr() == ("", "")
+
+
+def test_bybit_price_parses_the_ticker(monkeypatch):
+    seen = {}
+
+    def fake(url, **params):
+        seen.update(params)
+        return _Resp({"result": {"list": [{"symbol": "MUSDT", "lastPrice": "1.2214"}]}})
+    monkeypatch.setattr(sources, "_get", fake)
+    assert sources._bybit_price("M") == 1.2214
+    assert seen == {"category": "spot", "symbol": "MUSDT"}
+    monkeypatch.setattr(sources, "_get", lambda url, **p: _Resp({"result": {"list": []}}))
+    with pytest.raises((IndexError, KeyError, TypeError, ValueError)):
+        sources._bybit_price("NOPE")
 
 
 def test_nasdaq_history_parses_rows(monkeypatch):
