@@ -138,39 +138,52 @@ def test_crypto_signal_is_dated_by_its_own_filing(conn):
 # ------------------------------------------------------------ the menu view
 @pytest.fixture
 def scored(monkeypatch):
-    """enrich_signals reaches the network; here every signal just scores 100."""
+    """enrich_signals reaches the network; here every signal just scores 100 and
+    clears the size floors for non-crypto signals."""
     def fake_enrich(conn, signals):
         for s in signals:
             s.score = 100.0
+            if not getattr(s, "crypto_kind", None):
+                s.market_cap_eur, s.avg_daily_value = 5e9, 5e7
         return signals
-    monkeypatch.setattr(menu.cluster, "enrich_signals", fake_enrich)
+    monkeypatch.setattr("cluster.enrich_signals", fake_enrich)
 
 
 def _shown(capsys) -> str:
     return capsys.readouterr().out
 
 
-def test_view_keeps_recent_buyable_stocks_and_crypto(conn, keyed, scored, capsys, monkeypatch):
+@pytest.fixture
+def no_prices(monkeypatch):
+    monkeypatch.setattr("positions.last_close", lambda ticker: None)
+
+
+def test_view_keeps_recent_buyable_stocks_and_crypto(conn, keyed, scored, no_prices, capsys,
+                                                      monkeypatch):
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
+    monkeypatch.setattr("crypto.price_trend", lambda conn, sym: {"ret_7d": 3.0, "above_ma20": True})
     recent = (TODAY - dt.timedelta(days=1)).isoformat()
-    add_sec_purchase(conn, "AAPL", "Buyer", 900_000, recent, filed_date=recent)
-    add_sec_purchase(conn, "ZZZZ", "Buyer", 900_000, recent, filed_date=recent)   # not on T212
+    for o in ("A", "B", "C"):
+        add_sec_purchase(conn, "AAPL", o, 900_000, recent, filed_date=recent)
+        add_sec_purchase(conn, "ZZZZ", o, 900_000, recent, filed_date=recent)   # not on T212
     db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
-        "acc", "Acme", "ACME", "1", "BTC", "P", 100, 80_000.0, None, recent, "8-K", "u"))
+        "acc", "Acme", "ACME", "1", "BTC", "P", 1000, 80_000.0, None, recent, "8-K", "u"))
     menu.show_signals(conn)
     out = _shown(capsys)
-    assert "AAPL" in out and "CRYPTO:BTC" in out and "ZZZZ" not in out
+    assert "Сильные" in out and "AAPL" in out and "CRYPTO:BTC" in out and "ZZZZ" not in out
 
 
-def test_view_drops_signals_disclosed_before_the_window(conn, keyed, scored, capsys, monkeypatch):
+def test_view_drops_signals_disclosed_before_the_window(conn, keyed, scored, no_prices, capsys,
+                                                         monkeypatch):
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
     add_sec_purchase(conn, "AAPL", "Buyer", 900_000, (TODAY - dt.timedelta(days=10)).isoformat(),
                      filed_date=(TODAY - dt.timedelta(days=5)).isoformat())
     menu.show_signals(conn)
-    assert "сигналов с баллом" in _shown(capsys)
+    assert "сигналов нет" in _shown(capsys)
 
 
-def test_view_without_a_key_says_so_and_keeps_stocks(conn, scored, capsys, monkeypatch, tmp_path):
+def test_view_without_a_key_says_so_and_keeps_stocks(conn, scored, no_prices, capsys,
+                                                      monkeypatch, tmp_path):
     monkeypatch.setattr(trading212, "ENV_FILE", tmp_path / "missing.env")
     monkeypatch.delenv("TRADING212_API_KEY", raising=False)
     recent = (TODAY - dt.timedelta(days=1)).isoformat()
@@ -178,3 +191,12 @@ def test_view_without_a_key_says_so_and_keeps_stocks(conn, scored, capsys, monke
     menu.show_signals(conn)
     out = _shown(capsys)
     assert "Trading 212 не проверялся" in out and "ZZZZ" in out
+
+
+def test_view_lists_open_positions(conn, keyed, scored, capsys, monkeypatch):
+    import positions
+    monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
+    monkeypatch.setattr("positions.last_close", lambda ticker: 110.0)
+    positions.open_position(conn, "AAPL", 100.0)
+    menu.show_signals(conn)
+    assert "Открытые позиции" in _shown(capsys)

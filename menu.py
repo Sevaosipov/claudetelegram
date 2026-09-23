@@ -6,12 +6,13 @@ Usage:
 """
 from __future__ import annotations
 
-import datetime as dt
 from pathlib import Path
 
 import cluster
 import db
+import positions
 import research
+import strategy
 import telegram_notify
 import termstyle
 import trading212
@@ -19,12 +20,6 @@ import trading212
 # Absolute, like bot.py's -- a relative path silently opened (and CREATED) an empty
 # database whenever the menu was launched from anywhere but the project directory.
 DB_PATH = Path(__file__).parent / "data" / "disclosures.db"
-
-# The bar run_daily.sh's Telegram digest uses (--min-score 35), so this view shows
-# what would reach the phone. It used to be 50, which no crypto signal can reach
-# (their score tops out at W_CRYPTO_BASE + CAP_CRYPTO_SIZE = 50).
-SIGNALS_MIN_SCORE = 35.0
-SIGNALS_MAX_AGE_DAYS = 3   # by disclosure date -- see cluster/recency.py
 
 
 def _find_signals(conn) -> list:
@@ -53,37 +48,16 @@ def _find_signals(conn) -> list:
 
 
 def show_signals(conn) -> None:
-    """Signals disclosed in the last SIGNALS_MAX_AGE_DAYS days, scoring at least
-    SIGNALS_MIN_SCORE, on crypto or on a stock Trading 212 sells. Includes signals
-    already sent to Telegram -- this is a browse, not a digest.
-
-    Filtered by date and by Trading 212 before scoring, because scoring is the step
-    that reaches the network (market cap, liquidity) and should only run on what
-    can survive."""
+    """The same selection the daily Telegram digest sends (strategy.py), computed
+    fresh and including signals already sent -- this is a browse, not a digest --
+    plus pending close alerts and the positions reported with /bought."""
     print()
     print(termstyle.header("СИГНАЛЫ"))
-
-    since = (dt.date.today() - dt.timedelta(days=SIGNALS_MAX_AGE_DAYS)).isoformat()
-    signals = [s for s in _find_signals(conn) if (cluster.disclosed_on(conn, s) or "") >= since]
-
-    t212 = trading212.availability(conn)
-    if t212 is None:
-        print("⚠️  Trading 212 не проверялся: нет TRADING212_API_KEY в .env "
-              "(см. .env.example) — показаны все акции.")
-    else:
-        signals = [s for s in signals if t212.can_buy(s.ticker, s.source)]
-
-    if signals:
-        signals = cluster.enrich_signals(conn, signals)
-        signals = [s for s in signals if getattr(s, "score", 0.0) >= SIGNALS_MIN_SCORE]
-    if not signals:
-        print(f"За последние {SIGNALS_MAX_AGE_DAYS} дня сигналов с баллом >= "
-              f"{SIGNALS_MIN_SCORE:.0f} нет.")
-        return
-    print(f"{len(signals)} за последние {SIGNALS_MAX_AGE_DAYS} дня, по убыванию балла:\n")
-    for s in signals:
-        print(telegram_notify.format_any_signal(s))
-        print()
+    selection = strategy.select(conn, _find_signals(conn), trading212.availability(conn))
+    closes = positions.check_exits(conn)
+    print(telegram_notify.format_tiered_digest(selection, closes, html=False))
+    print()
+    print(telegram_notify.format_positions(positions.open_positions(conn), positions.last_close))
 
 
 def show_research(conn) -> None:
