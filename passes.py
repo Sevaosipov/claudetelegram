@@ -24,6 +24,7 @@ import senate_efd
 import sweden
 import telegram_notify
 import universe
+
 CSV_PATH = Path(__file__).parent / "data" / "purchases_log.csv"
 
 CSV_FIELDS = [
