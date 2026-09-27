@@ -193,6 +193,52 @@ def test_flow_is_share_change_times_nav():
     assert (prev, day, flow) == ("2026-09-21", "2026-09-22", 500.0)
 
 
+def test_farside_page_parses():
+    flows = crypto_etf.parse_farside("BTC", fixture_text("farside_btc_snippet.html"))
+    got = sorted((f.coin, f.date, f.fund, f.flow_usd) for f in flows)
+    want = sorted([("BTC", "2026-09-24", "IBIT", 162.6e6), ("BTC", "2026-09-24", "FBTC", 12.9e6),
+                   ("BTC", "2026-09-24", "GBTC", -4.0e6), ("BTC", "2026-09-25", "IBIT", 1_097.0e6),
+                   ("BTC", "2026-09-25", "FBTC", -49.3e6)])
+    assert [g[:3] for g in got] == [w[:3] for w in want]
+    assert [g[3] for g in got] == pytest.approx([w[3] for w in want])
+
+
+def test_farside_page_without_a_table_is_empty():
+    assert crypto_etf.parse_farside("BTC", "<html>redesigned</html>") == []
+
+
+def test_etf_flows_are_stored_and_the_newest_day_is_rewritten(conn):
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", "2026-09-25", "IBIT", 1e6)])
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", "2026-09-25", "IBIT", 5e6)])   # late funds filled in
+    assert conn.execute("SELECT flow_usd FROM crypto_etf_flows").fetchall() == [(5e6,)]
+    assert db.etf_flow_count(conn, "BTC") == 1 and db.etf_flow_count(conn, "ETH") == 0
+
+
+def test_etf_pass_loads_the_full_history_once(conn, monkeypatch):
+    import passes
+    calls = []
+    monkeypatch.setattr(crypto_etf, "fetch_snapshots", lambda: [])
+
+    def fake(coin, full_history=False, session=None):
+        calls.append((coin, full_history))
+        return [crypto_etf.Flow(coin, "2026-09-25", "IBIT" if coin == "BTC" else "ETHA", 1e6)]
+    monkeypatch.setattr(crypto_etf, "fetch_farside", fake)
+    passes.run_crypto_etf_pass(conn, None)
+    passes.run_crypto_etf_pass(conn, None)
+    assert calls == [("BTC", True), ("ETH", True), ("BTC", False), ("ETH", False)]
+
+
+def test_etf_pass_survives_farside_being_down(conn, monkeypatch):
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_snapshots", lambda: [])
+
+    def down(coin, full_history=False, session=None):
+        raise crypto_etf.requests.RequestException("down")
+    monkeypatch.setattr(crypto_etf, "fetch_farside", down)
+    assert passes.run_crypto_etf_pass(conn, None) == 0
+    assert db.etf_flow_count(conn, "BTC") == 0
+
+
 def _add_etf(conn, fund, days_ago, shares, nav=50.0):
     coin = crypto_etf.FUNDS[fund][0]
     db.save_crypto_etf_snapshot(conn, crypto_etf.Snapshot(fund, coin, _days_ago(days_ago), shares, nav))

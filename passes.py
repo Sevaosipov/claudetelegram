@@ -489,8 +489,10 @@ def run_crypto_treasury_pass(conn, args) -> int:
 
 def run_crypto_etf_pass(conn, args) -> int:
     """Today's issuer-published share count and NAV per covered spot ETF
-    (crypto_etf.py). Returns how many snapshots were new -- zero on a weekend or a
-    second run the same day, which is why the liveness check tolerates streaks."""
+    (crypto_etf.py), plus every US spot fund's daily flows from Farside -- the whole
+    history on the first run for a coin, the recent table after that. Returns how
+    many issuer snapshots were new -- zero on a weekend or a second run the same
+    day, which is why the liveness check tolerates streaks."""
     new_count = 0
     for snap in crypto_etf.fetch_snapshots():
         if not db.save_crypto_etf_snapshot(conn, snap):
@@ -501,6 +503,15 @@ def run_crypto_etf_pass(conn, args) -> int:
             "WHERE fund = ? ORDER BY as_of DESC LIMIT 2", (snap.fund,)).fetchall()
         for prev_as_of, as_of, flow in crypto_etf.flows(history):
             print(telegram_notify.format_etf_flow_line(snap.fund, snap.coin, prev_as_of, as_of, flow))
+    for coin in crypto_etf.FARSIDE_URLS:
+        full = db.etf_flow_count(conn, coin) == 0
+        try:
+            flows = crypto_etf.fetch_farside(coin, full_history=full)
+        except Exception as e:  # Farside down: the finder falls back to the issuer snapshots
+            print(f"[CRYPTO] Farside {coin} unavailable: {type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        db.save_etf_flows(conn, flows)
+        print(f"[CRYPTO] Farside {coin}: {len(flows)} fund-day(s)" + (" (full history)" if full else ""))
     conn.commit()
     return new_count
 

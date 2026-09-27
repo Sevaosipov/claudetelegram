@@ -415,6 +415,17 @@ CREATE TABLE IF NOT EXISTS crypto_etf_snapshots (
     PRIMARY KEY (fund, as_of)
 );
 
+-- Daily net flow per US spot ETF, in $, from Farside (crypto_etf.parse_farside). The
+-- newest day is rewritten on every run: funds that report late fill in over the day.
+CREATE TABLE IF NOT EXISTS crypto_etf_flows (
+    coin      TEXT NOT NULL,
+    date      TEXT NOT NULL,   -- ISO
+    fund      TEXT NOT NULL,
+    flow_usd  REAL NOT NULL,
+    source    TEXT NOT NULL DEFAULT 'farside',
+    PRIMARY KEY (coin, date, fund)
+);
+
 -- Oslo ticker -> ISIN, from Euronext's instrument search (norway.cached_isin).
 -- isin '' = Euronext has no Oslo listing with that symbol (re-checked after a week).
 CREATE TABLE IF NOT EXISTS oslo_isins (
@@ -1025,6 +1036,21 @@ def save_crypto_etf_snapshot(conn: sqlite3.Connection, s) -> bool:
         (s.fund, s.coin, s.as_of, s.shares_outstanding, s.nav_usd),
     )
     return cur.rowcount > 0
+
+
+def save_etf_flows(conn: sqlite3.Connection, flows) -> None:
+    """flows are crypto_etf.Flow rows; a (coin, date, fund) already stored is
+    overwritten, so a late-reporting fund fills in a day seen earlier."""
+    conn.executemany(
+        "INSERT OR REPLACE INTO crypto_etf_flows (coin, date, fund, flow_usd, source) "
+        "VALUES (?, ?, ?, ?, 'farside')",
+        [(f.coin, f.date, f.fund, f.flow_usd) for f in flows])
+    conn.commit()
+
+
+def etf_flow_count(conn: sqlite3.Connection, coin: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM crypto_etf_flows WHERE coin = ?",
+                        (coin,)).fetchone()[0]
 
 
 def save_crypto_wallet_snapshot(conn: sqlite3.Connection, b, taken_at: str) -> None:

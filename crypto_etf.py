@@ -17,6 +17,7 @@ on; snapshots are stored, and every flow is computed from two of them.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import re
 from dataclasses import dataclass
 
@@ -90,3 +91,74 @@ def flows(snapshots: list[tuple[str, float, float]]) -> list[tuple[str, str, flo
     are created or redeemed at that day's NAV."""
     rows = sorted(snapshots)
     return [(a[0], b[0], (b[1] - a[1]) * b[2]) for a, b in zip(rows, rows[1:])]
+
+
+# Farside Investors publishes every US spot fund's daily net flow, in $ millions, in
+# one table per coin -- all the funds, where the issuer pages above cover only
+# BlackRock's two. Outflows are in parentheses, "-" is a fund that hasn't reported yet.
+FARSIDE_URLS = {"BTC": "https://farside.co.uk/btc/", "ETH": "https://farside.co.uk/eth/"}
+FARSIDE_ALL_URLS = {"BTC": "https://farside.co.uk/bitcoin-etf-flow-all-data/",
+                    "ETH": "https://farside.co.uk/ethereum-etf-flow-all-data/"}
+_TABLE_RE = re.compile(r"<table.*?</table>", re.S | re.I)
+_ROW_RE = re.compile(r"<tr.*?</tr>", re.S | re.I)
+_CELL_RE = re.compile(r"<t[hd][^>]*>(.*?)</t[hd]>", re.S | re.I)
+_FUND_RE = re.compile(r"[A-Z]{2,5}")
+
+
+@dataclass(frozen=True)
+class Flow:
+    coin: str
+    date: str          # ISO
+    fund: str
+    flow_usd: float    # net, negative for an outflow
+
+
+def _cells(row: str) -> list[str]:
+    return [html.unescape(re.sub(r"<[^>]+>", "", c)).strip() for c in _CELL_RE.findall(row)]
+
+
+def _farside_amount(text: str) -> float | None:
+    t = text.replace(",", "").strip()
+    negative = t.startswith("(") and t.endswith(")")
+    try:
+        value = float(t.strip("()"))
+    except ValueError:          # "-", "", anything else: no figure yet
+        return None
+    return (-value if negative else value) * 1e6
+
+
+def parse_farside(coin: str, raw_html: str) -> list[Flow]:
+    """Every (day, fund) figure in the page's flow table, the largest table on it. The
+    fund row is the header row whose second cell is a ticker; fee and summary rows
+    (Total, Average, Maximum, Minimum) carry no date and are skipped, as is the
+    unnamed Total column."""
+    tables = _TABLE_RE.findall(raw_html)
+    if not tables:
+        return []
+    funds: list[str] | None = None
+    out = []
+    for row in _ROW_RE.findall(max(tables, key=len)):
+        cells = _cells(row)
+        if funds is None:
+            if len(cells) > 2 and _FUND_RE.fullmatch(cells[1]):
+                funds = cells
+            continue
+        try:
+            day = dt.datetime.strptime(cells[0], "%d %b %Y").date().isoformat()
+        except (ValueError, IndexError):
+            continue
+        for fund, text in zip(funds[1:], cells[1:]):
+            if not _FUND_RE.fullmatch(fund):
+                continue
+            usd = _farside_amount(text)
+            if usd is not None:
+                out.append(Flow(coin, day, fund, usd))
+    return out
+
+
+def fetch_farside(coin: str, full_history: bool = False,
+                  session: requests.Session | None = None) -> list[Flow]:
+    url = (FARSIDE_ALL_URLS if full_history else FARSIDE_URLS)[coin]
+    resp = (session or requests.Session()).get(url, headers=_HEADERS, timeout=30)
+    resp.raise_for_status()
+    return parse_farside(coin, resp.text)
