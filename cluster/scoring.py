@@ -136,9 +136,11 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
 
     since = (dt.date.today() - dt.timedelta(days=window_days)).isoformat()
     placeholders = ",".join("?" * len(tickers))
+    # A journaled caution (an outflow, a sale) is no evidence for a buy.
     rows = conn.execute(
         f"SELECT DISTINCT ticker, source FROM signal_journal "
-        f"WHERE ticker IN ({placeholders}) AND emitted_at >= ?",
+        f"WHERE ticker IN ({placeholders}) AND emitted_at >= ? "
+        f"AND COALESCE(tier, '') != 'caution'",
         (*tickers, since),
     ).fetchall()
     journal_sources: dict[str, set[str]] = {t: set() for t in tickers}

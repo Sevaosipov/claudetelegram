@@ -154,6 +154,18 @@ def test_backtest_ticker_empty_when_no_purchases(conn, monkeypatch):
     assert result == {"ticker": "ZZZZ", "n_purchases": 0, "by_horizon": {}}
 
 
+def test_collect_signals_leaves_out_cautions(conn, monkeypatch):
+    """A caution shares its source and kind with a buy (an ETF outflow vs an
+    inflow); averaged together, the buy groups would mix both directions."""
+    import db
+    for tier in (None, "candidate", "caution"):
+        db.journal_signal(conn, {"source": "CRYPTO_ETF", "kind": "etf_flow",
+                                 "ticker": "CRYPTO:BTC", "tier": tier})
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 4.0, "excess": 2.0}})
+    assert len(backtest.collect_signals(conn, (21,))) == 2
+
+
 def test_collect_opinions_reads_journal_and_attaches_returns(conn, monkeypatch):
     import db
     db.journal_opinion(conn, "AAA", {"score": 24.0, "label": "Скорее покупать",

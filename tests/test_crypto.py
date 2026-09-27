@@ -564,6 +564,16 @@ def test_politician_and_company_buying_the_same_coin_corroborate(conn):
         "HOUSE": ["CRYPTO_TREASURY"], "CRYPTO_TREASURY": ["HOUSE"]}
 
 
+def test_a_caution_does_not_corroborate_a_buy(conn):
+    db.journal_signal(conn, {"source": "CRYPTO_ETF", "kind": "etf_flow", "ticker": "CRYPTO:BTC",
+                             "tier": "caution"})
+    db.journal_signal(conn, {"source": "HOUSE", "kind": "cluster", "ticker": "CRYPTO:BTC"})
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn)
+    cluster.find_corroboration(conn, [sig])
+    assert sig.corroborated_by == ["HOUSE"]
+
+
 @pytest.mark.parametrize("html", [False, True])
 def test_crypto_signal_formats(conn, html):
     _add_treasury(conn, 1_000)
