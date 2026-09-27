@@ -448,6 +448,11 @@ def test_etf_day_floor_applies_in_a_quiet_market(conn):
     assert cluster.find_etf_flow_signals(conn) == []
 
 
+def test_etf_streak_floor_applies_in_a_quiet_market(conn):
+    _add_farside(conn, "BTC", [-10, 10] * 30 + [-60, -60, -60])   # top 3-day total, but $180m < $250m
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
 def test_unusual_outflow_streak_is_a_bearish_signal(conn):
     _add_farside(conn, "ETH", [-30, 40] * 30 + [-90, -90, -90])
     [sig] = cluster.find_etf_flow_signals(conn)

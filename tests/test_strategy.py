@@ -277,6 +277,16 @@ def test_crypto_outflow_is_a_caution_not_a_buy(conn, sized, monkeypatch):
     assert any("цена подтверждает" in m for m in t.met)
 
 
+def test_exchange_inflow_is_a_caution(conn, sized, monkeypatch):
+    _trend(monkeypatch, {"ret_7d": -3.0, "above_ma20": False})
+    inflow = cluster.CryptoSignal("CRYPTO_ONCHAIN", "exchange_flow", "CRYPTO:BTC", "кошельки бирж",
+                                  False, 3000, 2e8, RECENT, RECENT, [], None, ["k"])
+    sel = strategy.select(conn, [inflow], _T212())
+    assert not sel.strong and not sel.candidates
+    [t] = sel.cautions
+    assert t.signal is inflow and t.tier == strategy.CAUTION
+
+
 def test_caution_the_price_does_not_confirm_says_so(conn, sized, monkeypatch):
     _trend(monkeypatch, {"ret_7d": 2.0, "above_ma20": True})
     [t] = strategy.select(conn, [_etf(bullish=False)], _T212()).cautions
