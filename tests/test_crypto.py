@@ -204,6 +204,14 @@ def test_a_big_week_of_company_buying_is_a_signal(conn):
     assert "порог по умолчанию: мало истории" in sig.details
 
 
+def test_a_trade_without_a_filing_date_is_ignored(conn):
+    db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
+        "acc-undated", "Other Co", "OTH", "2", "BTC", "P", 5_000, 80_000.0, None, "", "8-K", "u"))
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.units == 1_000 and sig.company == "компании: Acme Corp"
+
+
 def test_a_small_week_is_not(conn):
     _add_treasury(conn, 500)                                     # $40m, under €50m
     assert cluster.find_treasury_signals(conn, today=TODAY) == []

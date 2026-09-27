@@ -109,7 +109,8 @@ def _treasury_rows(conn) -> list[dict]:
     rows = []
     for acc, company, co_ticker, cik, coin, side, units, avg, total, filed, url in conn.execute(
             "SELECT accession, company, ticker, cik, coin, side, units, avg_price_usd, total_usd, "
-            "filed_date, source_url FROM crypto_treasury_txns WHERE filed_date IS NOT NULL"):
+            "filed_date, source_url FROM crypto_treasury_txns "
+            "WHERE filed_date IS NOT NULL AND filed_date != ''"):
         usd = total or (units * avg if avg else (units * ref[coin] if ref.get(coin) else None))
         rows.append({"acc": acc, "company": company, "co_ticker": co_ticker,
                      "who": cik or company, "coin": coin, "side": side, "units": units,
