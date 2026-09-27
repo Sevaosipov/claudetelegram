@@ -269,15 +269,23 @@ def _issuer_etf_days(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
 
 
 def _farside_etf_days(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
-    """coin -> [(date, net_flow_usd, funds)] oldest first, summed across every fund."""
+    """coin -> [(date, net_flow_usd, funds)] oldest first, summed across every fund.
+    A newest day that lacks a fund the day before had is still filling in (Farside
+    shows "-" until a fund reports) and is left out: judged on a partial sum, its
+    date-keyed alert would fire on the wrong number and never again on the real one."""
     per_day: dict[str, dict[str, list]] = {}
     for coin, day, fund, flow in conn.execute(
             "SELECT coin, date, fund, flow_usd FROM crypto_etf_flows"):
         slot = per_day.setdefault(coin, {}).setdefault(day, [0.0, []])
         slot[0] += flow
         slot[1].append(fund)
-    return {coin: [(d, v[0], sorted(v[1])) for d, v in sorted(days.items())]
-            for coin, days in per_day.items()}
+    out = {}
+    for coin, days in per_day.items():
+        rows = [(d, v[0], sorted(v[1])) for d, v in sorted(days.items())]
+        if len(rows) >= 2 and set(rows[-2][2]) - set(rows[-1][2]):
+            rows.pop()
+        out[coin] = rows
+    return out
 
 
 def etf_flow_days(conn, today: dt.date | None = None) -> dict[str, tuple[str, list]]:

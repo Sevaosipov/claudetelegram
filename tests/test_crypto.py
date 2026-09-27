@@ -420,6 +420,17 @@ def test_stale_farside_falls_back_to_the_issuer_snapshots(conn):
     assert "IBIT" in sig.company and "только IBIT/ETHA (Farside недоступен)" in sig.details
 
 
+def test_a_partial_newest_day_waits_for_every_fund(conn):
+    for fund in ("IBIT", "GBTC"):
+        _add_farside(conn, "BTC", [5, -4] * 30, fund=fund, newest_days_ago=2)
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(1), "GBTC", -150e6)])   # IBIT still "-"
+    assert cluster.find_etf_flow_signals(conn) == []
+    assert cluster.daily_etf_flows(conn)["BTC"][-1][0] == _days_ago(2)
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(1), "IBIT", 700e6)])
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.bullish and sig.details[0].startswith(f"за {_days_ago(1)}: +$550 млн")
+
+
 def test_dossier_flows_are_summed_across_farside_funds(conn):
     _add_farside(conn, "BTC", [10, 20])
     db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(1), "FBTC", 5e6)])
