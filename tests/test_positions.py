@@ -247,6 +247,7 @@ def test_a_caution_confirmed_by_the_price_closes_a_coin(conn):
                                     trend_fn=_trend(_FALLING))
     assert alert.trigger == "caution" and alert.last_price == 79_900.0
     assert "отток из спот-ETF" in alert.detail and "-6.2% за 7 дн." in alert.detail
+    assert "(€900 млн)" in alert.detail
 
 
 def test_an_unconfirmed_caution_does_not_close(conn):

@@ -214,7 +214,7 @@ def _crypto_caution(conn, pos: Position, today: dt.date, trend_fn) -> str | None
     if not crypto.trend_confirms_down(trend):
         return None
     kind, value = row
-    what = _CAUTION_TEXT.get(kind, "сигнал осторожности") + (f" (€{value:,.0f})" if value else "")
+    what = _CAUTION_TEXT.get(kind, "сигнал осторожности") + (f" (€{value / 1e6:,.0f} млн)" if value else "")
     return (f"{what}; цена подтверждает: {trend['ret_7d']:+.1f}% за 7 дн., "
             f"ниже 20-дн. средней")
 
