@@ -14,6 +14,7 @@ import crypto_etf
 import crypto_treasury as ct
 import db
 import house_ptr
+import strategy
 import telegram_notify
 import tradingview
 from conftest import add_house_txn, fixture_text
@@ -574,3 +575,24 @@ def test_trend_is_cached_between_calls(conn, monkeypatch):
 def test_no_price_history_means_no_trend(conn, monkeypatch):
     _closes(monkeypatch, None)
     assert crypto.price_trend(conn, "BTC") is None and not crypto.trend_confirms(None)
+
+
+def test_falling_price_below_its_average_confirms_a_caution(conn, monkeypatch):
+    _closes(monkeypatch, [100.0] * 20 + [99, 98, 97, 96, 95, 94, 93, 92])
+    assert crypto.trend_confirms_down(crypto.price_trend(conn, "BTC"))
+
+
+def test_rising_price_does_not_confirm_a_caution(conn, monkeypatch):
+    _closes(monkeypatch, [100.0] * 20 + [101, 102, 103, 104, 105, 106, 107, 110])
+    assert not crypto.trend_confirms_down(crypto.price_trend(conn, "BTC"))
+    assert not crypto.trend_confirms_down(None)
+
+
+def test_cautions_are_journaled_and_marked_even_though_never_sent(conn):
+    _add_treasury(conn, 200, side="S")
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    sig.tier = strategy.CAUTION
+    bot._record_cautions(conn, strategy.Selection([], [], True, cautions=[strategy.Tiered(sig, "caution")]))
+    assert conn.execute("SELECT tier, kind, ticker FROM signal_journal").fetchall() == [
+        ("caution", "treasury", "CRYPTO:BTC")]
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []

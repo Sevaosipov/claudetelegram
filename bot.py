@@ -201,6 +201,8 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
 
     for t in selection.strong + selection.candidates:
         print(f"[{t.tier}] " + telegram_notify.format_any_signal(t.signal))
+    for t in selection.cautions:
+        print("[caution] " + telegram_notify.format_any_signal(t.signal))
     return selection
 
 
@@ -265,6 +267,13 @@ def _commit_signals(conn, signals) -> None:
             cluster.commit_stake_alert(conn, s)
         else:
             cluster.commit_alert(conn, s)
+
+
+def _record_cautions(conn, selection) -> None:
+    """Caution signals are never pushed -- the menu's Сигналы shows them -- but they
+    are journaled and marked alerted on the run that finds them: a coin position's
+    close alert reads them from the journal (positions.check_exits)."""
+    _commit_signals(conn, [t.signal for t in selection.cautions])
 
 
 def _send_digest(conn, selection, closes) -> bool:
@@ -596,6 +605,7 @@ def main():
             print(f"[stale] {x}", file=sys.stderr)
 
         selection = run_cluster_pass(conn, args)
+        _record_cautions(conn, selection)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))

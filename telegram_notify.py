@@ -596,9 +596,11 @@ def format_close_alert(alert, *, html: bool = True) -> str:
     return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
 
 
-def format_tiered_digest(selection, closes: list, *, html: bool = True) -> str:
+def format_tiered_digest(selection, closes: list, *, html: bool = True,
+                         include_cautions: bool = False) -> str:
     """One message: 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть, 🚨 Выходы -- the daily
-    Telegram digest and the menu's "Сигналы" view (html=False) both render this."""
+    Telegram digest and the menu's "Сигналы" view (html=False) both render this.
+    Only the menu passes include_cautions: caution signals are never pushed."""
     parts = []
     if not selection.t212_checked:
         parts.append("⚠️ Trading 212 не проверялся (нет ключа в .env) — показаны все акции.")
@@ -616,7 +618,12 @@ def format_tiered_digest(selection, closes: list, *, html: bool = True) -> str:
     if selection.exits:
         parts.append(_b(f"🚨 Выходы ({len(selection.exits)})", html))
         parts += [format_any_signal(s, html=html) for s in selection.exits]
-    if not (selection.strong or selection.candidates or closes or selection.exits):
+    cautions = getattr(selection, "cautions", []) if include_cautions else []
+    if cautions:
+        parts.append(_b(f"⚠️ Осторожно ({len(cautions)})", html))
+        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
+                  for t in cautions]
+    if not (selection.strong or selection.candidates or closes or selection.exits or cautions):
         parts.append("За последние 3 дня сигналов нет.")
     return "\n\n".join(parts)
 

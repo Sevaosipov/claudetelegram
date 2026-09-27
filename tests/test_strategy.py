@@ -268,10 +268,37 @@ def test_crypto_without_a_price_check_is_a_candidate(conn, sized, monkeypatch):
     assert "цена не проверена" in t.missed
 
 
-def test_crypto_outflow_is_never_listed(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
+def test_crypto_outflow_is_a_caution_not_a_buy(conn, sized, monkeypatch):
+    _trend(monkeypatch, {"ret_7d": -3.0, "above_ma20": False})
     sel = strategy.select(conn, [_etf(bullish=False)], _T212())
     assert not sel.strong and not sel.candidates
+    [t] = sel.cautions
+    assert t.tier == strategy.CAUTION and t.signal.tier == strategy.CAUTION
+    assert any("цена подтверждает" in m for m in t.met)
+
+
+def test_caution_the_price_does_not_confirm_says_so(conn, sized, monkeypatch):
+    _trend(monkeypatch, {"ret_7d": 2.0, "above_ma20": True})
+    [t] = strategy.select(conn, [_etf(bullish=False)], _T212()).cautions
+    assert not t.met and any("цена не подтверждает" in m for m in t.missed)
+
+
+def test_caution_without_a_price_says_so(conn, sized, monkeypatch):
+    _trend(monkeypatch, None)
+    [t] = strategy.select(conn, [_etf(bullish=False)], _T212()).cautions
+    assert t.missed == ["цена не проверена"]
+
+
+def test_old_caution_is_not_listed(conn, sized, monkeypatch):
+    _trend(monkeypatch, None)
+    old = cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "x", False, None, 5e8,
+                               "2026-01-01", "2026-01-01", [], None, ["k"])
+    assert strategy.select(conn, [old], _T212()).cautions == []
+
+
+def test_inflows_are_not_cautions(conn, sized, monkeypatch):
+    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
+    assert strategy.select(conn, [_etf()], _T212()).cautions == []
 
 
 def test_small_treasury_buy_is_not_listed(conn, sized, monkeypatch):

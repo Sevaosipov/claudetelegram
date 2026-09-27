@@ -173,6 +173,16 @@ def test_view_keeps_recent_buyable_stocks_and_crypto(conn, keyed, scored, no_pri
     assert "Сильные" in out and "AAPL" in out and "CRYPTO:BTC" in out and "ZZZZ" not in out
 
 
+def test_view_shows_crypto_cautions(conn, keyed, scored, no_prices, capsys, monkeypatch):
+    monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
+    monkeypatch.setattr("crypto.price_trend", lambda conn, sym: {"ret_7d": -4.0, "above_ma20": False})
+    db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
+        "acc-s", "Acme", "ACME", "1", "BTC", "S", 200, 80_000.0, None, TODAY.isoformat(), "8-K", "u"))
+    menu.show_signals(conn)
+    out = _shown(capsys)
+    assert "Осторожно (1)" in out and "КОМПАНИЯ ПРОДАЛА" in out and "цена подтверждает" in out
+
+
 def test_view_drops_signals_disclosed_before_the_window(conn, keyed, scored, no_prices, capsys,
                                                          monkeypatch):
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
