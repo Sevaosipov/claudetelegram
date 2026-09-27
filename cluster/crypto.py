@@ -25,9 +25,17 @@ import crypto_etf
 import db
 import fx
 
-# A company adding under this much to its balance sheet is a rounding error in the
-# market for the coin, however large it is for the company.
-TREASURY_MIN_VALUE_EUR = 500_000
+# Company demand: every purchase of a coin filed this calendar week (Monday to
+# today), summed across companies. Strategy and a few imitators buy almost every
+# week, so a single filing says little -- the week is a signal only when it is above
+# what TREASURY_TOP_SHARE of the previous weeks reached, and at least the floor.
+TREASURY_WEEK_FLOOR_EUR = 50e6
+TREASURY_HISTORY_WEEKS = 52
+TREASURY_MIN_HISTORY_WEEKS = 8
+TREASURY_FIRST_BUY_COVERAGE_DAYS = 365   # "first purchase ever" needs this much history
+# A company selling coins is rare and is news: any single filing from this size is a
+# caution signal, for TREASURY_WINDOW_DAYS after it was filed.
+TREASURY_SALE_MIN_EUR = 10e6
 TREASURY_WINDOW_DAYS = 14
 # Spot-ETF net flow, in USD, summed across a coin's funds. "Unusual" is judged against
 # the coin's own recent days -- the top 10% of the previous ETF_HISTORY_DAYS, with a
@@ -79,53 +87,148 @@ def _is_new(conn, source: str, keys: list[str]) -> bool:
     return any(db.get_alert_state(conn, source, k) is None for k in keys)
 
 
-def find_treasury_signals(conn, min_value_eur: float = TREASURY_MIN_VALUE_EUR,
-                          window_days: int = TREASURY_WINDOW_DAYS,
-                          ignore_alert_state: bool = False) -> list[CryptoSignal]:
-    """One signal per filing and coin: a company buying (or selling) coins for its
-    own balance sheet. A trade whose value couldn't be parsed is kept -- unknown is
-    not small -- and valued at spot by enrich_signals."""
-    since = (dt.date.today() - dt.timedelta(days=window_days)).isoformat()
-    rows = conn.execute(
-        """SELECT accession, company, ticker, coin, side, units, avg_price_usd, total_usd,
-                  filed_date, source_url
-           FROM crypto_treasury_txns WHERE filed_date >= ? ORDER BY filed_date""",
-        (since,),
-    ).fetchall()
-    grouped: dict[tuple, dict] = {}
-    for acc, company, co_ticker, coin, side, units, avg, total, filed, url in rows:
-        g = grouped.setdefault((acc, coin, side), {
-            "company": company, "co_ticker": co_ticker, "units": 0.0, "usd": 0.0,
-            "usd_known": True, "avgs": [], "filed": filed, "url": url,
-        })
-        g["units"] += units
-        value = total or (units * avg if avg else None)
-        if value is None:
-            g["usd_known"] = False
-        else:
-            g["usd"] += value
-        if avg:
-            g["avgs"].append(avg)
+def _monday(d: dt.date) -> dt.date:
+    return d - dt.timedelta(days=d.weekday())
 
+
+def _usd_short(v: float) -> str:
+    for unit, suffix in ((1e9, "млрд"), (1e6, "млн"), (1e3, "тыс")):
+        if abs(v) >= unit:
+            return f"${v / unit:,.1f} {suffix}"
+    return f"${v:,.0f}"
+
+
+def _treasury_rows(conn) -> list[dict]:
+    """Every stored trade, with a dollar value: the filing's own total, else units x
+    its average price, else units x the latest average price any filing stated for
+    the coin, else None."""
+    ref = dict(conn.execute(
+        "SELECT coin, avg_price_usd FROM crypto_treasury_txns t WHERE avg_price_usd IS NOT NULL "
+        "AND filed_date = (SELECT max(filed_date) FROM crypto_treasury_txns "
+        "                  WHERE coin = t.coin AND avg_price_usd IS NOT NULL)").fetchall())
+    rows = []
+    for acc, company, co_ticker, cik, coin, side, units, avg, total, filed, url in conn.execute(
+            "SELECT accession, company, ticker, cik, coin, side, units, avg_price_usd, total_usd, "
+            "filed_date, source_url FROM crypto_treasury_txns WHERE filed_date IS NOT NULL"):
+        usd = total or (units * avg if avg else (units * ref[coin] if ref.get(coin) else None))
+        rows.append({"acc": acc, "company": company, "co_ticker": co_ticker,
+                     "who": cik or company, "coin": coin, "side": side, "units": units,
+                     "avg": avg, "usd": usd, "filed": dt.date.fromisoformat(filed[:10]),
+                     "url": url})
+    return rows
+
+
+def _weekly_demand_signals(conn, rows: list[dict], today: dt.date,
+                           ignore_alert_state: bool) -> list[CryptoSignal]:
+    monday = _monday(today)
+    coverage = min((r["filed"] for r in rows), default=None)
+    weeks_covered = (monday - _monday(coverage)).days // 7 if coverage else 0
+    n_hist = min(TREASURY_HISTORY_WEEKS, weeks_covered)
+    relative = n_hist >= TREASURY_MIN_HISTORY_WEEKS
+    first_buy_known = (coverage is not None
+                       and (today - coverage).days >= TREASURY_FIRST_BUY_COVERAGE_DAYS)
     signals = []
-    for (acc, coin, side), g in grouped.items():
-        value_eur = fx.to_eur(g["usd"], "USD", conn) if g["usd_known"] else None
-        if value_eur is not None and value_eur < min_value_eur:
+    for coin in sorted({r["coin"] for r in rows}):
+        buys = [r for r in rows if r["coin"] == coin and r["side"] == "P"]
+        week = [r for r in buys if monday <= r["filed"] <= today]
+        if not week:
             continue
-        keys = [f"{acc}|{coin}|{side}"]
+        week_usd = sum(r["usd"] or 0.0 for r in week)
+        week_eur = fx.to_eur(week_usd, "USD", conn) if week_usd else 0.0
+        if week_eur < TREASURY_WEEK_FLOOR_EUR:
+            continue
+        hist = []
+        for k in range(1, n_hist + 1):
+            start = monday - dt.timedelta(weeks=k)
+            usd = sum(r["usd"] or 0.0 for r in buys
+                      if start <= r["filed"] < start + dt.timedelta(weeks=1))
+            hist.append(fx.to_eur(usd, "USD", conn) if usd else 0.0)
+        if relative and week_eur <= _p90(hist):
+            continue
+        iso_year, iso_week, _ = today.isocalendar()
+        keys = [f"{coin}|week|{iso_year}-W{iso_week:02d}"]
         if not ignore_alert_state and not _is_new(conn, "CRYPTO_TREASURY", keys):
             continue
-        who = f"{g['company']} ({g['co_ticker']})" if g["co_ticker"] else g["company"]
-        details = []
-        if g["avgs"]:
-            details.append(f"средняя цена ${sum(g['avgs']) / len(g['avgs']):,.0f} за {coin}")
+
+        earlier = {r["who"] for r in buys if r["filed"] < monday}
+        by_company: dict[str, dict] = {}
+        for r in week:
+            c = by_company.setdefault(r["who"], {
+                "name": f"{r['company']} ({r['co_ticker']})" if r["co_ticker"] else r["company"],
+                "plain": r["company"], "usd": 0.0, "url": r["url"]})
+            c["usd"] += r["usd"] or 0.0
+        ranked = sorted(by_company.items(), key=lambda kv: kv[1]["usd"], reverse=True)
+        buyers = []
+        for who, c in ranked:
+            amount = _usd_short(c["usd"]) if c["usd"] else "сумма неизвестна"
+            first = " (впервые)" if first_buy_known and who not in earlier else ""
+            buyers.append(f"{c['name']} {amount}{first}")
+        head = f"{_usd_short(week_usd)} за неделю"
+        if relative:
+            head += f" — больше, чем в {_share_below(week_eur, hist) * 100:.0f}% из {len(hist)} недель"
+        details = [head, " · ".join(buyers)]
+        if not relative:
+            details.append("порог по умолчанию: мало истории")
         signals.append(CryptoSignal(
             source="CRYPTO_TREASURY", crypto_kind="treasury", ticker=crypto.ticker(coin),
-            company=who, bullish=(side == "P"), units=g["units"], total_value=value_eur,
-            window_start=g["filed"], window_end=g["filed"], details=details, url=g["url"],
-            alert_keys=keys, member_names=[g["company"]],
+            company="компании: " + ", ".join(c["plain"] for _w, c in ranked), bullish=True,
+            units=sum(r["units"] for r in week), total_value=week_eur,
+            window_start=min(r["filed"] for r in week).isoformat(),
+            window_end=max(r["filed"] for r in week).isoformat(),
+            details=details, url=ranked[0][1]["url"], alert_keys=keys,
+            member_names=[c["plain"] for _w, c in ranked],
         ))
     return signals
+
+
+def _sale_signals(conn, rows: list[dict], today: dt.date,
+                  ignore_alert_state: bool) -> list[CryptoSignal]:
+    since = today - dt.timedelta(days=TREASURY_WINDOW_DAYS)
+    grouped: dict[tuple, dict] = {}
+    for r in rows:
+        if r["side"] != "S" or r["filed"] < since:
+            continue
+        g = grouped.setdefault((r["acc"], r["coin"]), {"r": r, "units": 0.0, "usd": 0.0,
+                                                       "known": True, "avgs": []})
+        g["units"] += r["units"]
+        if r["usd"] is None:
+            g["known"] = False
+        else:
+            g["usd"] += r["usd"]
+        if r["avg"]:
+            g["avgs"].append(r["avg"])
+    signals = []
+    for (acc, coin), g in grouped.items():
+        r = g["r"]
+        # Unknown is not small: a sale with no stated value is kept and valued at
+        # spot by enrich_signals.
+        value_eur = fx.to_eur(g["usd"], "USD", conn) if g["known"] else None
+        if value_eur is not None and value_eur < TREASURY_SALE_MIN_EUR:
+            continue
+        keys = [f"{acc}|{coin}|S"]
+        if not ignore_alert_state and not _is_new(conn, "CRYPTO_TREASURY", keys):
+            continue
+        who = f"{r['company']} ({r['co_ticker']})" if r["co_ticker"] else r["company"]
+        details = ([f"средняя цена ${sum(g['avgs']) / len(g['avgs']):,.0f} за {coin}"]
+                   if g["avgs"] else [])
+        signals.append(CryptoSignal(
+            source="CRYPTO_TREASURY", crypto_kind="treasury", ticker=crypto.ticker(coin),
+            company=who, bullish=False, units=g["units"], total_value=value_eur,
+            window_start=r["filed"].isoformat(), window_end=r["filed"].isoformat(),
+            details=details, url=r["url"], alert_keys=keys, member_names=[r["company"]],
+        ))
+    return signals
+
+
+def find_treasury_signals(conn, ignore_alert_state: bool = False,
+                          today: dt.date | None = None) -> list[CryptoSignal]:
+    """Company demand for a coin -- this week's purchases summed across companies,
+    a buy signal when the week is unusually large -- plus any single sale of
+    TREASURY_SALE_MIN_EUR or more, a caution signal."""
+    today = today or dt.date.today()
+    rows = _treasury_rows(conn)
+    return (_weekly_demand_signals(conn, rows, today, ignore_alert_state)
+            + _sale_signals(conn, rows, today, ignore_alert_state))
 
 
 def _p90(values: list[float]) -> float:

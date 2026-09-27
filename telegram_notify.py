@@ -494,7 +494,7 @@ def format_stake_signal(sig, *, html: bool = False) -> str:
 
 _CRYPTO_HEADINGS = {
     # (crypto_kind, bullish) -> heading
-    ("treasury", True): "🪙 КОМПАНИЯ КУПИЛА",
+    ("treasury", True): "🪙 ПОКУПКИ КОМПАНИЙ ЗА НЕДЕЛЮ",
     ("treasury", False): "🪙 КОМПАНИЯ ПРОДАЛА",
     ("etf_flow", True): "🏦 ПРИТОК В СПОТ-ETF",
     ("etf_flow", False): "🏦 ОТТОК ИЗ СПОТ-ETF",

@@ -138,43 +138,99 @@ def test_company_and_ticker_from_display_name():
 
 # ------------------------------------------------------ treasury: signals
 def _add_treasury(conn, units, avg=80_000.0, total=None, side="P", filed=None, acc="acc-1",
-                  coin="BTC"):
+                  coin="BTC", company="Acme Corp", cik="1", co_ticker="ACME"):
     db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
-        accession=acc, company="Acme Corp", ticker="ACME", cik="1", coin=coin, side=side,
-        units=units, avg_price_usd=avg, total_usd=total, filed_date=filed or _days_ago(1),
+        accession=acc, company=company, ticker=co_ticker, cik=cik, coin=coin, side=side,
+        units=units, avg_price_usd=avg, total_usd=total, filed_date=filed or TODAY.isoformat(),
         form="8-K", source_url="https://sec.test/doc"))
     conn.commit()
 
 
-def test_treasury_purchase_is_a_signal(conn):
-    _add_treasury(conn, 100)                    # $8m
-    [sig] = cluster.find_treasury_signals(conn)
-    assert sig.ticker == "CRYPTO:BTC" and sig.bullish and sig.company == "Acme Corp (ACME)"
-    assert sig.total_value == pytest.approx(8_000_000 / 1.16)
+def _weeks_ago(n: int) -> str:
+    """A day inside the calendar week n weeks before this one."""
+    return (TODAY - dt.timedelta(weeks=n)).isoformat()
 
 
-def test_small_treasury_purchase_is_not(conn):
-    _add_treasury(conn, 1)                      # $80k
-    assert cluster.find_treasury_signals(conn) == []
+def test_a_big_week_of_company_buying_is_a_signal(conn):
+    _add_treasury(conn, 1_000)                                   # $80m this week, no history yet
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.bullish and sig.ticker == "CRYPTO:BTC" and sig.company == "компании: Acme Corp"
+    assert sig.total_value == pytest.approx(80_000_000 / 1.16)
+    assert sig.details[0] == "$80.0 млн за неделю"
+    assert "порог по умолчанию: мало истории" in sig.details
 
 
-def test_treasury_purchase_with_no_price_is_kept(conn):
-    """Unknown is not small: it is valued at spot later, by enrich_signals."""
-    _add_treasury(conn, 100, avg=None)
-    [sig] = cluster.find_treasury_signals(conn)
-    assert sig.total_value is None and sig.units == 100
+def test_a_small_week_is_not(conn):
+    _add_treasury(conn, 500)                                     # $40m, under €50m
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
 
 
-def test_old_treasury_filing_is_not_resurfaced(conn):
-    _add_treasury(conn, 100, filed=_days_ago(60))
-    assert cluster.find_treasury_signals(conn) == []
+def test_a_routine_week_for_a_weekly_buyer_is_not(conn):
+    for k in range(1, 21):                                       # $160m every week for 20 weeks
+        _add_treasury(conn, 2_000, filed=_weeks_ago(k), acc=f"w{k}")
+    _add_treasury(conn, 2_000, acc="now")                        # the same again this week
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
 
 
-def test_treasury_signal_fires_once(conn):
-    _add_treasury(conn, 100)
-    [sig] = cluster.find_treasury_signals(conn)
+def test_a_week_above_the_usual_says_how_unusual(conn):
+    for k in range(1, 21):
+        _add_treasury(conn, 2_000, filed=_weeks_ago(k), acc=f"w{k}")
+    _add_treasury(conn, 6_000, acc="now")                        # three times the usual week
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.details[0] == "$480.0 млн за неделю — больше, чем в 100% из 20 недель"
+
+
+def test_buyers_are_listed_largest_first_and_a_first_time_buyer_is_marked(conn):
+    _add_treasury(conn, 1, filed=(TODAY - dt.timedelta(days=400)).isoformat(), acc="old",
+                  company="Strategy Inc", cik="2", co_ticker="MSTR")      # history reaches a year back
+    _add_treasury(conn, 900, acc="s", company="Strategy Inc", cik="2", co_ticker="MSTR")
+    _add_treasury(conn, 300, acc="a")                                     # Acme's first purchase ever
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.details[1] == "Strategy Inc (MSTR) $72.0 млн · Acme Corp (ACME) $24.0 млн (впервые)"
+    assert sig.member_names == ["Strategy Inc", "Acme Corp"]
+
+
+def test_no_first_time_mark_before_a_year_of_history(conn):
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert "впервые" not in sig.details[1]
+
+
+def test_units_only_purchase_is_valued_at_the_latest_stated_price(conn):
+    _add_treasury(conn, 1, acc="priced")                          # states $80,000 a coin
+    _add_treasury(conn, 1_000, avg=None, acc="unpriced")          # no price in the filing
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.total_value == pytest.approx(1_001 * 80_000 / 1.16)
+
+
+def test_a_week_alerts_once(conn):
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
     bot._commit_signals(conn, [sig])
-    assert cluster.find_treasury_signals(conn) == []
+    _add_treasury(conn, 1_000, acc="acc-2")                       # more buying the same week
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_last_weeks_buying_is_not_this_weeks_signal(conn):
+    _add_treasury(conn, 1_000, filed=_weeks_ago(1))
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_a_large_company_sale_is_a_caution(conn):
+    _add_treasury(conn, 200, side="S", filed=_days_ago(3))        # $16m
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert not sig.bullish and sig.company == "Acme Corp (ACME)"
+    assert sig.window_end == _days_ago(3)
+
+
+def test_a_small_company_sale_is_not(conn):
+    _add_treasury(conn, 100, side="S")                            # $8m, under €10m
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_an_old_sale_is_not_resurfaced(conn):
+    _add_treasury(conn, 200, side="S", filed=_days_ago(30))
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
 
 
 # ------------------------------------------------------------ ETF flows
@@ -406,7 +462,7 @@ def test_politician_and_company_buying_the_same_coin_corroborate(conn):
     for member in ("Member One", "Member Two"):
         add_house_txn(conn, "CRYPTO:BTC", member, "$250,001 - $500,000",
                       date=(TODAY - dt.timedelta(days=3)).strftime("%m/%d/%Y"))
-    _add_treasury(conn, 100)
+    _add_treasury(conn, 1_000)
     sigs = cluster.find_house_clusters(conn) + cluster.find_treasury_signals(conn)
     cluster.find_corroboration(conn, sigs)
     assert {s.source: s.corroborated_by for s in sigs} == {
@@ -415,10 +471,10 @@ def test_politician_and_company_buying_the_same_coin_corroborate(conn):
 
 @pytest.mark.parametrize("html", [False, True])
 def test_crypto_signal_formats(conn, html):
-    _add_treasury(conn, 100)
+    _add_treasury(conn, 1_000)
     [sig] = cluster.find_treasury_signals(conn)
     text = telegram_notify.format_any_signal(sig, html=html)
-    assert "КОМПАНИЯ КУПИЛА: CRYPTO:BTC" in text and "100 BTC" in text
+    assert "ПОКУПКИ КОМПАНИЙ ЗА НЕДЕЛЮ: CRYPTO:BTC" in text and "1,000 BTC" in text
     assert "1 крипто" in telegram_notify.format_signals_digest([sig])
 
 
@@ -429,7 +485,7 @@ def test_onchain_alert_says_it_is_not_a_disclosure(conn):
 
 
 def test_crypto_signal_journals_with_its_kind(conn):
-    _add_treasury(conn, 100)
+    _add_treasury(conn, 1_000)
     [sig] = cluster.find_treasury_signals(conn)
     row = bot._signal_features(sig)
     assert (row["source"], row["kind"], row["ticker"]) == ("CRYPTO_TREASURY", "treasury", "CRYPTO:BTC")
