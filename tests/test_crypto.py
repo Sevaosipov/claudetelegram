@@ -312,31 +312,71 @@ def test_etf_flows_are_stored_and_the_newest_day_is_rewritten(conn):
     db.save_etf_flows(conn, [crypto_etf.Flow("BTC", "2026-09-25", "IBIT", 5e6)])   # late funds filled in
     assert conn.execute("SELECT flow_usd FROM crypto_etf_flows").fetchall() == [(5e6,)]
     assert db.etf_flow_count(conn, "BTC") == 1 and db.etf_flow_count(conn, "ETH") == 0
+    assert db.etf_flow_latest(conn, "BTC") == "2026-09-25" and db.etf_flow_latest(conn, "ETH") is None
+
+
+def _farside(calls=None, down=()):
+    """A fetch_farside stand-in: one fund-day per coin, dated yesterday; a coin in
+    `down` raises instead."""
+    def fetch(coin, full_history=False, session=None):
+        if calls is not None:
+            calls.append((coin, full_history))
+        if coin in down:
+            raise crypto_etf.requests.RequestException("down")
+        return [crypto_etf.Flow(coin, _days_ago(1), "IBIT" if coin == "BTC" else "ETHA", 1e6)]
+    return fetch
 
 
 def test_etf_pass_loads_the_full_history_once(conn, monkeypatch):
     import passes
     calls = []
-    monkeypatch.setattr(crypto_etf, "fetch_snapshots", lambda: [])
-
-    def fake(coin, full_history=False, session=None):
-        calls.append((coin, full_history))
-        return [crypto_etf.Flow(coin, "2026-09-25", "IBIT" if coin == "BTC" else "ETHA", 1e6)]
-    monkeypatch.setattr(crypto_etf, "fetch_farside", fake)
-    passes.run_crypto_etf_pass(conn, None)
-    passes.run_crypto_etf_pass(conn, None)
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(calls))
+    passes.run_farside_pass(conn, None)
+    passes.run_farside_pass(conn, None)
     assert calls == [("BTC", True), ("ETH", True), ("BTC", False), ("ETH", False)]
 
 
 def test_etf_pass_survives_farside_being_down(conn, monkeypatch):
     import passes
-    monkeypatch.setattr(crypto_etf, "fetch_snapshots", lambda: [])
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(down={"BTC"}))
+    assert passes.run_farside_pass(conn, None) == 1                  # ETH still collected
+    assert db.etf_flow_count(conn, "BTC") == 0 and db.etf_flow_count(conn, "ETH") == 1
 
-    def down(coin, full_history=False, session=None):
-        raise crypto_etf.requests.RequestException("down")
-    monkeypatch.setattr(crypto_etf, "fetch_farside", down)
-    assert passes.run_crypto_etf_pass(conn, None) == 0
-    assert db.etf_flow_count(conn, "BTC") == 0
+
+def test_farside_pass_fails_when_every_coin_is_down(conn, monkeypatch):
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(down=set(crypto_etf.FARSIDE_URLS)))
+    with pytest.raises(RuntimeError, match="Farside unavailable for every coin"):
+        passes.run_farside_pass(conn, None)
+
+
+def test_farside_pass_reloads_the_history_after_a_gap(conn, monkeypatch):
+    import passes
+    calls = []
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(11), "IBIT", 1e6),
+                             crypto_etf.Flow("ETH", _days_ago(10), "ETHA", 1e6)])
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(calls))
+    passes.run_farside_pass(conn, None)
+    assert calls == [("BTC", True), ("ETH", False)]
+
+
+def test_farside_page_parsing_to_nothing_is_reported(conn, monkeypatch, capsys):
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_farside", lambda coin, full_history=False, session=None: [])
+    assert passes.run_farside_pass(conn, None) == 0
+    assert "Farside BTC: 0 rows parsed — page layout may have changed" in capsys.readouterr().err
+
+
+def test_an_ishares_failure_does_not_stop_farside(conn, monkeypatch):
+    import passes
+
+    def ishares_down(session=None):
+        raise ValueError("IBIT: shares outstanding / NAV not found on the product page")
+    monkeypatch.setattr(crypto_etf, "fetch_snapshots", ishares_down)
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside())
+    assert bot._run_source("CRYPTO_ETF", passes.run_crypto_etf_pass, conn, None) is None
+    assert bot._run_source("CRYPTO_ETF_FARSIDE", passes.run_farside_pass, conn, None) == 2
+    assert db.etf_flow_count(conn, "BTC") == 1 and db.etf_flow_count(conn, "ETH") == 1
 
 
 def _add_etf(conn, fund, days_ago, shares, nav=50.0):

@@ -59,6 +59,7 @@ from passes import (
     run_144_pass,
     run_crypto_etf_pass,
     run_crypto_treasury_pass,
+    run_farside_pass,
     run_bafin_pass,
     run_house_pass,
     run_norway_pass,
@@ -581,6 +582,7 @@ def main():
             new_by_source["CRYPTO_TREASURY"] = _run_source("CRYPTO_TREASURY", run_crypto_treasury_pass,
                                                            conn, args)
             new_by_source["CRYPTO_ETF"] = _run_source("CRYPTO_ETF", run_crypto_etf_pass, conn, args)
+            new_by_source["CRYPTO_ETF_FARSIDE"] = _run_source("CRYPTO_ETF_FARSIDE", run_farside_pass, conn, args)
         if do_onchain:
             new_by_source["CRYPTO_ONCHAIN"] = _run_source("CRYPTO_ONCHAIN", run_onchain_pass, conn, args)
 

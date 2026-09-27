@@ -1053,6 +1053,12 @@ def etf_flow_count(conn: sqlite3.Connection, coin: str) -> int:
                         (coin,)).fetchone()[0]
 
 
+def etf_flow_latest(conn: sqlite3.Connection, coin: str) -> str | None:
+    """The newest stored Farside day for a coin, or None when nothing is stored."""
+    return conn.execute("SELECT max(date) FROM crypto_etf_flows WHERE coin = ?",
+                        (coin,)).fetchone()[0]
+
+
 def save_crypto_wallet_snapshot(conn: sqlite3.Connection, b, taken_at: str) -> None:
     """b is a crypto_onchain.WalletBalance."""
     conn.execute(
