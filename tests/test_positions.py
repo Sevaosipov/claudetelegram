@@ -221,3 +221,81 @@ def test_bafin_sale_before_opening_does_not_count(conn):
                   date=(TODAY - dt.timedelta(days=30)).strftime("%d.%m.%Y"), txn_type="S")
     _open(conn, ticker="DE0007164600")
     assert positions.check_exits(conn, today=TODAY, price_fn=_no_price) == []
+
+
+# ------------------------------------------------------------- coin positions
+_FALLING = {"ret_7d": -6.2, "above_ma20": False}
+_RISING = {"ret_7d": 3.0, "above_ma20": True}
+
+
+def _trend(value):
+    return lambda conn, sym: value
+
+
+def _caution_journal(conn, ticker="CRYPTO:BTC", days_ago=1, kind="etf_flow", value=9e8):
+    db.journal_signal(conn, {"source": "CRYPTO_ETF", "kind": kind, "ticker": ticker,
+                             "tier": "caution", "total_value_eur": value})
+    conn.execute("UPDATE signal_journal SET emitted_at = ? WHERE id = (SELECT max(id) FROM signal_journal)",
+                 ((TODAY - dt.timedelta(days=days_ago)).isoformat() + " 12:00:00",))
+    conn.commit()
+
+
+def test_a_caution_confirmed_by_the_price_closes_a_coin(conn):
+    _open(conn, "CRYPTO:BTC", 84_500.0, days_ago=5)
+    _caution_journal(conn, days_ago=1)
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 79_900.0,
+                                    trend_fn=_trend(_FALLING))
+    assert alert.trigger == "caution" and alert.last_price == 79_900.0
+    assert "отток из спот-ETF" in alert.detail and "-6.2% за 7 дн." in alert.detail
+
+
+def test_an_unconfirmed_caution_does_not_close(conn):
+    _open(conn, "CRYPTO:BTC", 84_500.0)
+    _caution_journal(conn, days_ago=1)
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 84_000.0,
+                                 trend_fn=_trend(_RISING)) == []
+
+
+def test_a_caution_from_before_the_position_does_not_count(conn):
+    _open(conn, "CRYPTO:BTC", 84_500.0, days_ago=2)
+    _caution_journal(conn, days_ago=4)
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 84_000.0,
+                                 trend_fn=_trend(_FALLING)) == []
+
+
+def test_a_caution_the_price_confirms_days_later_still_closes(conn):
+    _open(conn, "CRYPTO:BTC", 84_500.0, days_ago=6)
+    _caution_journal(conn, days_ago=3)
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 80_000.0,
+                                    trend_fn=_trend(_FALLING))
+    assert alert.trigger == "caution"
+
+
+def test_a_caution_older_than_a_week_does_not_count(conn):
+    _open(conn, "CRYPTO:BTC", 84_500.0, days_ago=20)
+    _caution_journal(conn, days_ago=8)
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 84_000.0,
+                                 trend_fn=_trend(_FALLING)) == []
+
+
+def test_a_caution_on_another_coin_does_not_count(conn):
+    _open(conn, "CRYPTO:BTC", 84_500.0)
+    _caution_journal(conn, ticker="CRYPTO:ETH")
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 84_000.0,
+                                 trend_fn=_trend(_FALLING)) == []
+
+
+def test_no_price_trend_means_the_caution_waits(conn):
+    _open(conn, "CRYPTO:BTC", 84_500.0)
+    _caution_journal(conn, days_ago=1)
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 84_000.0,
+                                 trend_fn=_trend(None)) == []
+
+
+def test_coin_stop_loss_is_25_percent(conn):
+    _open(conn, "CRYPTO:BTC", 100.0)
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 80.0,
+                                 trend_fn=_trend(None)) == []
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 74.9,
+                                    trend_fn=_trend(None))
+    assert alert.trigger == "stop_loss"

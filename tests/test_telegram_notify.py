@@ -8,6 +8,7 @@ from __future__ import annotations
 import cluster
 from cluster import ClusterSignal, ExitSignal, StakeSignal
 
+import positions
 import strategy
 import telegram_notify
 import telegram_notify as tn
@@ -343,3 +344,12 @@ def test_cautions_are_listed_when_the_menu_asks():
 def test_cautions_are_never_in_the_telegram_digest():
     text = telegram_notify.format_tiered_digest(_caution_selection(), [])
     assert "Осторожно" not in text and "ОТТОК" not in text
+
+
+def test_caution_close_alert_reads_as_such():
+    pos = positions.Position(1, "CRYPTO:BTC", "CRYPTO", "2026-09-20", 84_500.0, [], None,
+                             None, None, None)
+    alert = positions.CloseAlert(pos, "caution", "отток из спот-ETF (€900,000,000); цена "
+                                 "подтверждает: -6.2% за 7 дн., ниже 20-дн. средней", 79_900.0)
+    text = telegram_notify.format_close_alert(alert, html=False)
+    assert "CRYPTO:BTC — сигнал осторожности" in text and "отток из спот-ETF" in text

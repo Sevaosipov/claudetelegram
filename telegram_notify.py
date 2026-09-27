@@ -569,8 +569,8 @@ def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
     return "\n\n".join(parts) if len(parts) > 1 else parts[0]
 
 
-_CLOSE_REASON = {"insider_sell": "инсайдеры продают", "time": "срок вышел",
-                 "stop_loss": "стоп-лосс"}
+_CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution": "сигнал осторожности",
+                 "time": "срок вышел", "stop_loss": "стоп-лосс"}
 
 
 def _rule_lines(t, html: bool) -> list[str]:
