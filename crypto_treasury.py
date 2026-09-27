@@ -256,15 +256,18 @@ def backfill(conn, days: int, today: dt.date | None = None, scan=None, cik_looku
     """Read the past `days` of 8-K/6-K filings, one week-long slice at a time, through
     the same paced scanner and parser the daily run uses. A document already read is
     skipped, and each one is committed as it is read, so an interrupted backfill
-    resumes where it stopped. Returns how many new trades were stored."""
+    resumes where it stopped. Newest slice first: an interrupted run then leaves an
+    unbroken recent history rather than an old filing that makes the missing months
+    look like weeks without buying. Returns how many new trades were stored."""
     import db
     scan = scan or scan_new_filings
     today = today or dt.date.today()
     seen = db.crypto_treasury_seen(conn)
     new = 0
-    start = today - dt.timedelta(days=days)
-    while start <= today:
-        end = min(start + dt.timedelta(days=BACKFILL_SLICE_DAYS - 1), today)
+    earliest = today - dt.timedelta(days=days)
+    end = today
+    while end >= earliest:
+        start = max(end - dt.timedelta(days=BACKFILL_SLICE_DAYS - 1), earliest)
         print(f"[backfill] {start.isoformat()}..{end.isoformat()}")
         for doc_id, txns in scan(start, end, seen, cik_lookup=cik_lookup):
             for t in txns:
@@ -273,7 +276,7 @@ def backfill(conn, days: int, today: dt.date | None = None, scan=None, cik_looku
             db.mark_crypto_treasury_seen(conn, doc_id)
             seen.add(doc_id)
             conn.commit()
-        start = end + dt.timedelta(days=1)
+        end = start - dt.timedelta(days=1)
     return new
 
 

@@ -146,9 +146,9 @@ def test_backfill_walks_the_range_in_weekly_slices_and_stores_trades(conn):
             yield "doc-1", [ct.TreasuryTxn("acc-b", "Acme", "ACME", "1", "BTC", "P", 10, 80_000.0,
                                            None, "2026-09-02", "8-K", "u")]
     assert ct.backfill(conn, 20, today=dt.date(2026, 9, 21), scan=scan) == 1
-    assert slices == [(dt.date(2026, 9, 1), dt.date(2026, 9, 7)),
+    assert slices == [(dt.date(2026, 9, 15), dt.date(2026, 9, 21)),      # newest first
                       (dt.date(2026, 9, 8), dt.date(2026, 9, 14)),
-                      (dt.date(2026, 9, 15), dt.date(2026, 9, 21))]
+                      (dt.date(2026, 9, 1), dt.date(2026, 9, 7))]
     assert "doc-1" in db.crypto_treasury_seen(conn)
 
 
