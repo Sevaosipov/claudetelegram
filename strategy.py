@@ -30,7 +30,9 @@ CONVICTION_MIN_EUR = 250_000        # rule (c)
 CONVICTION_MIN_INCREASE_PCT = 10.0  # rule (c)
 MAX_CANDIDATES = 10
 CANDIDATE_MIN_SCORE = 50.0
-CRYPTO_TREASURY_BIG_EUR = 50e6
+# The same bar as the weekly company-demand floor in cluster/crypto.py, so one
+# constant: the two can't drift apart.
+CRYPTO_TREASURY_BIG_EUR = cluster.crypto.TREASURY_WEEK_FLOOR_EUR
 
 STRONG, CANDIDATE, CAUTION = "strong", "candidate", "caution"
 _ROLE_LABEL = {"ceo": "CEO", "cfo": "CFO", "chair": "Chair"}

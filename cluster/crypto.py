@@ -28,7 +28,8 @@ import fx
 # Company demand: every purchase of a coin filed this calendar week (Monday to
 # today), summed across companies. Strategy and a few imitators buy almost every
 # week, so a single filing says little -- the week is a signal only when it is above
-# what TREASURY_TOP_SHARE of the previous weeks reached, and at least the floor.
+# what TOP_DECILE (the 90th percentile) of the previous weeks reached, and at least
+# the floor.
 TREASURY_WEEK_FLOOR_EUR = 50e6
 TREASURY_HISTORY_WEEKS = 52
 TREASURY_MIN_HISTORY_WEEKS = 8
