@@ -136,6 +136,49 @@ def test_company_and_ticker_from_display_name():
     assert ct._company("Private Co  (CIK 0000000001)") == ("Private Co  (CIK 0000000001)", None)
 
 
+def test_backfill_walks_the_range_in_weekly_slices_and_stores_trades(conn):
+    slices = []
+
+    def scan(start, end, seen, cik_lookup=None):
+        slices.append((start, end))
+        if start == dt.date(2026, 9, 1):
+            yield "doc-1", [ct.TreasuryTxn("acc-b", "Acme", "ACME", "1", "BTC", "P", 10, 80_000.0,
+                                           None, "2026-09-02", "8-K", "u")]
+    assert ct.backfill(conn, 20, today=dt.date(2026, 9, 21), scan=scan) == 1
+    assert slices == [(dt.date(2026, 9, 1), dt.date(2026, 9, 7)),
+                      (dt.date(2026, 9, 8), dt.date(2026, 9, 14)),
+                      (dt.date(2026, 9, 15), dt.date(2026, 9, 21))]
+    assert "doc-1" in db.crypto_treasury_seen(conn)
+
+
+def test_backfill_resumes_past_documents_already_read(conn):
+    db.mark_crypto_treasury_seen(conn, "doc-1")
+    conn.commit()
+    seen_args = []
+
+    def scan(start, end, seen, cik_lookup=None):
+        seen_args.append(set(seen))
+        return iter(())
+    ct.backfill(conn, 6, today=dt.date(2026, 9, 21), scan=scan)
+    assert seen_args == [{"doc-1"}]
+
+
+def test_backfill_uses_the_paced_scanner_by_default(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ct, "scan_new_filings",
+                        lambda s, e, seen, cik_lookup=None: calls.append((s, e)) or iter(()))
+    ct.backfill(conn, 3, today=dt.date(2026, 9, 21))
+    assert calls == [(dt.date(2026, 9, 18), dt.date(2026, 9, 21))]
+
+
+def test_backfill_command(conn, monkeypatch):
+    got = {}
+    monkeypatch.setattr(ct, "backfill", lambda c, days, cik_lookup=None: got.setdefault("days", days) and 0)
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    monkeypatch.setattr("cik_map.CikMap", lambda: None)
+    assert ct.main(["--backfill", "365"]) == 0 and got["days"] == 365
+
+
 # ------------------------------------------------------ treasury: signals
 def _add_treasury(conn, units, avg=80_000.0, total=None, side="P", filed=None, acc="acc-1",
                   coin="BTC", company="Acme Corp", cik="1", co_ticker="ACME"):

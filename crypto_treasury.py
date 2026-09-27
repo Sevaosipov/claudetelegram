@@ -247,3 +247,57 @@ def scan_new_filings(start: dt.date, end: dt.date, seen_doc_ids: set[str],
             continue
         resp.raise_for_status()
         yield doc_id, txns_from_hit(hit, html_to_text(resp.text), cik_lookup)
+
+
+BACKFILL_SLICE_DAYS = 7   # EFTS returns at most MAX_PAGES x PAGE_SIZE hits per query
+
+
+def backfill(conn, days: int, today: dt.date | None = None, scan=None, cik_lookup=None) -> int:
+    """Read the past `days` of 8-K/6-K filings, one week-long slice at a time, through
+    the same paced scanner and parser the daily run uses. A document already read is
+    skipped, and each one is committed as it is read, so an interrupted backfill
+    resumes where it stopped. Returns how many new trades were stored."""
+    import db
+    scan = scan or scan_new_filings
+    today = today or dt.date.today()
+    seen = db.crypto_treasury_seen(conn)
+    new = 0
+    start = today - dt.timedelta(days=days)
+    while start <= today:
+        end = min(start + dt.timedelta(days=BACKFILL_SLICE_DAYS - 1), today)
+        print(f"[backfill] {start.isoformat()}..{end.isoformat()}")
+        for doc_id, txns in scan(start, end, seen, cik_lookup=cik_lookup):
+            for t in txns:
+                if db.save_crypto_treasury_txn(conn, t):
+                    new += 1
+            db.mark_crypto_treasury_seen(conn, doc_id)
+            seen.add(doc_id)
+            conn.commit()
+        start = end + dt.timedelta(days=1)
+    return new
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    from pathlib import Path
+
+    import cik_map
+    import db
+    ap = argparse.ArgumentParser(description="Company crypto treasury trades from 8-K/6-K filings.")
+    ap.add_argument("--backfill", type=int, metavar="DAYS", required=True,
+                    help="read this many past days of filings (one-time: 365 gives the weekly "
+                         "company-demand signal its year of history)")
+    args = ap.parse_args(argv)
+    conn = db.connect(Path(__file__).parent / "data" / "disclosures.db")
+    try:
+        cik_lookup = cik_map.CikMap()
+    except Exception as e:
+        print(f"[backfill] no CIK->ticker map ({e}); using EDGAR's first-listed ticker")
+        cik_lookup = None
+    new = backfill(conn, args.backfill, cik_lookup=cik_lookup)
+    print(f"[backfill] {new} new trade(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
