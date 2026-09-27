@@ -275,6 +275,63 @@ def test_stale_etf_snapshot_is_ignored(conn):
     assert cluster.find_etf_flow_signals(conn) == []
 
 
+def _add_farside(conn, coin, flows_musd, fund="IBIT", newest_days_ago=1):
+    """One stored day per value (in $m), oldest first, the last one `newest_days_ago` ago."""
+    n = len(flows_musd)
+    db.save_etf_flows(conn, [crypto_etf.Flow(coin, _days_ago(newest_days_ago + n - 1 - i), fund, m * 1e6)
+                             for i, m in enumerate(flows_musd)])
+
+
+def test_unusual_etf_day_is_measured_against_its_own_history(conn):
+    _add_farside(conn, "BTC", [50, -40] * 30 + [300])        # 60 ordinary days, then $300m
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.bullish and sig.company == "спот-ETF США, фондов: 1"
+    assert "больше, чем в 100% из 60 дней" in sig.details[0]
+    assert not any("IBIT/ETHA" in d for d in sig.details)
+
+
+def test_ordinary_day_in_a_busy_market_is_not(conn):
+    _add_farside(conn, "BTC", [300, -250] * 30 + [120])
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_etf_day_floor_applies_in_a_quiet_market(conn):
+    _add_farside(conn, "BTC", [5, -4] * 30 + [60])            # top of its history, but under $100m
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_unusual_outflow_streak_is_a_bearish_signal(conn):
+    _add_farside(conn, "ETH", [-30, 40] * 30 + [-90, -90, -90])
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert not sig.bullish and "3 дн. подряд оттока" in sig.details[1]
+
+
+def test_under_30_days_of_history_uses_the_fixed_thresholds(conn):
+    _add_farside(conn, "BTC", [10, -10] * 5 + [450])
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert "порог по умолчанию: мало истории" in sig.details
+
+
+def test_stale_farside_falls_back_to_the_issuer_snapshots(conn):
+    _add_farside(conn, "BTC", [50, -40] * 30 + [900], newest_days_ago=10)
+    _add_etf(conn, "IBIT", 2, 1_000_000_000)
+    _add_etf(conn, "IBIT", 1, 1_010_000_000)                  # +$500m on the issuer page
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert "IBIT" in sig.company and "только IBIT/ETHA (Farside недоступен)" in sig.details
+
+
+def test_dossier_flows_are_summed_across_farside_funds(conn):
+    _add_farside(conn, "BTC", [10, 20])
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(1), "FBTC", 5e6)])
+    days = cluster.daily_etf_flows(conn)["BTC"]
+    assert days[-1][1] == pytest.approx(25e6) and days[-1][2] == ["FBTC", "IBIT"]
+
+
+def test_calibration_hides_future_etf_flows():
+    import calibrate_strategy
+    assert calibrate_strategy._VISIBLE["crypto_etf_flows"] == "date <= '{d}'"
+
+
 # ------------------------------------------------------------- on-chain
 def _add_wallet(conn, address, balance, hours_ago, coin="BTC"):
     taken = (dt.datetime.now() - dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds")

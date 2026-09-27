@@ -42,6 +42,7 @@ _VISIBLE = {
     "signal_journal": "date(emitted_at) <= '{d}'",
     "crypto_treasury_txns": "filed_date <= '{d}'",
     "crypto_etf_snapshots": "as_of <= '{d}'",
+    "crypto_etf_flows": "date <= '{d}'",
     "crypto_wallet_snapshots": "date(taken_at) <= '{d}'",
 }
 _FROZEN_MODULES = (cluster.buys, cluster.stakes, cluster.crypto, cluster.scoring)

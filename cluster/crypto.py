@@ -17,6 +17,7 @@ the one network step.
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import dataclass, field
 
 import crypto
@@ -28,12 +29,21 @@ import fx
 # market for the coin, however large it is for the company.
 TREASURY_MIN_VALUE_EUR = 500_000
 TREASURY_WINDOW_DAYS = 14
-# Spot-ETF net flow, in USD, for the covered funds combined (see crypto_etf.FUNDS).
-# IBIT alone routinely moves $100-300m in a day; these are the days that stand out.
+# Spot-ETF net flow, in USD, summed across a coin's funds. "Unusual" is judged against
+# the coin's own recent days -- the top 10% of the previous ETF_HISTORY_DAYS, with a
+# floor -- because the market grows and a fixed dollar bar goes stale. The fixed
+# bars apply only while there are fewer than ETF_MIN_HISTORY_DAYS stored days.
 ETF_DAY_FLOW_USD = 400e6
 ETF_STREAK_DAYS = 3
 ETF_STREAK_MIN_USD = 500e6
-ETF_MAX_AGE_DAYS = 7       # don't resurface a flow from a snapshot this old
+ETF_MAX_AGE_DAYS = 7       # don't resurface a flow from a day this old
+ETF_HISTORY_DAYS = 126     # about six months of trading days
+ETF_MIN_HISTORY_DAYS = 30
+ETF_DAY_FLOOR_USD = 100e6
+ETF_STREAK_FLOOR_USD = 250e6
+TOP_DECILE = 0.9
+# Farside has trading-day rows only, so its staleness is counted in business days.
+FARSIDE_STALE_BUSINESS_DAYS = 3
 # Net change across the tracked exchange cold wallets, in coins, over ONCHAIN_HOURS.
 ONCHAIN_MIN_COINS = {"BTC": 2_000, "ETH": 40_000}
 ONCHAIN_HOURS = 24
@@ -118,8 +128,27 @@ def find_treasury_signals(conn, min_value_eur: float = TREASURY_MIN_VALUE_EUR,
     return signals
 
 
-def _daily_etf_flows(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
-    """coin -> [(as_of, net_flow_usd, funds)] oldest first, summed across funds."""
+def _p90(values: list[float]) -> float:
+    """Nearest-rank 90th percentile of a non-empty list."""
+    s = sorted(values)
+    return s[max(0, math.ceil(TOP_DECILE * len(s)) - 1)]
+
+
+def _share_below(value: float, values: list[float]) -> float:
+    return sum(1 for v in values if v < value) / len(values)
+
+
+def _business_days_since(day: str, today: dt.date) -> int:
+    d, n = dt.date.fromisoformat(day), 0
+    while d < today:
+        n += d.weekday() < 5
+        d += dt.timedelta(days=1)
+    return n
+
+
+def _issuer_etf_days(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
+    """coin -> [(as_of, net_flow_usd, funds)] oldest first, from the issuer share-count
+    snapshots (IBIT/ETHA only)."""
     by_fund: dict[str, list] = {}
     coin_of: dict[str, str] = {}
     for fund, coin, as_of, shares, nav in conn.execute(
@@ -136,18 +165,58 @@ def _daily_etf_flows(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
             for coin, days in per_day.items()}
 
 
+def _farside_etf_days(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
+    """coin -> [(date, net_flow_usd, funds)] oldest first, summed across every fund."""
+    per_day: dict[str, dict[str, list]] = {}
+    for coin, day, fund, flow in conn.execute(
+            "SELECT coin, date, fund, flow_usd FROM crypto_etf_flows"):
+        slot = per_day.setdefault(coin, {}).setdefault(day, [0.0, []])
+        slot[0] += flow
+        slot[1].append(fund)
+    return {coin: [(d, v[0], sorted(v[1])) for d, v in sorted(days.items())]
+            for coin, days in per_day.items()}
+
+
+def etf_flow_days(conn, today: dt.date | None = None) -> dict[str, tuple[str, list]]:
+    """coin -> (source, [(day, net_flow_usd, funds)] oldest first). Farside -- every US
+    spot fund -- while its newest day is at most FARSIDE_STALE_BUSINESS_DAYS business
+    days old; otherwise the issuer snapshots, which cover IBIT and ETHA only."""
+    today = today or dt.date.today()
+    farside, issuer = _farside_etf_days(conn), _issuer_etf_days(conn)
+    out = {}
+    for coin in sorted(set(farside) | set(issuer)):
+        days = farside.get(coin)
+        if days and _business_days_since(days[-1][0], today) <= FARSIDE_STALE_BUSINESS_DAYS:
+            out[coin] = ("farside", days)
+        elif issuer.get(coin):
+            out[coin] = ("issuer", issuer[coin])
+        elif days:
+            out[coin] = ("farside", days)
+    return out
+
+
+def _daily_etf_flows(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
+    """coin -> [(day, net_flow_usd, funds)] oldest first, whichever source is current."""
+    return {coin: days for coin, (_src, days) in etf_flow_days(conn).items()}
+
+
 daily_etf_flows = _daily_etf_flows   # public name for the crypto dossier (crypto_research.py)
 
 
 def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
                           streak_days: int = ETF_STREAK_DAYS,
                           streak_min_usd: float = ETF_STREAK_MIN_USD,
-                          ignore_alert_state: bool = False) -> list[CryptoSignal]:
-    """A single outsized day, or a run of same-direction days adding up to a lot --
-    judged on the most recent snapshot only, so an old flow never resurfaces."""
-    today = dt.date.today()
+                          ignore_alert_state: bool = False,
+                          today: dt.date | None = None) -> list[CryptoSignal]:
+    """An unusual day, or an unusual run of same-direction days, judged on the most
+    recent day only so an old flow never resurfaces. Unusual = the top 10% of the
+    previous ETF_HISTORY_DAYS (a day against days, a streak against 3-day totals),
+    and at least the floor; with under ETF_MIN_HISTORY_DAYS of history the fixed
+    day_flow_usd / streak_min_usd apply instead. An inflow is a buy signal, an
+    outflow a caution signal (strategy.select)."""
+    today = today or dt.date.today()
     signals = []
-    for coin, days in _daily_etf_flows(conn).items():
+    for coin, (source, days) in etf_flow_days(conn, today).items():
         if not days:
             continue
         last_date, last_flow, funds = days[-1]
@@ -162,10 +231,21 @@ def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
         streak.reverse()
         streak_total = sum(d[1] for d in streak)
 
+        history = days[:-1][-ETF_HISTORY_DAYS:]
+        relative = len(history) >= ETF_MIN_HISTORY_DAYS
+        day_sizes = [abs(d[1]) for d in history]
+        three_day = [abs(history[i][1] + history[i - 1][1] + history[i - 2][1])
+                     for i in range(2, len(history))]
+        if relative:
+            day_bar = max(_p90(day_sizes), ETF_DAY_FLOOR_USD)
+            streak_bar = max(_p90(three_day), ETF_STREAK_FLOOR_USD)
+        else:
+            day_bar, streak_bar = day_flow_usd, streak_min_usd
+
         keys, details = [], []
-        if abs(last_flow) >= day_flow_usd:
+        if abs(last_flow) >= day_bar:
             keys.append(f"{coin}|day|{last_date}")
-        if len(streak) >= streak_days and abs(streak_total) >= streak_min_usd:
+        if len(streak) >= streak_days and abs(streak_total) >= streak_bar:
             keys.append(f"{coin}|streak|{'in' if inflow else 'out'}|{streak[0][0]}")
             details.append(f"{len(streak)} дн. подряд {'притока' if inflow else 'оттока'}, "
                            f"всего ${abs(streak_total) / 1e6:,.0f} млн")
@@ -173,15 +253,27 @@ def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
             continue
         if not ignore_alert_state and not _is_new(conn, "CRYPTO_ETF", keys):
             continue
-        details.insert(0, f"за {last_date}: {'+' if inflow else '−'}${abs(last_flow) / 1e6:,.0f} млн")
+        day_line = f"за {last_date}: {'+' if inflow else '−'}${abs(last_flow) / 1e6:,.0f} млн"
+        if relative:
+            day_line += (f" — больше, чем в {_share_below(abs(last_flow), day_sizes) * 100:.0f}% "
+                         f"из {len(history)} дней")
+        details.insert(0, day_line)
+        if not relative:
+            details.append("порог по умолчанию: мало истории")
+        if source == "issuer":
+            details.append("только IBIT/ETHA (Farside недоступен)")
+            company = "спот-ETF: " + ", ".join(sorted(funds))
+            url = crypto_etf.FUNDS[sorted(funds)[0]][1]
+        else:
+            company = f"спот-ETF США, фондов: {len(funds)}"
+            url = crypto_etf.FARSIDE_URLS.get(coin)
         headline_total = streak_total if len(streak) >= streak_days else last_flow
         signals.append(CryptoSignal(
             source="CRYPTO_ETF", crypto_kind="etf_flow", ticker=crypto.ticker(coin),
-            company="спот-ETF: " + ", ".join(sorted(funds)), bullish=inflow, units=None,
+            company=company, bullish=inflow, units=None,
             total_value=fx.to_eur(abs(headline_total), "USD", conn),
             window_start=streak[0][0] if streak else last_date, window_end=last_date,
-            details=details, url=crypto_etf.FUNDS[sorted(funds)[0]][1],
-            alert_keys=keys, member_names=sorted(funds),
+            details=details, url=url, alert_keys=keys, member_names=sorted(funds),
         ))
     return signals
 
