@@ -138,6 +138,11 @@ def _stock_tier(sig) -> Tiered | None:
     return Tiered(sig, tier, met, missed)
 
 
+def _trend_desc(coin: str, trend: dict) -> str:
+    return (f"{coin} {trend['ret_7d']:+.1f}% за 7 дн., "
+            f"{'выше' if trend['above_ma20'] else 'ниже'} 20-дн. средней")
+
+
 def _crypto_tier(conn, sig) -> Tiered | None:
     if not sig.bullish:
         return None
@@ -147,8 +152,7 @@ def _crypto_tier(conn, sig) -> Tiered | None:
     trend = crypto.price_trend(conn, sig.coin)
     if trend is None:
         return Tiered(sig, CANDIDATE, met, ["цена не проверена"])
-    desc = (f"{sig.coin} {trend['ret_7d']:+.1f}% за 7 дн., "
-            f"{'выше' if trend['above_ma20'] else 'ниже'} 20-дн. средней")
+    desc = _trend_desc(sig.coin, trend)
     if crypto.trend_confirms(trend):
         return Tiered(sig, STRONG, met + [desc], [])
     return Tiered(sig, CANDIDATE, met, [f"цена не подтверждает: {desc}"])
@@ -158,8 +162,7 @@ def _caution_tier(conn, sig) -> Tiered:
     trend = crypto.price_trend(conn, sig.coin)
     if trend is None:
         return Tiered(sig, CAUTION, [], ["цена не проверена"])
-    desc = (f"{sig.coin} {trend['ret_7d']:+.1f}% за 7 дн., "
-            f"{'выше' if trend['above_ma20'] else 'ниже'} 20-дн. средней")
+    desc = _trend_desc(sig.coin, trend)
     if crypto.trend_confirms_down(trend):
         return Tiered(sig, CAUTION, [f"цена подтверждает: {desc}"], [])
     return Tiered(sig, CAUTION, [], [f"цена не подтверждает: {desc}"])
