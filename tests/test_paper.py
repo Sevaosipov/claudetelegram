@@ -477,3 +477,15 @@ def test_bot_warns_when_the_paper_pass_fails(conn, monkeypatch):
     monkeypatch.setattr(paper, "run", lambda conn, selection: 11)
     bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=False))
     assert len(sent) == 1
+
+
+def test_bot_sends_the_monthly_report_after_a_good_pass(conn, monkeypatch):
+    import bot
+    import paper_report
+    calls = []
+    monkeypatch.setattr(paper, "run", lambda conn, selection: 11)
+    monkeypatch.setattr(paper_report, "maybe_send_monthly_report",
+                        lambda conn, today: calls.append(today) or True)
+    bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=False))
+    bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=True))
+    assert len(calls) == 1

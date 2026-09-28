@@ -536,3 +536,30 @@ def run(conn, selection, today: dt.date | None = None, fetch=None, trend_fn=None
             conn.rollback()
             print(f"[paper] {book.code} failed: {type(e).__name__}: {e}", file=sys.stderr)
     return ran
+
+
+# -------------------------------------------------------------------- CLI
+def main(argv: list[str] | None = None) -> int:
+    """python paper.py         -- every book against its benchmark
+       python paper.py R1-E2   -- one book's positions, trades and skips"""
+    import argparse
+    from pathlib import Path
+
+    import paper_report
+    ap = argparse.ArgumentParser(description="Бумажный портфель")
+    ap.add_argument("book", nargs="?", help="код книги, например R1-E2 или C-A")
+    args = ap.parse_args(argv)
+    conn = db.connect(Path(__file__).parent / "data" / "disclosures.db")
+    if not args.book:
+        print(paper_report.format_summary(conn, dt.date.today()))
+        return 0
+    code = args.book.upper()
+    if code not in BOOK_BY_CODE:
+        print(f"Нет такой книги: {args.book}. Есть: {', '.join(BOOK_BY_CODE)}")
+        return 2
+    print(paper_report.format_book(conn, code))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

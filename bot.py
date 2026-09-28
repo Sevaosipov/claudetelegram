@@ -281,10 +281,16 @@ def _record_cautions(conn, selection) -> None:
 def _run_paper(conn, selection, args) -> None:
     """The paper portfolio's daily pass (paper.py) -- after the digest, whether or not
     Telegram is on. It trades virtual books only. A crash is reported like a failed
-    source rather than taking the run down."""
-    if _run_source("PAPER", paper.run, conn, selection) is None and not args.no_telegram:
-        telegram_notify.send_text("⚠️ disclosure-bot: бумажный портфель упал в этом прогоне. "
-                                  "Логи: data/launchd.err.log")
+    source rather than taking the run down; on the first good pass of a month the
+    monthly report goes out (paper_report.py)."""
+    if _run_source("PAPER", paper.run, conn, selection) is None:
+        if not args.no_telegram:
+            telegram_notify.send_text("⚠️ disclosure-bot: бумажный портфель упал в этом прогоне. "
+                                      "Логи: data/launchd.err.log")
+        return
+    if not args.no_telegram:
+        import paper_report
+        paper_report.maybe_send_monthly_report(conn, dt.date.today())
 
 
 def _send_digest(conn, selection, closes) -> bool:
