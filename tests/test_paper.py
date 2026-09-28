@@ -106,3 +106,98 @@ def test_series_helpers():
 def test_business_days_between():
     assert paper.business_days_between("2026-10-02", dt.date(2026, 10, 9)) == 5
     assert paper.business_days_between("2026-10-05", dt.date(2026, 10, 5)) == 0
+
+
+# ------------------------------------------------------------- orders & fills
+def _book(conn, code="R1-E1"):
+    paper.create_books(conn, TODAY - dt.timedelta(days=30))
+    return code
+
+
+def test_a_buy_fills_at_the_first_close_after_the_decision(conn):
+    code = _book(conn)
+    assert paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY - dt.timedelta(days=3),
+                           8_000.0, max_positions=10) == "pending"
+    prices = paper.Prices(Fetch({"AAA": _bars([100, 110, 120, 130])}))
+    paper.fill_orders(conn, code, prices, TODAY)
+    [p] = paper.open_positions(conn, code)
+    assert p["fill_date"] == _days(2) and p["entry_close"] == 110.0      # not the decision day's 100
+    assert p["cost_eur"] == 8_000.0 and p["net_eur"] == pytest.approx(8_000 * (1 - 0.0025))
+    assert paper.cash(conn, code) == pytest.approx(72_000.0)
+    assert [o["status"] for o in paper.orders(conn, code)] == ["filled"]
+
+
+def test_value_follows_the_adjusted_close_and_the_currency(conn):
+    code = _book(conn)
+    paper.place_buy(conn, code, "EQNR", "NORWAY", "Сильный", TODAY - dt.timedelta(days=3),
+                    8_000.0, max_positions=10)
+    prices = paper.Prices(Fetch({"EQNR.OL": _bars([100, 100, 110, 125])}))
+    paper.fill_orders(conn, code, prices, TODAY)
+    paper.mark_to_market(conn, code, prices)
+    [p] = paper.open_positions(conn, code)
+    assert p["currency"] == "NOK" and p["entry_fx"] == pytest.approx(10.74)
+    assert p["last_value"] == pytest.approx(p["net_eur"] * 1.25)
+    assert paper.book_value(conn, code) == pytest.approx(72_000 + p["net_eur"] * 1.25)
+
+
+def test_a_sale_fills_at_the_next_close_and_pays_the_fee(conn):
+    code = _book(conn)
+    paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY - dt.timedelta(days=4),
+                    8_000.0, max_positions=10)
+    prices = paper.Prices(Fetch({"AAA": _bars([100, 100, 100, 120, 150])}))
+    paper.fill_orders(conn, code, prices, TODAY)                # buys at 100 (TODAY-3)
+    [p] = paper.open_positions(conn, code)
+    paper.place_sell(conn, code, p, "стоп -15%", TODAY - dt.timedelta(days=2))
+    paper.place_sell(conn, code, p, "стоп -15%", TODAY - dt.timedelta(days=2))   # no second order
+    paper.fill_orders(conn, code, prices, TODAY)                # sells at 120 (TODAY-1)
+    assert paper.open_positions(conn, code) == []
+    [closed] = paper.closed_positions(conn, code)
+    assert closed["closed_date"] == _days(1) and closed["close_reason"] == "стоп -15%"
+    assert closed["proceeds_eur"] == pytest.approx(p["net_eur"] * 1.2 * (1 - 0.0025))
+    assert paper.cash(conn, code) == pytest.approx(72_000 + closed["proceeds_eur"])
+    assert len([o for o in paper.orders(conn, code) if o["side"] == "sell"]) == 1
+
+
+def test_an_order_with_no_price_for_five_business_days_is_cancelled(conn):
+    code = _book(conn)
+    paper.place_buy(conn, code, "AAA", "SEC", "Сильный", dt.date(2026, 10, 2), 8_000.0,
+                    max_positions=10)
+    prices = paper.Prices(Fetch({}))
+    paper.fill_orders(conn, code, prices, dt.date(2026, 10, 8))    # 4 business days: waiting
+    assert [o["status"] for o in paper.orders(conn, code)] == ["pending"]
+    paper.fill_orders(conn, code, prices, dt.date(2026, 10, 12))   # 6: cancelled
+    [o] = paper.orders(conn, code)
+    assert o["status"] == "cancelled" and o["note"] == "не исполнено: нет цены"
+
+
+def test_skips_are_recorded_with_why(conn):
+    code = _book(conn)
+    assert paper.place_buy(conn, code, "DE0007164600", "BAFIN", "Сильный", TODAY, 8_000.0,
+                           max_positions=10) == "skipped"
+    for i in range(10):
+        assert paper.place_buy(conn, code, f"T{i}", "SEC", "Сильный", TODAY, 8_000.0,
+                               max_positions=10) == "pending"
+    assert paper.place_buy(conn, code, "T10", "SEC", "Сильный", TODAY, 8_000.0,
+                           max_positions=10) == "skipped"
+    notes = [o["note"] for o in paper.orders(conn, code) if o["status"] == "skipped"]
+    assert notes == ["нет котировки", "мест нет"]
+
+
+def test_a_partial_slice_needs_half_a_slice_of_cash(conn):
+    code = _book(conn)
+    conn.execute("UPDATE paper_books SET cash_eur = 5000 WHERE code = ?", (code,))
+    assert paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY, 8_000.0,
+                           max_positions=10) == "pending"
+    assert [o["amount_eur"] for o in paper.orders(conn, code)] == [5_000.0]
+    assert paper.place_buy(conn, code, "BBB", "SEC", "Сильный", TODAY, 8_000.0,
+                           max_positions=10) == "skipped"
+    assert paper.orders(conn, code)[-1]["note"] == "нет денег"
+
+
+def test_a_held_or_pending_ticker_is_not_ordered_again(conn):
+    code = _book(conn)
+    assert paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY, 8_000.0,
+                           max_positions=10) == "pending"
+    assert paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY, 8_000.0,
+                           max_positions=10) == "duplicate"
+    assert len(paper.orders(conn, code)) == 1
