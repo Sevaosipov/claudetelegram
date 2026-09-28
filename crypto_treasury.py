@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import re
+import sys
 import time
 from dataclasses import dataclass
 
@@ -38,6 +39,12 @@ QUERIES = {"BTC": '"bitcoin"', "ETH": '"ether" OR "ethereum"'}
 PAGE_SIZE = 100
 MAX_PAGES = 5
 REQUEST_PAUSE_SECONDS = 0.15   # SEC fair access: <=10 req/s across its hosts
+# EFTS and the archive now and then answer one request with a 5xx (or drop the
+# connection) and the identical request succeeds seconds later. A year's backfill
+# makes thousands of requests, so one such blip must not end it. One pause per retry:
+# three attempts in all, then the failure is raised and the source reported as failed.
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+RETRY_PAUSES_SECONDS = (2, 5)
 
 # Sanity bounds on a parsed per-coin price. A misread thousands separator turns
 # $79,475 into $79 or $79,475,000; either is rejected rather than stored.
@@ -184,16 +191,38 @@ def _company(display_name: str) -> tuple[str, str | None]:
     return m.group("name").strip(), first or None
 
 
+def _get(session: requests.Session, url: str, params: dict | None = None) -> requests.Response:
+    """session.get, retried after a pause on a transient failure. The last attempt's
+    response is returned whatever its status (the caller's raise_for_status decides),
+    and its connection error is raised; anything else, a 404 included, is returned
+    at once."""
+    for pause in (*RETRY_PAUSES_SECONDS, None):
+        try:
+            resp = session.get(url, params=params, timeout=30)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if pause is None:
+                raise
+            problem = f"{type(e).__name__}: {e}"
+        else:
+            if pause is None or resp.status_code not in RETRY_STATUSES:
+                return resp
+            problem = f"HTTP {resp.status_code}"
+        print(f"[crypto_treasury] {url} failed ({problem}); retrying in {pause}s",
+              file=sys.stderr)
+        time.sleep(pause)
+    raise AssertionError("unreachable")
+
+
 def search(start: dt.date, end: dt.date, session: requests.Session) -> list[dict]:
     """EFTS hits (one per document) for every coin query, de-duplicated by doc id."""
     hits: dict[str, dict] = {}
     for q in QUERIES.values():
         for page in range(MAX_PAGES):
-            resp = session.get(EFTS_URL, params={
+            resp = _get(session, EFTS_URL, params={
                 "q": q, "forms": FORMS, "dateRange": "custom",
                 "startdt": start.isoformat(), "enddt": end.isoformat(),
                 "from": page * PAGE_SIZE,
-            }, timeout=30)
+            })
             resp.raise_for_status()
             batch = resp.json().get("hits", {}).get("hits", [])
             for h in batch:
@@ -240,7 +269,7 @@ def scan_new_filings(start: dt.date, end: dt.date, seen_doc_ids: set[str],
         doc_id = hit["_id"]
         if doc_id in seen_doc_ids:
             continue
-        resp = session.get(doc_url(hit), timeout=30)
+        resp = _get(session, doc_url(hit))
         time.sleep(REQUEST_PAUSE_SECONDS)
         if resp.status_code == 404:
             yield doc_id, []
