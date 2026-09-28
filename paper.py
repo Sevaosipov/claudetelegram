@@ -443,7 +443,12 @@ def stock_step(conn, book: Book, selection, prices: Prices, today: dt.date) -> N
             place_sell(conn, book.code, pos, reason, today)
     value = book_value(conn, book.code)
     for sig in stock_signals(selection, book):
-        target = _analyst_target(sig.ticker, sig.source) if book.analyst else None
+        target = None
+        if book.analyst:    # two network calls: only for a ticker the book can still buy
+            taken = ({p["ticker"] for p in open_positions(conn, book.code)}
+                     | {o["ticker"] for o in pending_orders(conn, book.code)})
+            if sig.ticker not in taken:
+                target = _analyst_target(sig.ticker, sig.source)
         place_buy(conn, book.code, sig.ticker, sig.source, _buy_reason(sig), today, SLICE * value,
                   max_positions=MAX_POSITIONS, min_fraction=0.5, insiders=insiders_of(sig),
                   target=target)

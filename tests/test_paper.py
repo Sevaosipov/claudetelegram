@@ -174,6 +174,22 @@ def test_a_position_held_past_the_usual_history_is_still_valued_and_sold(conn):
     assert asked == [530, 530]
 
 
+def test_a_weaker_dollar_lowers_the_eur_value_at_an_unchanged_price(conn, monkeypatch):
+    code = _book(conn)
+    rate = {"USD": 1.16}
+    monkeypatch.setattr(paper.fx, "per_eur", lambda currency, conn=None: rate[currency])
+    paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY - dt.timedelta(days=3), 8_000.0,
+                    max_positions=10)
+    prices = paper.Prices(Fetch({"AAA": _bars([100, 100, 100, 100])}))
+    paper.fill_orders(conn, code, prices, TODAY)
+    rate["USD"] = 1.276                                              # 10% more dollars per euro
+    paper.mark_to_market(conn, code, prices, TODAY)
+    [p] = paper.open_positions(conn, code)
+    assert p["entry_fx"] == pytest.approx(1.16)
+    assert p["last_value"] == pytest.approx(p["net_eur"] * (100 / 100) * (1.16 / 1.276))
+    assert p["last_value"] == pytest.approx(p["net_eur"] / 1.1)      # 10% less in EUR
+
+
 def test_a_sale_fills_at_the_next_close_and_pays_the_fee(conn):
     code = _book(conn)
     paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY - dt.timedelta(days=4),
@@ -342,6 +358,17 @@ def test_the_shadow_records_the_target_at_the_buy(conn, monkeypatch):
     paper.stock_step(conn, paper.BOOK_BY_CODE["R1-E1-AN"], _sel([_sig("AAA")]),
                      paper.Prices(Fetch({})), TODAY)
     assert paper.orders(conn, "R1-E1-AN")[0]["target"] == 150.0
+
+
+def test_the_shadow_looks_up_targets_only_for_tickers_it_can_buy(conn, monkeypatch):
+    _book(conn)
+    asked = []
+    monkeypatch.setattr(paper, "_analyst_target", lambda ticker, source: asked.append(ticker) or 150.0)
+    _position(conn, "R1-E1-AN", "AAA")                                          # held
+    paper.place_buy(conn, "R1-E1-AN", "BBB", "SEC", "Сильный", TODAY, 8_000.0)  # pending
+    paper.stock_step(conn, paper.BOOK_BY_CODE["R1-E1-AN"], _sel([_sig("AAA"), _sig("BBB"), _sig("CCC")]),
+                     paper.Prices(Fetch({})), TODAY)
+    assert asked == ["CCC"]
 
 
 def test_stock_step_places_a_sale_when_an_exit_holds(conn):
