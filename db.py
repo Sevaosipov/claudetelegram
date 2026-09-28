@@ -503,6 +503,64 @@ CREATE TABLE IF NOT EXISTS outlook_table (
     built_at        TEXT NOT NULL,
     PRIMARY KEY (table_name, situation)
 );
+
+-- The paper portfolio (paper.py): virtual books that trade the bot's own signals
+-- on fixed rules. Nothing here is a real position -- see positions for those.
+CREATE TABLE IF NOT EXISTS paper_books (
+    code            TEXT PRIMARY KEY,   -- R1-E1 … R2-E4, R1-E1-AN, C-A, C-B
+    sleeve          TEXT NOT NULL,      -- stock | crypto
+    start_date      TEXT NOT NULL,
+    start_eur       REAL NOT NULL,
+    cash_eur        REAL NOT NULL,
+    bench_symbol    TEXT NOT NULL,      -- SPY | BTC-USD
+    bench_start_fx  REAL                -- USD per EUR when the benchmark was first priced
+);
+
+CREATE TABLE IF NOT EXISTS paper_orders (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    book         TEXT NOT NULL,
+    ticker       TEXT NOT NULL,
+    source       TEXT,
+    side         TEXT NOT NULL,         -- buy | sell
+    amount_eur   REAL,                  -- buy: the money set aside for it
+    position_id  INTEGER,               -- sell: the position it closes
+    reason       TEXT NOT NULL,
+    created      TEXT NOT NULL,         -- ISO date the decision was made
+    status       TEXT NOT NULL,         -- pending | filled | cancelled | skipped
+    note         TEXT,                  -- why it was cancelled or skipped
+    insiders     TEXT,                  -- JSON list, buy only
+    target       REAL                   -- analyst target at the order, shadow book only
+);
+
+CREATE TABLE IF NOT EXISTS paper_positions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    book          TEXT NOT NULL,
+    ticker        TEXT NOT NULL,
+    source        TEXT,
+    symbol        TEXT NOT NULL,        -- the Yahoo symbol it is priced on
+    currency      TEXT NOT NULL,
+    fill_date     TEXT NOT NULL,
+    cost_eur      REAL NOT NULL,        -- money paid, before the buy fee
+    net_eur       REAL NOT NULL,        -- money invested, after the buy fee
+    entry_close   REAL NOT NULL,
+    entry_fx      REAL NOT NULL,        -- units of `currency` per EUR at the fill
+    insiders      TEXT,
+    target        REAL,
+    reason        TEXT,
+    last_value    REAL,                 -- EUR at the last priced close
+    closed_date   TEXT,
+    close_reason  TEXT,
+    proceeds_eur  REAL                  -- after the sell fee
+);
+
+CREATE TABLE IF NOT EXISTS paper_equity (
+    book   TEXT NOT NULL,
+    date   TEXT NOT NULL,
+    value  REAL NOT NULL,
+    cash   REAL NOT NULL,
+    bench  REAL,
+    PRIMARY KEY (book, date)
+);
 """
 
 
