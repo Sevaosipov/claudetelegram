@@ -187,6 +187,23 @@ def test_an_order_with_no_price_for_five_business_days_is_cancelled(conn):
     assert o["status"] == "cancelled" and o["note"] == "не исполнено: нет цены"
 
 
+def test_a_sale_with_no_price_for_five_business_days_closes_at_the_last_value(conn):
+    code = _book(conn)
+    pos = _position(conn, code, value=9_000.0)
+    paper.place_sell(conn, code, pos, "90 дн. в позиции", dt.date(2026, 10, 2))
+    prices = paper.Prices(Fetch({}))                                 # delisted: no quotes at all
+    paper.fill_orders(conn, code, prices, dt.date(2026, 10, 8))     # 4 business days: waiting
+    assert paper.closed_positions(conn, code) == []
+    paper.fill_orders(conn, code, prices, dt.date(2026, 10, 12))    # 6: closed at the last value
+    [closed] = paper.closed_positions(conn, code)
+    proceeds = 9_000.0 * (1 - 0.0025)
+    assert closed["closed_date"] == "2026-10-12" and closed["proceeds_eur"] == pytest.approx(proceeds)
+    assert closed["close_reason"] == "90 дн. в позиции (по последней цене: нет котировок)"
+    assert paper.cash(conn, code) == pytest.approx(80_000 + proceeds)
+    [o] = paper.orders(conn, code)
+    assert (o["status"], o["note"]) == ("filled", "по последней цене")
+
+
 def test_skips_are_recorded_with_why(conn):
     code = _book(conn)
     assert paper.place_buy(conn, code, "DE0007164600", "BAFIN", "Сильный", TODAY, 8_000.0,

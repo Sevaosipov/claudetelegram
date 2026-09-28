@@ -321,17 +321,35 @@ def _fill_sell(conn, code: str, order: dict, bars: list[tuple[str, float]], day:
     _set_order(conn, order["id"], "filled")
 
 
+def _close_at_last_value(conn, code: str, order: dict, today: dt.date) -> None:
+    """A sale that never finds a price (a delisting, a takeover) closes the position
+    at its last known value, so it doesn't hold a slot forever or go uncounted."""
+    [pos] = _rows(conn, "SELECT * FROM paper_positions WHERE id = ?", (order["position_id"],))
+    value = pos["last_value"] if pos["last_value"] is not None else pos["net_eur"]
+    proceeds = value * (1 - fee(pos["ticker"], pos["currency"]))
+    conn.execute("UPDATE paper_positions SET closed_date = ?, close_reason = ?, proceeds_eur = ?, "
+                 "last_value = ? WHERE id = ?",
+                 (today.isoformat(), f"{order['reason']} (по последней цене: нет котировок)",
+                  proceeds, value, pos["id"]))
+    _add_cash(conn, code, proceeds)
+    _set_order(conn, order["id"], "filled", "по последней цене")
+
+
 def fill_orders(conn, code: str, prices: Prices, today: dt.date) -> None:
     """Fill every pending order whose first close after its decision day is known --
-    sales first, since they free cash, then buys in order. An order still without a
-    price after ORDER_MAX_BUSINESS_DAYS is cancelled."""
+    sales first, since they free cash, then buys in order. A buy still without a
+    price after ORDER_MAX_BUSINESS_DAYS is cancelled; a sale closes at the position's
+    last value."""
     for order in sorted(pending_orders(conn, code), key=lambda o: (o["side"] != "sell", o["id"])):
         lst = listing(order["ticker"], order["source"])
         bars = prices.bars(lst[0]) if lst else []
         nxt = first_close_after(bars, order["created"])
         if nxt is None:
             if business_days_between(order["created"], today) > ORDER_MAX_BUSINESS_DAYS:
-                _set_order(conn, order["id"], "cancelled", "не исполнено: нет цены")
+                if order["side"] == "sell":
+                    _close_at_last_value(conn, code, order, today)
+                else:
+                    _set_order(conn, order["id"], "cancelled", "не исполнено: нет цены")
             continue
         day, close = nxt
         if order["side"] == "sell":
