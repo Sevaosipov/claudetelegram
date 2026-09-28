@@ -101,6 +101,17 @@ def test_prices_with_a_date_keep_only_completed_bars():
     assert paper.Prices(Fetch(series)).bars("AAA") == series["AAA"]   # without a date: every bar
 
 
+@pytest.mark.parametrize("symbol,source,kept", [
+    ("AAPL", "Nasdaq", False),       # not adjusted for dividends and splits
+    ("AAPL", "Yahoo", True),
+    ("BTC-USD", "Binance", True),    # a coin pays no dividend: any source will do
+])
+def test_stock_closes_come_from_yahoo_only(monkeypatch, symbol, source, kept):
+    bars = [("2026-10-01", 1.0), ("2026-10-02", 2.0)]
+    monkeypatch.setattr(paper.sources, "price_history", lambda asset, days: (bars, source))
+    assert paper._closes(symbol, 420) == (bars if kept else [])
+
+
 def test_series_helpers():
     bars = [("2026-10-01", 10.0), ("2026-10-02", 11.0), ("2026-10-05", 12.0)]
     assert paper.close_on_or_before(bars, "2026-10-03") == 11.0

@@ -102,10 +102,15 @@ def fee(ticker: str, currency: str) -> float:
 # ----------------------------------------------------------------- prices
 def _closes(symbol: str, days: int) -> list[tuple[str, float]]:
     """Adjusted daily closes for a Yahoo symbol, oldest first; [] when every source
-    fails. The one network seam -- tests hand their own fetch to Prices/run."""
-    asset = (assets.crypto_asset(symbol[:-len("-USD")]) if symbol.endswith("-USD")
-             else assets.stock_asset(symbol))
-    bars, _src = sources.price_history(asset, days)
+    fails. The one network seam -- tests hand their own fetch to Prices/run. A stock
+    or ETF takes Yahoo's series only: the Nasdaq fallback isn't adjusted for dividends
+    and splits, so it would show false dips and stops -- with no price, a position
+    keeps its last value instead. A coin pays no dividend, so any source will do."""
+    coin = symbol.endswith("-USD")
+    asset = assets.crypto_asset(symbol[:-len("-USD")]) if coin else assets.stock_asset(symbol)
+    bars, src = sources.price_history(asset, days)
+    if not coin and src != "Yahoo":
+        return []
     return bars or []
 
 
