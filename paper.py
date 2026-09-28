@@ -479,3 +479,60 @@ def crypto_step(conn, book: Book, selection, prices: Prices, today: dt.date, tre
         elif (trend or recent) and not _rebuy_blocked(conn, book.code, coin, today):
             reason = "выше 200-дн. средней" if trend else "Сильный крипто-сигнал"
             place_buy(conn, book.code, ticker, "CRYPTO", reason, today, share, min_fraction=0.0)
+
+
+# -------------------------------------------------------------- daily run
+def max_drawdown(values: list[float]) -> float:
+    """The largest fall from a peak to a later low, as a negative fraction (0 if none)."""
+    peak, worst = None, 0.0
+    for v in values:
+        peak = v if peak is None else max(peak, v)
+        if peak:
+            worst = min(worst, v / peak - 1)
+    return worst
+
+
+def _snapshot(conn, code: str, prices: Prices, today: dt.date) -> None:
+    """Store today's value and the benchmark indexed from the start date: start
+    money x (close now / close on the start date) x (FX at the start / FX now)."""
+    start_date, start_eur, symbol, start_fx = conn.execute(
+        "SELECT start_date, start_eur, bench_symbol, bench_start_fx FROM paper_books WHERE code = ?",
+        (code,)).fetchone()
+    days = max(PRICE_DAYS, (today - dt.date.fromisoformat(start_date)).days + 30)
+    bars = prices.bars(symbol, days)
+    fx_now = fx.per_eur("USD", conn)
+    bench = None
+    base = close_on_or_before(bars, start_date) or (bars[0][1] if bars else None)
+    if bars and base:
+        if start_fx is None:
+            start_fx = fx_now
+            conn.execute("UPDATE paper_books SET bench_start_fx = ? WHERE code = ?", (start_fx, code))
+        bench = start_eur * (bars[-1][1] / base) * (start_fx / fx_now)
+    conn.execute("INSERT OR REPLACE INTO paper_equity (book, date, value, cash, bench) VALUES (?,?,?,?,?)",
+                 (code, today.isoformat(), book_value(conn, code), cash(conn, code), bench))
+    conn.commit()
+
+
+def run(conn, selection, today: dt.date | None = None, fetch=None, trend_fn=None) -> int:
+    """One daily pass over every book: fill pending orders at the new close, revalue,
+    decide sales and buys (filled at the next close), store the day. One failing book
+    is logged and skipped. Returns how many books ran."""
+    today = today or dt.date.today()
+    trend_fn = trend_fn or crypto.price_trend
+    create_books(conn, today)
+    prices = Prices(fetch)
+    ran = 0
+    for book in BOOKS:
+        try:
+            fill_orders(conn, book.code, prices, today)
+            mark_to_market(conn, book.code, prices)
+            if book.sleeve == "stock":
+                stock_step(conn, book, selection, prices, today)
+            else:
+                crypto_step(conn, book, selection, prices, today, trend_fn)
+            _snapshot(conn, book.code, prices, today)
+            ran += 1
+        except Exception as e:
+            conn.rollback()
+            print(f"[paper] {book.code} failed: {type(e).__name__}: {e}", file=sys.stderr)
+    return ran

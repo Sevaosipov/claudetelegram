@@ -413,3 +413,67 @@ def test_c_b_sells_on_a_caution_and_waits_7_days_before_buying_again(conn):
     orders = _crypto(conn, "C-B", today=later,
                      series={"BTC-USD": _trend_bars(110, later), "ETH-USD": _trend_bars(90, later)})
     assert orders[-1]["side"] == "buy" and orders[-1]["reason"] == "выше 200-дн. средней"
+
+
+# --------------------------------------------------------------- daily run
+def test_max_drawdown():
+    assert paper.max_drawdown([100, 120, 90, 130, 117]) == pytest.approx(-0.25)
+    assert paper.max_drawdown([100, 101]) == 0.0 and paper.max_drawdown([]) == 0.0
+
+
+def _run_day(conn, day, series, selection=None):
+    return paper.run(conn, selection or _sel(), today=day, fetch=Fetch(series),
+                     trend_fn=lambda c, s: None)
+
+
+def test_run_opens_books_places_orders_and_fills_them_the_next_day(conn, monkeypatch):
+    monkeypatch.setattr(paper, "_analyst_target", lambda ticker, source: None)   # the shadow's network seam
+    day1, day2 = TODAY - dt.timedelta(days=1), TODAY
+    assert _run_day(conn, day1, {"SPY": _bars([500, 505], day1), "AAA": _bars([100, 100], day1),
+                                 "BTC-USD": _trend_bars(110, day1), "ETH-USD": _trend_bars(90, day1)},
+                    _sel([_sig("AAA")])) == 11
+    assert [o["status"] for o in paper.orders(conn, "R1-E1")] == ["pending"]
+    _run_day(conn, day2, {"SPY": _bars([500, 505, 510], day2), "AAA": _bars([100, 100, 120], day2),
+                          "BTC-USD": _trend_bars(110, day2), "ETH-USD": _trend_bars(90, day2)})
+    [p] = paper.open_positions(conn, "R1-E1")
+    assert p["fill_date"] == day2.isoformat() and p["entry_close"] == 120.0
+    rows = conn.execute("SELECT date, value, cash, bench FROM paper_equity WHERE book = 'R1-E1' "
+                        "ORDER BY date").fetchall()
+    assert [r[0] for r in rows] == [day1.isoformat(), day2.isoformat()]
+    assert rows[0][1] == pytest.approx(80_000.0) and rows[0][3] == pytest.approx(80_000.0)
+    assert rows[1][1] == pytest.approx(72_000.0 + p["net_eur"])
+    assert rows[1][3] == pytest.approx(80_000.0 * 510 / 505)
+    [btc] = paper.open_positions(conn, "C-B")
+    assert btc["ticker"] == "CRYPTO:BTC"
+
+
+def test_a_book_without_a_benchmark_price_stores_no_benchmark(conn):
+    _run_day(conn, TODAY, {})
+    assert conn.execute("SELECT value, bench FROM paper_equity WHERE book = 'R1-E1'").fetchone() == \
+        (80_000.0, None)
+
+
+def test_one_failing_book_does_not_stop_the_others(conn, monkeypatch):
+    real = paper.crypto_step
+
+    def boom(conn, book, *a, **k):
+        if book.code == "C-A":
+            raise RuntimeError("bad")
+        return real(conn, book, *a, **k)
+    monkeypatch.setattr(paper, "crypto_step", boom)
+    assert _run_day(conn, TODAY, {}) == 10
+
+
+def test_bot_warns_when_the_paper_pass_fails(conn, monkeypatch):
+    import bot
+    sent = []
+    monkeypatch.setattr(bot.telegram_notify, "send_text", lambda text: sent.append(text) or True)
+
+    def fail(conn, selection):
+        raise RuntimeError("x")
+    monkeypatch.setattr(paper, "run", fail)
+    bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=False))
+    assert len(sent) == 1 and "бумажный портфель" in sent[0]
+    monkeypatch.setattr(paper, "run", lambda conn, selection: 11)
+    bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=False))
+    assert len(sent) == 1

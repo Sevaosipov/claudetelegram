@@ -46,6 +46,7 @@ import cik_map
 import cluster
 import db
 import insider_score
+import paper
 import positions
 import sec_edgar
 import strategy
@@ -275,6 +276,15 @@ def _record_cautions(conn, selection) -> None:
     are journaled and marked alerted on the run that finds them: a coin position's
     close alert reads them from the journal (positions.check_exits)."""
     _commit_signals(conn, [t.signal for t in selection.cautions])
+
+
+def _run_paper(conn, selection, args) -> None:
+    """The paper portfolio's daily pass (paper.py) -- after the digest, whether or not
+    Telegram is on. It trades virtual books only. A crash is reported like a failed
+    source rather than taking the run down."""
+    if _run_source("PAPER", paper.run, conn, selection) is None and not args.no_telegram:
+        telegram_notify.send_text("⚠️ disclosure-bot: бумажный портфель упал в этом прогоне. "
+                                  "Логи: data/launchd.err.log")
 
 
 def _send_digest(conn, selection, closes) -> bool:
@@ -613,6 +623,7 @@ def main():
             print(telegram_notify.format_close_alert(a, html=False))
         if not args.no_telegram:
             _send_digest(conn, selection, closes)
+        _run_paper(conn, selection, args)
         signal_count = len(selection.strong) + len(selection.candidates)
 
         # The pass got all the way through: record it. run_healthcheck reads this,
