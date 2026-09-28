@@ -596,3 +596,29 @@ def test_a_lower_pass_signal_never_gets_a_main_tier(conn, sized):
          title="Chief Executive Officer")           # €120k solo: only the lower pass finds it
     sel = _select_all(conn)
     assert _tiers(sel) == (set(), set()) and _hr(sel) == set()
+
+
+def test_a_high_risk_only_signal_does_not_corroborate_a_main_signal(conn, monkeypatch):
+    """enrich_signals runs find_corroboration across whatever batch it's handed --
+    if select() enriched the lower-threshold pass's sub-threshold clusters in the
+    same batch as the main signals, an unrelated main-pass HOUSE cluster on the
+    same ticker would wrongly get corroborated_by=["SEC"] from a cluster that
+    exists only to feed the high-risk rule. Uses the real cluster.enrich_signals
+    (not the `sized` stub) so find_corroboration actually runs; only the
+    network-reaching marketcap lookups are stubbed."""
+    import marketcap
+    monkeypatch.setattr(marketcap, "market_cap_eur", lambda conn, ticker, source=None: 5e9)
+    monkeypatch.setattr(marketcap, "facts", lambda conn, ticker, source=None:
+                        {"avg_daily_value": 5e7, "currency": "USD"})
+
+    date = (TODAY - dt.timedelta(days=1)).strftime("%m/%d/%Y")
+    for member in ("Member One", "Member Two"):
+        add_house_txn(conn, "XYZ", member, "$250,001 - $500,000", date=date)
+    [house_sig] = cluster.find_house_clusters(conn)
+
+    _buy(conn, "XYZ", "Solo Insider", usd=69_600)    # €60k: only clears the lower bar
+    [sec_sig] = cluster.find_sec_clusters(conn, min_value=50_000, solo_threshold=50_000)
+    sec_sig.high_risk_only = True
+
+    strategy.select(conn, [house_sig, sec_sig], _T212())
+    assert "SEC" not in house_sig.corroborated_by

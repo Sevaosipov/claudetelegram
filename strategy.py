@@ -359,7 +359,16 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
            if is_buy_side(s)
            and (cluster.disclosed_on(conn, s) or "") >= since
            and (t212 is None or t212.can_buy(s.ticker, s.source))]
-    pre = cluster.enrich_signals(conn, pre) if pre else []
+    # Enriched in two separate batches: enrich_signals runs find_corroboration
+    # across whatever it's handed, and a sub-threshold cluster the lower-threshold
+    # pass built only to feed the high-risk rule (see buy_side_signals) must not
+    # credit an unrelated main-pass signal on the same ticker with a
+    # corroborating source it never earned.
+    main_pre = [s for s in pre if not getattr(s, "high_risk_only", False)]
+    hr_only_pre = [s for s in pre if getattr(s, "high_risk_only", False)]
+    main_pre = cluster.enrich_signals(conn, main_pre) if main_pre else []
+    hr_only_pre = cluster.enrich_signals(conn, hr_only_pre) if hr_only_pre else []
+    pre = main_pre + hr_only_pre
     tiered = []
     for s in pre:
         if hasattr(s, "crypto_kind"):
