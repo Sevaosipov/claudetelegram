@@ -838,6 +838,31 @@ def test_run_cluster_pass_includes_exit_signals(conn, monkeypatch):
     assert [e.ticker for e in selection.exits] == ["BBB"]
 
 
+def test_run_cluster_pass_prints_high_risk_signals_with_their_own_prefix(conn, monkeypatch, capsys):
+    """High-risk small-company signals are never pushed to Telegram -- the menu's
+    Сигналы shows them -- but a manual run should still see them happened, the same
+    way a caution gets its own [caution] line."""
+    import trading212
+
+    def fake_enrich(conn, signals):
+        for s in signals:
+            s.market_cap_eur, s.avg_daily_value, s.score = 100e6, 500_000, 100.0
+        return signals
+    monkeypatch.setattr(cluster, "enrich_signals", fake_enrich)
+    monkeypatch.setattr(trading212, "availability", lambda conn: None)
+
+    yesterday = (TODAY - dt.timedelta(days=1)).isoformat()
+    for name in ("Director One", "Director Two"):
+        # €60k each: €120k = 0.12% of the €100M market cap set above.
+        add_sec_purchase(conn, "AAA", name, 69_600, yesterday, filed_date=yesterday)
+
+    args = bot.build_parser().parse_args(["--once", "--no-market-context"])
+    selection = bot.run_cluster_pass(conn, args)
+    assert [t.signal.ticker for t in selection.high_risk] == ["AAA"]
+    out = capsys.readouterr().out
+    assert "[high_risk]" in out and "[strong]" not in out and "[candidate]" not in out
+
+
 def test_run_cluster_pass_respects_no_exit_signals(conn, monkeypatch):
     import trading212
     monkeypatch.setattr(trading212, "availability", lambda conn: None)

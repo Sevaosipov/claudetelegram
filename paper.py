@@ -42,6 +42,12 @@ SUCCESS_DAYS = 182
 MIN_STOCK_TRADES = 20
 STOCK_BENCHMARK = "SPY"
 CRYPTO_BENCHMARK = "BTC-USD"
+SMALL_START_EUR = 20_000.0      # the high-risk sleeve: small-company insider buying
+SMALL_SLICE = 0.20              # of the book's value, per buy -- few signals a month
+SMALL_MAX_POSITIONS = 5
+SMALL_BENCHMARK = "IWM"         # the Russell 2000
+_START_EUR = {"stock": STOCK_START_EUR, "crypto": CRYPTO_START_EUR, "small": SMALL_START_EUR}
+_BENCHMARK = {"stock": STOCK_BENCHMARK, "crypto": CRYPTO_BENCHMARK, "small": SMALL_BENCHMARK}
 _VENUE_CURRENCY = {".OL": "NOK", ".ST": "SEK", ".DE": "EUR"}
 
 # exit -> (days held, stop, take-profit, an insider from the signal selling counts)
@@ -50,13 +56,15 @@ EXITS = {
     "E2": (182, None, None, False),
     "E3": (91, -0.15, None, False),
     "E4": (90, -0.15, 0.25, True),
+    "H1": (182, None, None, False),
+    "H2": (91, -0.30, 0.50, False),
 }
 
 
 @dataclass(frozen=True)
 class Book:
     code: str                   # R1-E1 … R2-E4, R1-E1-AN, C-A, C-B
-    sleeve: str                 # stock | crypto
+    sleeve: str                 # stock | crypto | small
     buy: str | None = None      # R1 | R2
     exit: str | None = None     # E1 … E4
     analyst: bool = False       # the analyst-target shadow
@@ -64,7 +72,7 @@ class Book:
 
     @property
     def label(self) -> str:
-        if self.sleeve == "crypto":
+        if self.sleeve in ("crypto", "small"):
             return self.code
         return f"{self.buy}·{self.exit}" + ("+аналитики" if self.analyst else "")
 
@@ -73,7 +81,9 @@ BOOKS = tuple(
     [Book(f"{r}-{e}", "stock", r, e) for r in ("R1", "R2") for e in ("E1", "E2", "E3", "E4")]
     + [Book("R1-E1-AN", "stock", "R1", "E1", analyst=True),
        Book("C-A", "crypto", rule="A"),
-       Book("C-B", "crypto", rule="B")])
+       Book("C-B", "crypto", rule="B"),
+       Book("H1", "small", None, "H1"),
+       Book("H2", "small", None, "H2")])
 BOOK_BY_CODE = {b.code: b for b in BOOKS}
 
 
@@ -163,10 +173,10 @@ def business_days_between(start: str, today: dt.date) -> int:
 
 # ------------------------------------------------------------------ books
 def create_books(conn, today: dt.date) -> None:
-    """Every book, once -- the first run is every book's start date."""
+    """Every book, once -- the first run is a book's start date (a book added to the
+    code later starts on the next run)."""
     for b in BOOKS:
-        start = STOCK_START_EUR if b.sleeve == "stock" else CRYPTO_START_EUR
-        bench = STOCK_BENCHMARK if b.sleeve == "stock" else CRYPTO_BENCHMARK
+        start, bench = _START_EUR[b.sleeve], _BENCHMARK[b.sleeve]
         conn.execute(
             "INSERT OR IGNORE INTO paper_books (code, sleeve, start_date, start_eur, cash_eur, "
             "bench_symbol) VALUES (?,?,?,?,?,?)",
@@ -375,7 +385,10 @@ def fill_orders(conn, code: str, prices: Prices, today: dt.date) -> None:
 # ------------------------------------------------------------ stock books
 def stock_signals(selection, book: Book) -> list:
     """R1: the day's Сильный stock signals. R2: plus Кандидаты scoring R2_MIN_SCORE
-    or more. A CRYPTO: ticker (a congressional crypto buy) never enters a stock book."""
+    or more. A CRYPTO: ticker (a congressional crypto buy) never enters a stock book.
+    The small-company books take only the day's high-risk signals."""
+    if book.sleeve == "small":
+        return [t.signal for t in getattr(selection, "high_risk", [])]
     sigs = [t.signal for t in selection.strong if not crypto.is_crypto(t.signal.ticker)]
     if book.buy == "R2":
         sigs += [t.signal for t in selection.candidates
@@ -391,7 +404,7 @@ def insiders_of(sig) -> list[str]:
 
 
 def _buy_reason(sig) -> str:
-    tier = "Сильный" if getattr(sig, "tier", None) == "strong" else "Кандидат"
+    tier = {"strong": "Сильный", "high_risk": "Высокий риск"}.get(getattr(sig, "tier", None), "Кандидат")
     return f"{tier}: {sig.source}, {getattr(sig, 'company', None) or sig.ticker}"
 
 
@@ -435,13 +448,18 @@ def stock_exit_reason(conn, book: Book, pos: dict, bars: list[tuple[str, float]]
 
 
 def stock_step(conn, book: Book, selection, prices: Prices, today: dt.date) -> None:
-    """Sales for every exit that holds, then a buy per new signal: a tenth of the
-    book's value, at most MAX_POSITIONS, half a slice at least."""
+    """Sales for every exit that holds, then a buy per new signal: a slice of the
+    book's value, at most a cap of open positions, half a slice at least. Both the
+    slice and the cap depend on the sleeve -- a tenth and 10 positions for the stock
+    books (R1/R2), a fifth and 5 for the small-company books (H1/H2), which see far
+    fewer signals a month."""
     for pos in open_positions(conn, book.code):
         reason = stock_exit_reason(conn, book, pos, prices.bars(pos["symbol"]), today)
         if reason:
             place_sell(conn, book.code, pos, reason, today)
     value = book_value(conn, book.code)
+    slice_, max_positions = ((SMALL_SLICE, SMALL_MAX_POSITIONS) if book.sleeve == "small"
+                             else (SLICE, MAX_POSITIONS))
     for sig in stock_signals(selection, book):
         target = None
         if book.analyst:    # two network calls: only for a ticker the book can still buy
@@ -449,8 +467,8 @@ def stock_step(conn, book: Book, selection, prices: Prices, today: dt.date) -> N
                      | {o["ticker"] for o in pending_orders(conn, book.code)})
             if sig.ticker not in taken:
                 target = _analyst_target(sig.ticker, sig.source)
-        place_buy(conn, book.code, sig.ticker, sig.source, _buy_reason(sig), today, SLICE * value,
-                  max_positions=MAX_POSITIONS, min_fraction=0.5, insiders=insiders_of(sig),
+        place_buy(conn, book.code, sig.ticker, sig.source, _buy_reason(sig), today, slice_ * value,
+                  max_positions=max_positions, min_fraction=0.5, insiders=insiders_of(sig),
                   target=target)
 
 
@@ -575,7 +593,7 @@ def run(conn, selection, today: dt.date | None = None, fetch=None, trend_fn=None
         try:
             fill_orders(conn, book.code, prices, today)
             mark_to_market(conn, book.code, prices, today)
-            if book.sleeve == "stock":
+            if book.sleeve in ("stock", "small"):
                 stock_step(conn, book, selection, prices, today)
             else:
                 crypto_step(conn, book, selection, prices, today, trend_fn)

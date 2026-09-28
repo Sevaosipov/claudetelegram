@@ -130,7 +130,7 @@ def test_monthly_html_summary_aligns_books_and_shows_the_benchmarks_month(conn):
     text = paper_report.format_summary(conn, TODAY, monthly=True, html=True)
     assert "<b>АКЦИИ (S&amp;P 500: +5.0%, худшая просадка +0.0%, за месяц +5.0%)</b>" in text
     assert "за месяц —)</b>" in text                                   # КРИПТО: no benchmark yet
-    assert text.count("<pre>") == 2 and text.count("</pre>") == 2
+    assert text.count("<pre>") == 3 and text.count("</pre>") == 3
     assert "<pre>R1·E1 " in text and re.search(r"R1·E1 .* за месяц +\+2\.5%", text)
 
 
@@ -153,8 +153,40 @@ def test_cli_shows_a_book_and_rejects_an_unknown_one(conn, monkeypatch, capsys):
     assert paper.main(["X-9"]) == 2 and "Нет такой книги" in capsys.readouterr().out
 
 
+def test_cli_shows_a_high_risk_book(conn, monkeypatch, capsys):
+    _start(conn, 10)
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    assert paper.main(["H1"]) == 0 and "H1" in capsys.readouterr().out
+
+
 def test_menu_shows_the_paper_portfolio(conn, capsys):
     import menu
     _start(conn, 10)
     menu.show_paper(conn)
     assert "Бумажный портфель" in capsys.readouterr().out
+
+
+def test_small_books_wait_for_their_20_trades(conn):
+    _start(conn, 190)
+    _equity(conn, "H1", [(190, 20_000, 20_000), (0, 24_000, 21_000)])
+    _closed_trades(conn, "H1", 5)
+    assert paper_report.stats(conn, paper.BOOK_BY_CODE["H1"], TODAY)["status"] == "идёт (сделок 5 из 20)"
+
+
+def test_summary_has_a_high_risk_group_with_its_own_start(conn):
+    _start(conn, 40)
+    conn.execute("UPDATE paper_books SET start_date = ? WHERE sleeve = 'small'",
+                 ((TODAY - dt.timedelta(days=10)).isoformat(),))
+    conn.commit()
+    text = paper_report.format_summary(conn, TODAY)
+    started = (TODAY - dt.timedelta(days=10)).strftime("%d.%m.%Y")
+    assert "ВЫСОКИЙ РИСК (Russell 2000:" in text and f"с {started})" in text
+    assert "H1" in text and "H2" in text
+
+
+def test_summary_skips_books_the_database_does_not_have_yet(conn):
+    _start(conn, 40)
+    conn.execute("DELETE FROM paper_books WHERE sleeve = 'small'")
+    conn.commit()
+    text = paper_report.format_summary(conn, TODAY)
+    assert "ВЫСОКИЙ РИСК" not in text and "R1·E1" in text

@@ -3,6 +3,7 @@ Offline: enrich_signals is replaced by `sized`, price trends by a stub."""
 from __future__ import annotations
 
 import datetime as dt
+import types
 
 import pytest
 
@@ -457,7 +458,9 @@ def test_buy_side_signals_forwards_cluster_and_source_specific_kwargs(conn, monk
     strategy.buy_side_signals(
         conn, cluster_kwargs={"min_value": 1.0, "solo_threshold": 2.0},
         sec_kwargs={"insiders_only": True}, sweden_kwargs={"include_share_programs": True})
-    by_name = dict(calls)
+    by_name = {}
+    for name, kw in calls:
+        by_name.setdefault(name, kw)
     assert by_name["find_sec_clusters"]["min_value"] == 1.0
     assert by_name["find_sec_clusters"]["insiders_only"] is True
     assert by_name["find_house_clusters"]["min_value"] == 1.0
@@ -470,3 +473,219 @@ def test_buy_side_signals_forwards_ignore_alert_state_to_every_finder(conn, monk
     calls = _recording_finders(monkeypatch)
     strategy.buy_side_signals(conn, ignore_alert_state=True, onchain=True)
     assert all(kw["ignore_alert_state"] is True for _, kw in calls)
+
+
+# ---------------------------------------------------------------- high risk
+def _hr(sel):
+    return {t.signal.ticker for t in sel.high_risk}
+
+
+def _select_all(conn, t212=None):
+    """Both finder passes, as the bot runs them."""
+    return strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}),
+                           t212 or _T212())
+
+
+def _small(sized, cap=100e6, adv=500_000):
+    sized["cap"], sized["adv"] = cap, adv
+
+
+def test_two_directors_buying_0_12_percent_of_a_small_company_is_high_risk(conn, sized):
+    _small(sized)
+    for o in ("A", "B"):
+        _buy(conn, "AAA", o, usd=69_600)            # €60k each: €120k = 0.12% of €100M
+    sel = _select_all(conn)
+    assert _hr(sel) == {"AAA"} and _tiers(sel) == (set(), set())
+    [t] = sel.high_risk
+    assert t.tier == strategy.HIGH_RISK and t.signal.tier == strategy.HIGH_RISK
+    assert "2 инсайдера(ов) купили вместе 0,12% компании" in t.met
+
+
+def test_below_0_1_percent_is_not_high_risk(conn, sized):
+    _small(sized)
+    for o in ("A", "B"):
+        _buy(conn, "AAA", o, usd=52_200)            # €45k each: €90k = 0.09%
+    assert _hr(_select_all(conn)) == set()
+
+
+def test_a_ceo_buying_alone_is_found_by_the_lower_threshold_pass(conn, sized):
+    _small(sized, cap=80e6)
+    _buy(conn, "BBB", "Pat Chief", usd=139_200, officer=1, director=0,
+         title="Chief Executive Officer")           # €120k = 0.15% of €80M, below the €500k solo bar
+    sel = _select_all(conn)
+    [t] = sel.high_risk
+    assert t.signal.ticker == "BBB" and "CEO купил 0,15% компании" in t.met
+
+
+def test_a_cfo_buying_alone_qualifies(conn, sized):
+    _small(sized)
+    _buy(conn, "BBB", "Pat Money", usd=139_200, officer=1, director=0,
+         title="Chief Financial Officer")            # €120k = 0.12% of €100M
+    sel = _select_all(conn)
+    [t] = sel.high_risk
+    assert t.signal.ticker == "BBB" and "CFO купил 0,12% компании" in t.met
+
+
+def test_a_lone_director_is_not_high_risk(conn, sized):
+    _small(sized, cap=80e6)
+    _buy(conn, "BBB", "Dee Rector", usd=139_200)
+    assert _hr(_select_all(conn)) == set()
+
+
+@pytest.mark.parametrize("cap,adv,expected", [
+    (49e6, 2e6, None), (50e6, 2e6, "high_risk"), (299e6, 2e6, "high_risk"),
+    (300e6, 2e6, "strong"), (100e6, 99_000, None),
+])
+def test_the_small_company_band(conn, sized, cap, adv, expected):
+    _small(sized, cap=cap, adv=adv)
+    for o in ("A", "B", "C"):
+        _buy(conn, "AAA", o, usd=348_000)           # €300k each, three directors
+    sel = _select_all(conn)
+    got = "high_risk" if _hr(sel) else "strong" if sel.strong else None
+    assert got == expected
+
+
+def test_an_unknown_size_is_not_high_risk(conn, sized):
+    sized["cap"] = None
+    for o in ("A", "B", "C"):
+        _buy(conn, "AAA", o)
+    assert _hr(_select_all(conn)) == set()
+
+
+def test_politicians_are_not_high_risk(conn, sized):
+    _small(sized)
+    for member in ("Member One", "Member Two"):
+        add_house_txn(conn, "AAA", member, "$250,001 - $500,000",
+                      date=(TODAY - dt.timedelta(days=3)).strftime("%m/%d/%Y"))
+    assert _hr(_select(conn)) == set()
+
+
+def test_a_coin_is_never_high_risk(conn, sized, monkeypatch):
+    """High-risk is a small-cap stock rule -- neither a congressional crypto buy
+    (a ClusterSignal with a CRYPTO: ticker) nor a CryptoSignal (ETF inflow,
+    treasury buy, on-chain flow) may ever land in .high_risk."""
+    _small(sized)
+    date = (TODAY - dt.timedelta(days=1)).strftime("%m/%d/%Y")
+    for m in ("One", "Two"):
+        add_house_txn(conn, "CRYPTO:BTC", m, "$250,001 - $500,000", date=date)
+    assert _hr(_select(conn)) == set()
+
+    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
+    assert strategy.select(conn, [_etf()], _T212()).high_risk == []
+
+
+def test_an_oslo_cluster_buying_0_1_percent_qualifies_under_rule_one(conn, sized):
+    """Oslo filings carry no insider rank -- find_norway_clusters tags every buyer
+    role "insider" (cluster.roles.Buyer), so rule (2) (a CEO/CFO/Chair among the
+    buyers) can never fire for a Norway cluster; only rule (1) (2+ insiders buying
+    a combined HIGH_RISK_MIN_PCT_OF_MCAP) can qualify it."""
+    _small(sized)
+    for i, person in enumerate(("A Person", "B Person")):
+        conn.execute(
+            "INSERT INTO norway_purchases (message_id, person, issuer_name, ticker, txn_type, "
+            "txn_date, shares, price, currency, value, source_url) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (900 + i, person, "Test ASA", "AAA", "P", RECENT, 1000, 100.0, "NOK", 644_400, "u"))
+    conn.commit()
+    [sig] = cluster.find_norway_clusters(conn)
+    assert [b.role for b in sig.buyers] == ["insider", "insider"]
+    sel = strategy.select(conn, [sig], _T212())
+    assert _hr(sel) == {"AAA"}
+    [t] = sel.high_risk
+    assert "2 инсайдера(ов) купили вместе 0,12% компании" in t.met
+
+
+def test_trading212_drops_a_qualifying_high_risk_signal(conn, sized):
+    _small(sized)
+    for o in ("A", "B"):
+        _buy(conn, "AAA", o, usd=69_600)            # €60k each: €120k = 0.12% of €100M
+    assert _hr(_select_all(conn, _T212(missing={"AAA"}))) == set()
+
+
+def test_high_risk_recency_is_measured_from_the_filing_not_the_trade(conn, sized):
+    """Traded about 8 days ago -- inside find_sec_clusters' 14-day window, so the
+    cluster is found at all -- but filed 5 days ago, outside the 3-day recency
+    select() applies. (The version of this test that traded 20 days ago put the
+    trade outside the cluster finder's own window, so no signal was ever produced
+    for it and the recency filter was never actually exercised.)"""
+    _small(sized)
+    traded = (TODAY - dt.timedelta(days=8)).isoformat()
+    filed = (TODAY - dt.timedelta(days=5)).isoformat()
+    for o in ("A", "B"):
+        add_sec_purchase(conn, "AAA", o, 69_600, traded, filed_date=filed)
+    assert _hr(_select_all(conn)) == set()
+
+
+def test_the_lower_threshold_pass_uses_its_own_bars(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, sources={"sec": True, "norway": True}, ignore_alert_state=True)
+    sec = [kw for name, kw in calls if name == "find_sec_clusters"]
+    nor = [kw for name, kw in calls if name == "find_norway_clusters"]
+    assert len(sec) == 2 and len(nor) == 2
+    for kw in (sec[1], nor[1]):
+        assert kw["min_value"] == kw["solo_threshold"] == strategy.HIGH_RISK_FINDER_MIN_EUR
+        assert kw["ignore_alert_state"] is True
+
+
+def test_the_lower_threshold_pass_can_be_turned_off(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, sources={"sec": True}, high_risk=False)
+    assert [name for name, _ in calls].count("find_sec_clusters") == 1
+
+
+def test_a_cluster_both_passes_find_is_kept_once_and_untagged(conn, monkeypatch):
+    def sec(conn, **kw):
+        if kw.get("solo_threshold") == strategy.HIGH_RISK_FINDER_MIN_EUR:
+            return [types.SimpleNamespace(source="SEC", ticker="AAA"),
+                    types.SimpleNamespace(source="SEC", ticker="BBB")]
+        return [types.SimpleNamespace(source="SEC", ticker="AAA")]
+    monkeypatch.setattr(cluster, "find_sec_clusters", sec)
+    monkeypatch.setattr(cluster, "find_stake_signals", lambda conn, **kw: [])
+    sigs = strategy.buy_side_signals(conn, sources={"sec": True})
+    assert [s.ticker for s in sigs] == ["AAA", "BBB"]
+    assert not getattr(sigs[0], "high_risk_only", False) and sigs[1].high_risk_only is True
+
+
+def test_a_lower_pass_signal_never_gets_a_main_tier(conn, sized):
+    sized["cap"], sized["adv"] = BIG, LIQUID
+    _buy(conn, "BIG", "Pat Chief", usd=139_200, officer=1, director=0,
+         title="Chief Executive Officer")           # €120k solo: only the lower pass finds it
+    sel = _select_all(conn)
+    assert _tiers(sel) == (set(), set()) and _hr(sel) == set()
+
+
+def test_a_high_risk_only_signal_does_not_corroborate_a_main_signal(conn, monkeypatch):
+    """enrich_signals runs find_corroboration across whatever batch it's handed --
+    if select() enriched the lower-threshold pass's sub-threshold clusters in the
+    same batch as the main signals, an unrelated main-pass HOUSE cluster on the
+    same ticker would wrongly get corroborated_by=["SEC"] from a cluster that
+    exists only to feed the high-risk rule. Uses the real cluster.enrich_signals
+    (not the `sized` stub) so find_corroboration actually runs; only the
+    network-reaching marketcap lookups are stubbed."""
+    import marketcap
+    monkeypatch.setattr(marketcap, "market_cap_eur", lambda conn, ticker, source=None: 5e9)
+    monkeypatch.setattr(marketcap, "facts", lambda conn, ticker, source=None:
+                        {"avg_daily_value": 5e7, "currency": "USD"})
+
+    date = (TODAY - dt.timedelta(days=1)).strftime("%m/%d/%Y")
+    for member in ("Member One", "Member Two"):
+        add_house_txn(conn, "XYZ", member, "$250,001 - $500,000", date=date)
+    [house_sig] = cluster.find_house_clusters(conn)
+
+    _buy(conn, "XYZ", "Solo Insider", usd=69_600)    # €60k: only clears the lower bar
+    [sec_sig] = cluster.find_sec_clusters(conn, min_value=50_000, solo_threshold=50_000)
+    sec_sig.high_risk_only = True
+
+    strategy.select(conn, [house_sig, sec_sig], _T212())
+    assert "SEC" not in house_sig.corroborated_by
+
+
+def test_high_risk_signals_are_journaled_once_and_not_again(conn, sized):
+    import bot
+    _small(sized, cap=80e6)
+    _buy(conn, "BBB", "Pat Chief", usd=139_200, officer=1, director=0,
+         title="Chief Executive Officer")
+    sel = strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}), None)
+    bot._record_high_risk(conn, sel)
+    assert conn.execute("SELECT ticker, tier FROM signal_journal").fetchall() == [("BBB", "high_risk")]
+    again = strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}), None)
+    assert again.high_risk == []

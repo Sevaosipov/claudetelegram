@@ -205,6 +205,8 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
         print(f"[{t.tier}] " + telegram_notify.format_any_signal(t.signal))
     for t in selection.cautions:
         print("[caution] " + telegram_notify.format_any_signal(t.signal))
+    for t in selection.high_risk:
+        print("[high_risk] " + telegram_notify.format_any_signal(t.signal))
     return selection
 
 
@@ -278,8 +280,23 @@ def _record_cautions(conn, selection) -> None:
     _commit_signals(conn, [t.signal for t in selection.cautions])
 
 
+def _record_high_risk(conn, selection) -> None:
+    """Small-company signals are never pushed while their paper books are on trial --
+    the menu's Сигналы shows them -- but they are journaled and marked alerted on the
+    run that finds them, so history can measure them and they don't repeat."""
+    _commit_signals(conn, [t.signal for t in selection.high_risk])
+
+
 _PAPER_SKIP_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only",
                      "crypto_only", "min_score", "min_liquidity")
+
+
+def _filtered_run(args) -> bool:
+    """True when a flag limits this run to some sources or scores, so it sees only
+    part of the day's signals -- shared by _run_paper (it then neither trades the
+    books nor starts their clock) and main()'s guard around _record_high_risk (it
+    then must not journal a high-risk signal before a later, full run can find it)."""
+    return any(getattr(args, name, False) for name in _PAPER_SKIP_FLAGS)
 
 
 def _run_paper(conn, selection, args) -> None:
@@ -289,7 +306,7 @@ def _run_paper(conn, selection, args) -> None:
     monthly report goes out (paper_report.py). A run filtered to some sources or
     scores sees only part of the day's signals, so it neither trades the books nor
     starts their clock."""
-    if any(getattr(args, name, False) for name in _PAPER_SKIP_FLAGS):
+    if _filtered_run(args):
         print("[paper] skipped: filtered run")
         return
     if _run_source("PAPER", paper.run, conn, selection) is None:
@@ -633,6 +650,12 @@ def main():
 
         selection = run_cluster_pass(conn, args)
         _record_cautions(conn, selection)
+        # A filtered run (--sec-only, --min-score, ...) sees only part of the day's
+        # signals -- journalling here would mark a high-risk signal alerted before a
+        # later, full run ever sees it, and the paper books (which also skip a
+        # filtered run, see _run_paper) would never get to buy it.
+        if not _filtered_run(args):
+            _record_high_risk(conn, selection)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))
@@ -647,7 +670,8 @@ def main():
         db.save_cached_value(conn, "last_successful_run", time.time())
 
         print(f"--- poll finished, {total_new} new purchase(s), {signal_count} signal(s), "
-              f"{len(closes)} close alert(s), took {time.time()-started:.1f}s ---")
+              f"{len(selection.high_risk)} high-risk, {len(closes)} close alert(s), "
+              f"took {time.time()-started:.1f}s ---")
 
         if args.once:
             break

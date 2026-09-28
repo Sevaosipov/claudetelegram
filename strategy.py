@@ -34,7 +34,21 @@ CANDIDATE_MIN_SCORE = 50.0
 # constant: the two can't drift apart.
 CRYPTO_TREASURY_BIG_EUR = cluster.crypto.TREASURY_WEEK_FLOOR_EUR
 
-STRONG, CANDIDATE, CAUTION = "strong", "candidate", "caution"
+# Small companies (€50-300M): the band FLOOR_MIN_MCAP_EUR used to drop. Their rule is
+# scaled to the company -- purchases of at least HIGH_RISK_MIN_PCT_OF_MCAP percent of
+# its value (spec: docs/superpowers/specs/2026-09-28-high-risk-small-companies-design.md).
+HIGH_RISK_MIN_MCAP_EUR = 50e6
+HIGH_RISK_MIN_ADV_EUR = 100_000
+HIGH_RISK_MIN_PCT_OF_MCAP = 0.1         # percent of market value
+HIGH_RISK_MIN_INSIDERS = 2
+HIGH_RISK_SOURCES = ("SEC", "NORWAY")
+# The finders' own bars (€100k cluster total, €500k solo) were set for large
+# companies; a small company's 0.1% can be as little as HIGH_RISK_MIN_MCAP_EUR's
+# own 0.1% -- €50k. A second, lower-threshold pass feeds only the high-risk rule
+# -- its extra signals never get a main tier.
+HIGH_RISK_FINDER_MIN_EUR = HIGH_RISK_MIN_MCAP_EUR * HIGH_RISK_MIN_PCT_OF_MCAP / 100
+
+STRONG, CANDIDATE, CAUTION, HIGH_RISK = "strong", "candidate", "caution", "high_risk"
 _ROLE_LABEL = {"ceo": "CEO", "cfo": "CFO", "chair": "Chair"}
 
 
@@ -58,6 +72,9 @@ class Selection:
     # exchanges): shown in the menu's Сигналы, journaled, never pushed -- see
     # bot._record_cautions and positions.check_exits.
     cautions: list = field(default_factory=list)
+    # Small-company insider buying that clears the size-scaled rule: shown in the
+    # menu's Сигналы and traded by the paper books H1/H2, never pushed.
+    high_risk: list = field(default_factory=list)
 
 
 def _short(v: float) -> str:
@@ -170,6 +187,35 @@ def _caution_tier(conn, sig) -> Tiered:
     return Tiered(sig, CAUTION, [], [f"цена не подтверждает: {desc}"])
 
 
+def _in_high_risk_band(sig) -> bool:
+    cap, adv = getattr(sig, "market_cap_eur", None), getattr(sig, "avg_daily_value", None)
+    return (sig.source in HIGH_RISK_SOURCES and not crypto.is_crypto(sig.ticker)
+            and cap is not None and adv is not None
+            and HIGH_RISK_MIN_MCAP_EUR <= cap < FLOOR_MIN_MCAP_EUR
+            and adv >= HIGH_RISK_MIN_ADV_EUR)
+
+
+def _pct_text(pct: float) -> str:
+    return f"{pct:.2f}".replace(".", ",")
+
+
+def _high_risk_tier(sig) -> Tiered | None:
+    """A small company: two or more management insiders buying together at least
+    HIGH_RISK_MIN_PCT_OF_MCAP of its value, or a CEO/CFO buying that much alone."""
+    cap = sig.market_cap_eur
+    insiders = [b for b in (getattr(sig, "buyers", None) or []) if b.role in INSIDER_ROLES]
+    size = f"€{_short(cap)} / €{_short(sig.avg_daily_value)} в день"
+    together = sum(b.total_eur for b in insiders) / cap * 100
+    if len(insiders) >= HIGH_RISK_MIN_INSIDERS and together >= HIGH_RISK_MIN_PCT_OF_MCAP:
+        return Tiered(sig, HIGH_RISK,
+                      [size, f"{len(insiders)} инсайдера(ов) купили вместе {_pct_text(together)}% компании"])
+    for b in sorted(insiders, key=lambda b: b.total_eur, reverse=True):
+        pct = b.total_eur / cap * 100
+        if b.role in ("ceo", "cfo") and pct >= HIGH_RISK_MIN_PCT_OF_MCAP:
+            return Tiered(sig, HIGH_RISK, [size, f"{_ROLE_LABEL[b.role]} купил {_pct_text(pct)}% компании"])
+    return None
+
+
 _BUY_SIDE_SOURCES = ("sec", "house", "senate", "bafin", "norway", "sweden", "crypto")
 
 # run_daily.sh's own tuning: the mandatory-filing 5%/13G default is mostly routine
@@ -179,7 +225,7 @@ _STAKE_DEFAULTS = {"min_percent": 10.0, "activist_only": True,
 
 
 def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | None = None,
-                      onchain: bool = False, sec_kwargs: dict | None = None,
+                      onchain: bool = False, high_risk: bool = True, sec_kwargs: dict | None = None,
                       sweden_kwargs: dict | None = None, stake_kwargs: dict | None = None,
                       cluster_kwargs: dict | None = None) -> list:
     """One definition of the buy-side finder list, shared by bot.run_cluster_pass,
@@ -205,6 +251,10 @@ def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | 
     `cluster_kwargs` (min_value, solo_threshold), which every cluster finder
     shares. `stake_kwargs` defaults to run_daily.sh's tuning -- see
     _STAKE_DEFAULTS -- rather than find_stake_signals' bare defaults.
+
+    `high_risk` adds a second, lower-threshold pass of the SEC and Oslo finders
+    (HIGH_RISK_FINDER_MIN_EUR for both the cluster total and a lone buyer) for the
+    small-company rule; its extra signals are tagged `high_risk_only`.
     """
     on = sources if sources is not None else {k: True for k in _BUY_SIDE_SOURCES}
     cluster_kwargs = cluster_kwargs or {}
@@ -243,6 +293,20 @@ def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | 
         signals += cluster.find_etf_flow_signals(conn, ignore_alert_state=ignore_alert_state)
     if onchain:
         signals += cluster.find_onchain_signals(conn, ignore_alert_state=ignore_alert_state)
+    if high_risk:
+        seen = {(s.source, s.ticker) for s in signals}
+        low = {**cluster_kwargs, "min_value": HIGH_RISK_FINDER_MIN_EUR,
+               "solo_threshold": HIGH_RISK_FINDER_MIN_EUR}
+        extra = []
+        if on.get("sec", False):
+            extra += cluster.find_sec_clusters(conn, ignore_alert_state=ignore_alert_state,
+                                               **low, **sec_kwargs)
+        if on.get("norway", False):
+            extra += cluster.find_norway_clusters(conn, ignore_alert_state=ignore_alert_state, **low)
+        for s in extra:
+            if (s.source, s.ticker) not in seen:
+                s.high_risk_only = True
+                signals.append(s)
     return signals
 
 
@@ -296,10 +360,26 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
            if is_buy_side(s)
            and (cluster.disclosed_on(conn, s) or "") >= since
            and (t212 is None or t212.can_buy(s.ticker, s.source))]
-    pre = cluster.enrich_signals(conn, pre) if pre else []
+    # Enriched in two separate batches: enrich_signals runs find_corroboration
+    # across whatever it's handed, and a sub-threshold cluster the lower-threshold
+    # pass built only to feed the high-risk rule (see buy_side_signals) must not
+    # credit an unrelated main-pass signal on the same ticker with a
+    # corroborating source it never earned.
+    main_pre = [s for s in pre if not getattr(s, "high_risk_only", False)]
+    hr_only_pre = [s for s in pre if getattr(s, "high_risk_only", False)]
+    main_pre = cluster.enrich_signals(conn, main_pre) if main_pre else []
+    hr_only_pre = cluster.enrich_signals(conn, hr_only_pre) if hr_only_pre else []
+    pre = main_pre + hr_only_pre
     tiered = []
     for s in pre:
-        t = _crypto_tier(conn, s) if hasattr(s, "crypto_kind") else _stock_tier(s)
+        if hasattr(s, "crypto_kind"):
+            t = _crypto_tier(conn, s)
+        elif _in_high_risk_band(s):
+            t = _high_risk_tier(s)
+        elif getattr(s, "high_risk_only", False):
+            t = None        # found only by the lower-threshold pass: never a main tier
+        else:
+            t = _stock_tier(s)
         if t is not None:
             if s.source == "NORWAY" and s.ticker.upper() in getattr(t212, "unchecked", ()):
                 t.missed.append("Trading 212 не проверен: не удалось узнать ISIN")
@@ -317,4 +397,5 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
         t212_checked=t212 is not None,
         exits=exits,
         cautions=cautions,
+        high_risk=[t for t in tiered if t.tier == HIGH_RISK],
     )

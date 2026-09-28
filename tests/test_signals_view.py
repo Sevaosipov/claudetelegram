@@ -234,3 +234,19 @@ def test_view_shows_exit_signals_even_when_already_alerted(conn, keyed, scored, 
     menu.show_signals(conn)
     out = _shown(capsys)
     assert "Выходы" in out and "AAPL" in out
+
+
+def test_view_shows_small_company_signals(conn, keyed, no_prices, capsys, monkeypatch):
+    monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
+
+    def small(conn, signals):
+        for s in signals:
+            s.score, s.market_cap_eur, s.avg_daily_value = 100.0, 80e6, 500_000
+        return signals
+    monkeypatch.setattr("cluster.enrich_signals", small)
+    recent = (TODAY - dt.timedelta(days=1)).isoformat()
+    add_sec_purchase(conn, "AAPL", "Pat Chief", 139_200, recent, filed_date=recent, officer=1,
+                     director=0, title="Chief Executive Officer")
+    menu.show_signals(conn)
+    out = _shown(capsys)
+    assert "🎲 Высокий риск (1)" in out and "CEO купил 0,15% компании" in out

@@ -70,8 +70,11 @@ def _unshadow(conn) -> None:
 
 def _signals(conn) -> list:
     """strategy.buy_side_signals -- the same finder list bot.run_cluster_pass and
-    menu._find_signals use -- with on-chain included, like menu's."""
-    return strategy.buy_side_signals(conn, ignore_alert_state=True, onchain=True)
+    menu._find_signals use -- with on-chain included, like menu's. The replay only
+    reads .strong/.candidates, never .high_risk, so the lower-threshold high-risk
+    pass is switched off -- it would otherwise re-fetch market caps on every
+    replayed day for output this replay ignores."""
+    return strategy.buy_side_signals(conn, ignore_alert_state=True, onchain=True, high_risk=False)
 
 
 def replay(conn, start: dt.date, end: dt.date, t212) -> dict[str, dict]:
