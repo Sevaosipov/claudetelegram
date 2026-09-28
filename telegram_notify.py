@@ -597,10 +597,12 @@ def format_close_alert(alert, *, html: bool = True) -> str:
 
 
 def format_tiered_digest(selection, closes: list, *, html: bool = True,
-                         include_cautions: bool = False) -> str:
+                         include_cautions: bool = False, include_high_risk: bool = False) -> str:
     """One message: 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть, 🚨 Выходы -- the daily
     Telegram digest and the menu's "Сигналы" view (html=False) both render this.
-    Only the menu passes include_cautions: caution signals are never pushed."""
+    Only the menu passes include_cautions: caution signals are never pushed.
+    Only the menu passes include_high_risk: small-company signals are not pushed
+    while their books are on trial."""
     parts = []
     if not selection.t212_checked:
         parts.append("⚠️ Trading 212 не проверялся (нет ключа в .env) — показаны все акции.")
@@ -612,6 +614,11 @@ def format_tiered_digest(selection, closes: list, *, html: bool = True,
         parts.append(_b(f"👀 Кандидаты ({len(selection.candidates)})", html))
         parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
                   for t in selection.candidates]
+    high_risk = getattr(selection, "high_risk", []) if include_high_risk else []
+    if high_risk:
+        parts.append(_b(f"🎲 Высокий риск ({len(high_risk)})", html))
+        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
+                  for t in high_risk]
     if closes:
         parts.append(_b(f"🚪 Закрыть ({len(closes)})", html))
         parts += [format_close_alert(a, html=html) for a in closes]
@@ -623,7 +630,8 @@ def format_tiered_digest(selection, closes: list, *, html: bool = True,
         parts.append(_b(f"⚠️ Осторожно ({len(cautions)})", html))
         parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
                   for t in cautions]
-    if not (selection.strong or selection.candidates or closes or selection.exits or cautions):
+    if not (selection.strong or selection.candidates or high_risk or closes
+            or selection.exits or cautions):
         parts.append("За последние 3 дня сигналов нет.")
     return "\n\n".join(parts)
 

@@ -278,6 +278,13 @@ def _record_cautions(conn, selection) -> None:
     _commit_signals(conn, [t.signal for t in selection.cautions])
 
 
+def _record_high_risk(conn, selection) -> None:
+    """Small-company signals are never pushed while their paper books are on trial --
+    the menu's Сигналы shows them -- but they are journaled and marked alerted on the
+    run that finds them, so history can measure them and they don't repeat."""
+    _commit_signals(conn, [t.signal for t in selection.high_risk])
+
+
 _PAPER_SKIP_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only",
                      "crypto_only", "min_score", "min_liquidity")
 
@@ -633,6 +640,7 @@ def main():
 
         selection = run_cluster_pass(conn, args)
         _record_cautions(conn, selection)
+        _record_high_risk(conn, selection)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))

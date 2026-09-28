@@ -622,3 +622,15 @@ def test_a_high_risk_only_signal_does_not_corroborate_a_main_signal(conn, monkey
 
     strategy.select(conn, [house_sig, sec_sig], _T212())
     assert "SEC" not in house_sig.corroborated_by
+
+
+def test_high_risk_signals_are_journaled_once_and_not_again(conn, sized):
+    import bot
+    _small(sized, cap=80e6)
+    _buy(conn, "BBB", "Pat Chief", usd=139_200, officer=1, director=0,
+         title="Chief Executive Officer")
+    sel = strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}), None)
+    bot._record_high_risk(conn, sel)
+    assert conn.execute("SELECT ticker, tier FROM signal_journal").fetchall() == [("BBB", "high_risk")]
+    again = strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}), None)
+    assert again.high_risk == []

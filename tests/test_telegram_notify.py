@@ -353,3 +353,10 @@ def test_caution_close_alert_reads_as_such():
                                  "подтверждает: -6.2% за 7 дн., ниже 20-дн. средней", 79_900.0)
     text = telegram_notify.format_close_alert(alert, html=False)
     assert "CRYPTO:BTC — сигнал осторожности" in text and "отток из спот-ETF" in text
+
+
+def test_high_risk_signals_never_enter_the_telegram_digest():
+    sel = strategy.Selection(strong=[], candidates=[], t212_checked=True,
+                             high_risk=[strategy.Tiered(object(), strategy.HIGH_RISK, ["x"])])
+    text = telegram_notify.format_tiered_digest(sel, [])
+    assert "Высокий риск" not in text and "сигналов нет" in text
