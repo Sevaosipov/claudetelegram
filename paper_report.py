@@ -17,14 +17,22 @@ def _pct(x: float | None) -> str:
     return "—" if x is None else f"{x * 100:+.1f}%"
 
 
+def _eur(x: float) -> str:
+    return f"{'-' if x < 0 else '+'}€{abs(x):,.0f}"
+
+
 def _book_row(conn, code: str):
     return conn.execute("SELECT start_date, start_eur FROM paper_books WHERE code = ?",
                         (code,)).fetchone()
 
 
-def _value_on_or_before(conn, code: str, day: dt.date) -> float | None:
-    row = conn.execute("SELECT value FROM paper_equity WHERE book = ? AND date <= ? "
-                       "ORDER BY date DESC LIMIT 1", (code, day.isoformat())).fetchone()
+def _value_on_or_before(conn, code: str, day: dt.date, column: str = "value") -> float | None:
+    """The book's `column` (value, or bench: its benchmark) on the last day stored
+    on or before `day`."""
+    assert column in ("value", "bench")
+    row = conn.execute(f"SELECT {column} FROM paper_equity WHERE book = ? AND date <= ? "
+                       f"AND {column} IS NOT NULL ORDER BY date DESC LIMIT 1",
+                       (code, day.isoformat())).fetchone()
     return row[0] if row else None
 
 
@@ -57,13 +65,14 @@ def stats(conn, book: paper.Book, today: dt.date) -> dict:
             "status": status}
 
 
-def _month_return(conn, code: str, today: dt.date) -> float | None:
+def _month_return(conn, code: str, today: dt.date, column: str = "value") -> float | None:
     """The previous calendar month: value at its end / value at the end of the month
-    before it (or the start money)."""
+    before it (or the start money). column="bench" gives the benchmark's month -- it
+    is indexed from the same start money."""
     end = today.replace(day=1) - dt.timedelta(days=1)
     before = end.replace(day=1) - dt.timedelta(days=1)
-    v_end = _value_on_or_before(conn, code, end)
-    v_begin = _value_on_or_before(conn, code, before) or _book_row(conn, code)[1]
+    v_end = _value_on_or_before(conn, code, end, column)
+    v_begin = _value_on_or_before(conn, code, before, column) or _book_row(conn, code)[1]
     return v_end / v_begin - 1 if v_end else None
 
 
@@ -72,41 +81,50 @@ def format_summary(conn, today: dt.date, *, monthly: bool = False, html: bool = 
         return "Бумажный портфель ещё не запущен — он стартует с первого ежедневного прогона."
     first = stats(conn, paper.BOOKS[0], today)
     start = dt.date.fromisoformat(first["start"]).strftime("%d.%m.%Y")
-    lines = [telegram_notify._b(f"Бумажный портфель — день {first['day']} из {paper.SUCCESS_DAYS} "
-                                f"(с {start})", html)]
+    day = (f"день {first['day']} из {paper.SUCCESS_DAYS}" if first["day"] <= paper.SUCCESS_DAYS
+           else f"день {first['day']} (итог — после {paper.SUCCESS_DAYS} дней)")
+    lines = [telegram_notify._b(f"Бумажный портфель — {day} (с {start})", html)]
     for sleeve, title in (("stock", "АКЦИИ"), ("crypto", "КРИПТО")):
         books = [b for b in paper.BOOKS if b.sleeve == sleeve]
         head = stats(conn, books[0], today)
+        month = (f", за месяц {_pct(_month_return(conn, books[0].code, today, 'bench'))}"
+                 if monthly else "")
         lines.append("")
         lines.append(telegram_notify._b(
             f"{title} ({_BENCH_NAME[sleeve]}: {_pct(head['bench_ret'])}, "
-            f"худшая просадка {_pct(head['bench_dd'])})", html))
+            f"худшая просадка {_pct(head['bench_dd'])}{month})", html))
+        rows = []
         for b in books:
             s = stats(conn, b, today)
             diff = ("—" if s["bench_ret"] is None
                     else f"{(s['ret'] - s['bench_ret']) * 100:+.1f} п.п.")
-            line = (f"{b.label:<16} {_pct(s['ret'])}  ({diff})  просадка {_pct(s['dd'])}  "
-                    f"сделок {s['trades']}  позиций {s['open']}  {s['status']}")
-            if monthly:
-                line += f"  за месяц {_pct(_month_return(conn, b.code, today))}"
-            lines.append(telegram_notify._esc(line) if html else line)
+            line = (f"{b.label:<16} {_pct(s['ret']):>6}  {'(' + diff + ')':<12}  "
+                    f"просадка {_pct(s['dd']):>6}  сделок {s['trades']:>2}  позиций {s['open']:>2}  ")
+            if monthly:         # before the status, whose width varies
+                line += f"за месяц {_pct(_month_return(conn, b.code, today)):>6}  "
+            rows.append(line + s["status"])
+        if html:        # Telegram draws <pre> in a fixed-width font, so the padded columns line up
+            rows = ["<pre>" + "\n".join(telegram_notify._esc(r) for r in rows) + "</pre>"]
+        lines += rows
     return "\n".join(lines)
 
 
 def format_book(conn, code: str) -> str:
     book = paper.BOOK_BY_CODE[code]
-    lines = [f"{book.label} — открытые позиции:"]
+    lines = [f"{book.label}{' (тень)' if book.analyst else ''} — открытые позиции:"]
     for p in paper.open_positions(conn, code):
         value = p["last_value"] if p["last_value"] is not None else p["net_eur"]
-        lines.append(f"  {p['ticker']:<14} с {p['fill_date']}  €{p['cost_eur']:,.0f} → €{value:,.0f} "
-                     f"({_pct(value / p['cost_eur'] - 1)})  {p['reason']}")
+        lines.append(f"  {p['ticker']:<14} с {p['fill_date']}  вход {p['entry_close']:,.2f}  "
+                     f"€{p['cost_eur']:,.0f} → €{value:,.0f} ({_pct(value / p['cost_eur'] - 1)})  "
+                     f"{p['reason']}")
     if len(lines) == 1:
         lines.append("  нет")
     lines.append("Сделки:")
     closed = paper.closed_positions(conn, code)
     for p in closed:
         lines.append(f"  {p['ticker']:<14} {p['fill_date']} → {p['closed_date']}  "
-                     f"{_pct(p['proceeds_eur'] / p['cost_eur'] - 1)}  куплено: {p['reason']}  "
+                     f"{_pct(p['proceeds_eur'] / p['cost_eur'] - 1)} "
+                     f"({_eur(p['proceeds_eur'] - p['cost_eur'])})  куплено: {p['reason']}  "
                      f"продано: {p['close_reason']}")
     if not closed:
         lines.append("  нет")

@@ -3,6 +3,7 @@ the menu/CLI text and the monthly Telegram report."""
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytest
 
@@ -98,6 +99,39 @@ def test_book_detail_lists_positions_trades_and_skips(conn):
                     max_positions=10)
     text = paper_report.format_book(conn, "R1-E2")
     assert "R1·E2" in text and "T0" in text and "90 дн. в позиции" in text and "нет котировки" in text
+
+
+def test_book_detail_marks_the_shadow_and_shows_entries_and_results(conn):
+    _start(conn, 30)
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx, reason, last_value) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("R1-E1-AN", "AAA", "SEC", "AAA", "USD", "2026-09-20", 8000, 7980, 123.45, 1.16, "Сильный", 8400))
+    _closed_trades(conn, "R1-E1-AN", 1)                             # 8000 -> 8100
+    text = paper_report.format_book(conn, "R1-E1-AN")
+    assert text.startswith("R1·E1+аналитики (тень) — открытые позиции:")
+    assert "вход 123.45" in text
+    assert "+1.2% (+€100)" in text
+    assert "(тень)" not in paper_report.format_book(conn, "R1-E1")
+
+
+def test_summary_after_day_182_says_the_verdict_is_in(conn):
+    _start(conn, 190)
+    text = paper_report.format_summary(conn, TODAY)
+    assert "день 190 (итог — после 182 дней)" in text and "из 182" not in text
+
+
+def test_monthly_html_summary_aligns_books_and_shows_the_benchmarks_month(conn):
+    paper.create_books(conn, dt.date(2026, 8, 15))
+    for day, value, bench in (("2026-08-31", 80_000, 80_000), ("2026-09-30", 82_000, 84_000)):
+        conn.execute("INSERT INTO paper_equity (book, date, value, cash, bench) VALUES (?,?,?,?,?)",
+                     ("R1-E1", day, value, 0.0, bench))
+    conn.commit()
+    text = paper_report.format_summary(conn, TODAY, monthly=True, html=True)
+    assert "<b>АКЦИИ (S&amp;P 500: +5.0%, худшая просадка +0.0%, за месяц +5.0%)</b>" in text
+    assert "за месяц —)</b>" in text                                   # КРИПТО: no benchmark yet
+    assert text.count("<pre>") == 2 and text.count("</pre>") == 2
+    assert "<pre>R1·E1 " in text and re.search(r"R1·E1 .* за месяц +\+2\.5%", text)
 
 
 def test_monthly_report_goes_once_a_month_and_not_in_the_start_month(conn):
