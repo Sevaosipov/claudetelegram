@@ -46,6 +46,7 @@ import cik_map
 import cluster
 import db
 import insider_score
+import paper
 import positions
 import sec_edgar
 import strategy
@@ -275,6 +276,30 @@ def _record_cautions(conn, selection) -> None:
     are journaled and marked alerted on the run that finds them: a coin position's
     close alert reads them from the journal (positions.check_exits)."""
     _commit_signals(conn, [t.signal for t in selection.cautions])
+
+
+_PAPER_SKIP_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only",
+                     "crypto_only", "min_score", "min_liquidity")
+
+
+def _run_paper(conn, selection, args) -> None:
+    """The paper portfolio's daily pass (paper.py) -- after the digest, whether or not
+    Telegram is on. It trades virtual books only. A crash is reported like a failed
+    source rather than taking the run down; on the first good pass of a month the
+    monthly report goes out (paper_report.py). A run filtered to some sources or
+    scores sees only part of the day's signals, so it neither trades the books nor
+    starts their clock."""
+    if any(getattr(args, name, False) for name in _PAPER_SKIP_FLAGS):
+        print("[paper] skipped: filtered run")
+        return
+    if _run_source("PAPER", paper.run, conn, selection) is None:
+        if not args.no_telegram:
+            telegram_notify.send_text("⚠️ disclosure-bot: бумажный портфель упал в этом прогоне. "
+                                      "Логи: data/launchd.err.log")
+        return
+    if not args.no_telegram:
+        import paper_report
+        _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, dt.date.today())
 
 
 def _send_digest(conn, selection, closes) -> bool:
@@ -613,6 +638,7 @@ def main():
             print(telegram_notify.format_close_alert(a, html=False))
         if not args.no_telegram:
             _send_digest(conn, selection, closes)
+        _run_paper(conn, selection, args)
         signal_count = len(selection.strong) + len(selection.candidates)
 
         # The pass got all the way through: record it. run_healthcheck reads this,

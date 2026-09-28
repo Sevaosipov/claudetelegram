@@ -6,9 +6,11 @@ Usage:
 """
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import db
+import paper_report
 import positions
 import research
 import strategy
@@ -59,6 +61,14 @@ def show_research(conn) -> None:
         print(f"Ошибка: {type(e).__name__}: {e}")
 
 
+def show_paper(conn) -> None:
+    """The paper portfolio: every virtual book against its benchmark. Details of one
+    book: python paper.py R1-E2."""
+    print()
+    print(paper_report.format_summary(conn, dt.date.today()))
+    print("\nПодробно по книге: python paper.py R1-E2 (или любой другой код)")
+
+
 def main() -> None:
     conn = db.connect(DB_PATH)
     while True:
@@ -66,6 +76,7 @@ def main() -> None:
         print(termstyle.header("disclosure-bot"))
         print("1) Сигналы")
         print("2) Досье по тикеру или монете")
+        print("3) Бумажный портфель")
         print("0) Выход")
         choice = input("Выбор: ").strip()
 
@@ -73,10 +84,12 @@ def main() -> None:
             show_signals(conn)
         elif choice == "2":
             show_research(conn)
+        elif choice == "3":
+            show_paper(conn)
         elif choice == "0":
             break
         else:
-            print("Не понял выбор, введите 0, 1 или 2.")
+            print("Не понял выбор, введите 0, 1, 2 или 3.")
 
 
 if __name__ == "__main__":
