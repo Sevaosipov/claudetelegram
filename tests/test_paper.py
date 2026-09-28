@@ -299,3 +299,117 @@ def test_stock_step_places_a_sale_when_an_exit_holds(conn):
     paper.stock_step(conn, paper.BOOK_BY_CODE["R1-E3"], _sel(), paper.Prices(Fetch({})), TODAY)
     [o] = paper.orders(conn, "R1-E3")
     assert (o["side"], o["reason"]) == ("sell", "91 дн. в позиции")
+
+
+# -------------------------------------------------------------- crypto books
+FALLING = {"ret_7d": -6.0, "above_ma20": False}
+RISING = {"ret_7d": 3.0, "above_ma20": True}
+
+
+def _coin_sig(coin="BTC"):
+    return types.SimpleNamespace(ticker=f"CRYPTO:{coin}", source="CRYPTO_ETF", crypto_kind="etf_flow",
+                                 coin=coin, tier="strong", company="спот-ETF США", score=100.0)
+
+
+def _coin_position(conn, code, coin="BTC", fill_days_ago=5, net=10_000.0, value=None):
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx, insiders, reason, last_value) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (code, f"CRYPTO:{coin}", "CRYPTO", f"{coin}-USD", "USD", _days(fill_days_ago), net, net,
+         100.0, 1.16, "[]", "Сильный", value if value is not None else net))
+    conn.commit()
+    return paper.open_positions(conn, code)[-1]
+
+
+def _journal(conn, coin, tier, days_ago):
+    db.journal_signal(conn, {"source": "CRYPTO_ETF", "kind": "etf_flow", "ticker": f"CRYPTO:{coin}",
+                             "tier": tier, "total_value_eur": 9e8})
+    conn.execute("UPDATE signal_journal SET emitted_at = ? WHERE id = (SELECT max(id) FROM signal_journal)",
+                 (_days(days_ago) + " 12:00:00",))
+    conn.commit()
+
+
+def _trend_bars(last, end=TODAY):
+    return _bars([100.0] * (paper.TREND_DAYS - 1) + [last], end)
+
+
+def _crypto(conn, code, selection=None, series=None, trend=None, today=TODAY):
+    paper.crypto_step(conn, paper.BOOK_BY_CODE[code], selection or _sel(),
+                      paper.Prices(Fetch(series or {})), today, lambda c, s: trend)
+    return paper.orders(conn, code)
+
+
+def test_c_a_buys_the_coins_share_on_a_strong_signal(conn):
+    _book(conn)
+    [o] = _crypto(conn, "C-A", _sel([_coin_sig("BTC")]))
+    assert (o["ticker"], o["side"], o["amount_eur"]) == ("CRYPTO:BTC", "buy", 10_000.0)
+
+
+def test_c_a_sells_on_a_price_confirmed_caution(conn):
+    _book(conn)
+    _coin_position(conn, "C-A", "BTC", fill_days_ago=5)
+    _journal(conn, "BTC", "caution", days_ago=1)
+    [o] = _crypto(conn, "C-A", trend=FALLING)
+    assert o["side"] == "sell" and o["reason"].startswith("осторожно: отток из спот-ETF")
+
+
+def test_c_a_ignores_a_caution_the_price_does_not_confirm(conn):
+    _book(conn)
+    _coin_position(conn, "C-A", "BTC")
+    _journal(conn, "BTC", "caution", days_ago=1)
+    assert _crypto(conn, "C-A", trend=RISING) == []
+
+
+@pytest.mark.parametrize("days,value,expected", [
+    (90, None, "90 дн. в позиции"), (10, 7_499.0, "стоп -25%"), (10, 7_600.0, None)])
+def test_c_a_time_limit_and_stop(conn, days, value, expected):
+    _book(conn)
+    _coin_position(conn, "C-A", "BTC", fill_days_ago=days, value=value)
+    orders = _crypto(conn, "C-A")
+    assert [o["reason"] for o in orders] == ([expected] if expected else [])
+
+
+def test_c_b_holds_a_coin_above_its_200_day_average(conn):
+    _book(conn)
+    orders = _crypto(conn, "C-B", series={"BTC-USD": _trend_bars(110), "ETH-USD": _trend_bars(90)})
+    assert [(o["ticker"], o["reason"]) for o in orders] == [("CRYPTO:BTC", "выше 200-дн. средней")]
+
+
+def test_c_b_buys_below_the_average_on_a_strong_signal(conn):
+    _book(conn)
+    orders = _crypto(conn, "C-B", _sel([_coin_sig("ETH")]),
+                     series={"BTC-USD": _trend_bars(90), "ETH-USD": _trend_bars(90)})
+    assert [(o["ticker"], o["reason"]) for o in orders] == [("CRYPTO:ETH", "Сильный крипто-сигнал")]
+
+
+def test_c_b_sells_below_the_average(conn):
+    _book(conn)
+    _coin_position(conn, "C-B", "BTC")
+    [o] = _crypto(conn, "C-B", series={"BTC-USD": _trend_bars(90), "ETH-USD": _trend_bars(90)})
+    assert (o["side"], o["reason"]) == ("sell", "ниже 200-дн. средней")
+
+
+def test_c_b_keeps_a_coin_for_30_days_after_a_strong_signal(conn):
+    _book(conn)
+    _coin_position(conn, "C-B", "BTC")
+    _journal(conn, "BTC", "strong", days_ago=10)
+    assert _crypto(conn, "C-B", series={"BTC-USD": _trend_bars(90), "ETH-USD": _trend_bars(90)}) == []
+
+
+def test_c_b_sells_on_a_caution_and_waits_7_days_before_buying_again(conn):
+    _book(conn)
+    pos = _coin_position(conn, "C-B", "BTC")
+    _journal(conn, "BTC", "caution", days_ago=1)
+    [o] = _crypto(conn, "C-B", trend=FALLING,
+                  series={"BTC-USD": _trend_bars(110), "ETH-USD": _trend_bars(90)})
+    assert o["side"] == "sell" and o["reason"].startswith("осторожно")
+    conn.execute("UPDATE paper_positions SET closed_date = ?, close_reason = ? WHERE id = ?",
+                 (_days(3), o["reason"], pos["id"]))
+    conn.execute("UPDATE paper_orders SET status = 'filled' WHERE id = ?", (o["id"],))
+    conn.commit()
+    assert len(_crypto(conn, "C-B", series={"BTC-USD": _trend_bars(110), "ETH-USD": _trend_bars(90)})) == 1
+    later = TODAY + dt.timedelta(days=5)
+    orders = _crypto(conn, "C-B", today=later,
+                     series={"BTC-USD": _trend_bars(110, later), "ETH-USD": _trend_bars(90, later)})
+    assert orders[-1]["side"] == "buy" and orders[-1]["reason"] == "выше 200-дн. средней"

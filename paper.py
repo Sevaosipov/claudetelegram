@@ -404,3 +404,78 @@ def stock_step(conn, book: Book, selection, prices: Prices, today: dt.date) -> N
         place_buy(conn, book.code, sig.ticker, sig.source, _buy_reason(sig), today, SLICE * value,
                   max_positions=MAX_POSITIONS, min_fraction=0.5, insiders=insiders_of(sig),
                   target=target)
+
+
+# ----------------------------------------------------------- crypto books
+def strong_coins(selection) -> set[str]:
+    """Coins with a Сильный crypto signal today (CryptoSignals only -- congressional
+    crypto buys are never Сильный)."""
+    return {t.signal.coin for t in selection.strong if hasattr(t.signal, "crypto_kind")}
+
+
+def above_trend(bars: list[tuple[str, float]]) -> bool | None:
+    """Is the last close above the TREND_DAYS average? None with too little history."""
+    if len(bars) < TREND_DAYS:
+        return None
+    closes = [c for _d, c in bars[-TREND_DAYS:]]
+    return bars[-1][1] > sum(closes) / TREND_DAYS
+
+
+def _recent_strong(conn, coin: str, today: dt.date) -> bool:
+    since = (today - dt.timedelta(days=SIGNAL_HOLD_DAYS)).isoformat()
+    return conn.execute(
+        "SELECT 1 FROM signal_journal WHERE ticker = ? AND tier = 'strong' "
+        "AND date(emitted_at) >= ? AND date(emitted_at) <= ? LIMIT 1",
+        (crypto.ticker(coin), since, today.isoformat())).fetchone() is not None
+
+
+def _rebuy_blocked(conn, code: str, coin: str, today: dt.date) -> bool:
+    since = (today - dt.timedelta(days=REBUY_BLOCK_DAYS)).isoformat()
+    return conn.execute(
+        "SELECT 1 FROM paper_positions WHERE book = ? AND ticker = ? AND closed_date >= ? "
+        "AND close_reason LIKE 'осторожно%' LIMIT 1",
+        (code, crypto.ticker(coin), since)).fetchone() is not None
+
+
+def _caution(conn, pos: dict, today: dt.date, trend_fn) -> str | None:
+    detail = positions._crypto_caution(
+        conn, types.SimpleNamespace(ticker=pos["ticker"], opened_at=pos["fill_date"]), today, trend_fn)
+    return f"осторожно: {detail}" if detail else None
+
+
+def crypto_step(conn, book: Book, selection, prices: Prices, today: dt.date, trend_fn) -> None:
+    """C-A trades the signals: buy on Сильный, sell on a price-confirmed caution, at
+    CRYPTO_HOLD_DAYS or at CRYPTO_STOP. C-B holds a coin above its 200-day average or
+    for SIGNAL_HOLD_DAYS after a Сильный signal; a caution sells it and blocks a
+    re-buy for REBUY_BLOCK_DAYS. Each coin's share is the book value / coin count."""
+    signalled = strong_coins(selection)
+    held = {p["ticker"]: p for p in open_positions(conn, book.code)}
+    share = book_value(conn, book.code) / len(CRYPTO_COINS)
+    for coin in CRYPTO_COINS:
+        ticker = crypto.ticker(coin)
+        pos = held.get(ticker)
+        if book.rule == "A":
+            if pos:
+                reason = _caution(conn, pos, today, trend_fn)
+                if not reason and (today - dt.date.fromisoformat(pos["fill_date"])).days >= CRYPTO_HOLD_DAYS:
+                    reason = f"{CRYPTO_HOLD_DAYS} дн. в позиции"
+                if (not reason and pos["last_value"] is not None
+                        and pos["last_value"] / pos["net_eur"] - 1 <= CRYPTO_STOP):
+                    reason = f"стоп {CRYPTO_STOP:+.0%}"
+                if reason:
+                    place_sell(conn, book.code, pos, reason, today)
+            elif coin in signalled:
+                place_buy(conn, book.code, ticker, "CRYPTO", "Сильный крипто-сигнал", today, share,
+                          min_fraction=0.0)
+            continue
+        trend = above_trend(prices.bars(listing(ticker, "CRYPTO")[0]))
+        recent = coin in signalled or _recent_strong(conn, coin, today)
+        if pos:
+            caution = _caution(conn, pos, today, trend_fn)
+            if caution:
+                place_sell(conn, book.code, pos, caution, today)
+            elif not trend and not recent:
+                place_sell(conn, book.code, pos, "ниже 200-дн. средней", today)
+        elif (trend or recent) and not _rebuy_blocked(conn, book.code, coin, today):
+            reason = "выше 200-дн. средней" if trend else "Сильный крипто-сигнал"
+            place_buy(conn, book.code, ticker, "CRYPTO", reason, today, share, min_fraction=0.0)
