@@ -30,9 +30,11 @@ CONVICTION_MIN_EUR = 250_000        # rule (c)
 CONVICTION_MIN_INCREASE_PCT = 10.0  # rule (c)
 MAX_CANDIDATES = 10
 CANDIDATE_MIN_SCORE = 50.0
-CRYPTO_TREASURY_BIG_EUR = 50e6
+# The same bar as the weekly company-demand floor in cluster/crypto.py, so one
+# constant: the two can't drift apart.
+CRYPTO_TREASURY_BIG_EUR = cluster.crypto.TREASURY_WEEK_FLOOR_EUR
 
-STRONG, CANDIDATE = "strong", "candidate"
+STRONG, CANDIDATE, CAUTION = "strong", "candidate", "caution"
 _ROLE_LABEL = {"ceo": "CEO", "cfo": "CFO", "chair": "Chair"}
 
 
@@ -52,6 +54,10 @@ class Selection:
     # Exit signals from the input, unfiltered and untiered -- see select()'s
     # docstring for why they bypass recency/T212/size entirely.
     exits: list = field(default_factory=list)
+    # Bearish crypto signals (ETF outflows, company sales, coins moving onto
+    # exchanges): shown in the menu's Сигналы, journaled, never pushed -- see
+    # bot._record_cautions and positions.check_exits.
+    cautions: list = field(default_factory=list)
 
 
 def _short(v: float) -> str:
@@ -67,6 +73,10 @@ def is_buy_side(sig) -> bool:
     if hasattr(sig, "crypto_kind"):           # CryptoSignal
         return bool(sig.bullish)
     return True
+
+
+def is_caution(sig) -> bool:
+    return hasattr(sig, "crypto_kind") and not sig.bullish
 
 
 def _stock_tier(sig) -> Tiered | None:
@@ -130,6 +140,11 @@ def _stock_tier(sig) -> Tiered | None:
     return Tiered(sig, tier, met, missed)
 
 
+def _trend_desc(coin: str, trend: dict) -> str:
+    return (f"{coin} {trend['ret_7d']:+.1f}% за 7 дн., "
+            f"{'выше' if trend['above_ma20'] else 'ниже'} 20-дн. средней")
+
+
 def _crypto_tier(conn, sig) -> Tiered | None:
     if not sig.bullish:
         return None
@@ -139,11 +154,20 @@ def _crypto_tier(conn, sig) -> Tiered | None:
     trend = crypto.price_trend(conn, sig.coin)
     if trend is None:
         return Tiered(sig, CANDIDATE, met, ["цена не проверена"])
-    desc = (f"{sig.coin} {trend['ret_7d']:+.1f}% за 7 дн., "
-            f"{'выше' if trend['above_ma20'] else 'ниже'} 20-дн. средней")
+    desc = _trend_desc(sig.coin, trend)
     if crypto.trend_confirms(trend):
         return Tiered(sig, STRONG, met + [desc], [])
     return Tiered(sig, CANDIDATE, met, [f"цена не подтверждает: {desc}"])
+
+
+def _caution_tier(conn, sig) -> Tiered:
+    trend = crypto.price_trend(conn, sig.coin)
+    if trend is None:
+        return Tiered(sig, CAUTION, [], ["цена не проверена"])
+    desc = _trend_desc(sig.coin, trend)
+    if crypto.trend_confirms_down(trend):
+        return Tiered(sig, CAUTION, [f"цена подтверждает: {desc}"], [])
+    return Tiered(sig, CAUTION, [], [f"цена не подтверждает: {desc}"])
 
 
 _BUY_SIDE_SOURCES = ("sec", "house", "senate", "bafin", "norway", "sweden", "crypto")
@@ -261,6 +285,13 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
     today = today or dt.date.today()
     since = (today - dt.timedelta(days=MAX_AGE_DAYS)).isoformat()
     exits = [s for s in signals if hasattr(s, "seller_count")]
+    raw_cautions = [s for s in signals if is_caution(s)
+                    and (cluster.disclosed_on(conn, s) or "") >= since]
+    raw_cautions = cluster.enrich_signals(conn, raw_cautions) if raw_cautions else []
+    cautions = []
+    for s in raw_cautions:
+        s.tier = CAUTION
+        cautions.append(_caution_tier(conn, s))
     pre = [s for s in signals
            if is_buy_side(s)
            and (cluster.disclosed_on(conn, s) or "") >= since
@@ -285,4 +316,5 @@ def select(conn, signals: list, t212, today: dt.date | None = None) -> Selection
         candidates=candidates[:MAX_CANDIDATES],
         t212_checked=t212 is not None,
         exits=exits,
+        cautions=cautions,
     )

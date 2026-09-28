@@ -490,7 +490,8 @@ def run_crypto_treasury_pass(conn, args) -> int:
 def run_crypto_etf_pass(conn, args) -> int:
     """Today's issuer-published share count and NAV per covered spot ETF
     (crypto_etf.py). Returns how many snapshots were new -- zero on a weekend or a
-    second run the same day, which is why the liveness check tolerates streaks."""
+    second run the same day, which is why the liveness check tolerates streaks.
+    Farside is its own pass (run_farside_pass), so either can fail alone."""
     new_count = 0
     for snap in crypto_etf.fetch_snapshots():
         if not db.save_crypto_etf_snapshot(conn, snap):
@@ -503,6 +504,40 @@ def run_crypto_etf_pass(conn, args) -> int:
             print(telegram_notify.format_etf_flow_line(snap.fund, snap.coin, prev_as_of, as_of, flow))
     conn.commit()
     return new_count
+
+
+# A stored history whose newest day is older than this is reloaded in full: the
+# recent table may no longer reach back over the gap left by downtime.
+FARSIDE_RELOAD_GAP_DAYS = 10
+
+
+def run_farside_pass(conn, args) -> int:
+    """Every US spot fund's daily flows from Farside (crypto_etf.py) -- the whole
+    history when nothing is stored for a coin or its newest stored day is more than
+    FARSIDE_RELOAD_GAP_DAYS old, the recent table otherwise. Returns how many
+    fund-day rows were parsed, so a redesign that parses to nothing shows up as a
+    silent source; raises when every coin's fetch failed, so the run reports it."""
+    today = dt.date.today()
+    parsed, failed = 0, 0
+    for coin in crypto_etf.FARSIDE_URLS:
+        latest = db.etf_flow_latest(conn, coin)
+        full = latest is None or (today - dt.date.fromisoformat(latest)).days > FARSIDE_RELOAD_GAP_DAYS
+        try:
+            flows = crypto_etf.fetch_farside(coin, full_history=full)
+        except Exception as e:  # Farside down: the finder falls back to the issuer snapshots
+            failed += 1
+            print(f"[CRYPTO] Farside {coin} unavailable: {type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        if not flows:
+            print(f"[CRYPTO] Farside {coin}: 0 rows parsed — page layout may have changed",
+                  file=sys.stderr)
+            continue
+        db.save_etf_flows(conn, flows)
+        parsed += len(flows)
+        print(f"[CRYPTO] Farside {coin}: {len(flows)} fund-day(s)" + (" (full history)" if full else ""))
+    if failed and failed == len(crypto_etf.FARSIDE_URLS):
+        raise RuntimeError("Farside unavailable for every coin")
+    return parsed
 
 
 def run_onchain_pass(conn, args) -> int:

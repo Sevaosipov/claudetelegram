@@ -59,6 +59,7 @@ from passes import (
     run_144_pass,
     run_crypto_etf_pass,
     run_crypto_treasury_pass,
+    run_farside_pass,
     run_bafin_pass,
     run_house_pass,
     run_norway_pass,
@@ -201,6 +202,8 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
 
     for t in selection.strong + selection.candidates:
         print(f"[{t.tier}] " + telegram_notify.format_any_signal(t.signal))
+    for t in selection.cautions:
+        print("[caution] " + telegram_notify.format_any_signal(t.signal))
     return selection
 
 
@@ -265,6 +268,13 @@ def _commit_signals(conn, signals) -> None:
             cluster.commit_stake_alert(conn, s)
         else:
             cluster.commit_alert(conn, s)
+
+
+def _record_cautions(conn, selection) -> None:
+    """Caution signals are never pushed -- the menu's Сигналы shows them -- but they
+    are journaled and marked alerted on the run that finds them: a coin position's
+    close alert reads them from the journal (positions.check_exits)."""
+    _commit_signals(conn, [t.signal for t in selection.cautions])
 
 
 def _send_digest(conn, selection, closes) -> bool:
@@ -572,6 +582,7 @@ def main():
             new_by_source["CRYPTO_TREASURY"] = _run_source("CRYPTO_TREASURY", run_crypto_treasury_pass,
                                                            conn, args)
             new_by_source["CRYPTO_ETF"] = _run_source("CRYPTO_ETF", run_crypto_etf_pass, conn, args)
+            new_by_source["CRYPTO_ETF_FARSIDE"] = _run_source("CRYPTO_ETF_FARSIDE", run_farside_pass, conn, args)
         if do_onchain:
             new_by_source["CRYPTO_ONCHAIN"] = _run_source("CRYPTO_ONCHAIN", run_onchain_pass, conn, args)
 
@@ -596,6 +607,7 @@ def main():
             print(f"[stale] {x}", file=sys.stderr)
 
         selection = run_cluster_pass(conn, args)
+        _record_cautions(conn, selection)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))

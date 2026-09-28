@@ -130,7 +130,7 @@ def test_house_signal_is_dated_by_when_it_was_found_not_traded(conn):
 def test_crypto_signal_is_dated_by_its_own_filing(conn):
     filed = (TODAY - dt.timedelta(days=2)).isoformat()
     db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
-        "acc", "Acme", "ACME", "1", "BTC", "P", 100, 80_000.0, None, filed, "8-K", "u"))
+        "acc", "Acme", "ACME", "1", "BTC", "S", 200, 80_000.0, None, filed, "8-K", "u"))
     [sig] = cluster.find_treasury_signals(conn)
     assert cluster.disclosed_on(conn, sig) == filed
 
@@ -167,10 +167,20 @@ def test_view_keeps_recent_buyable_stocks_and_crypto(conn, keyed, scored, no_pri
         add_sec_purchase(conn, "AAPL", o, 900_000, recent, filed_date=recent)
         add_sec_purchase(conn, "ZZZZ", o, 900_000, recent, filed_date=recent)   # not on T212
     db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
-        "acc", "Acme", "ACME", "1", "BTC", "P", 1000, 80_000.0, None, recent, "8-K", "u"))
+        "acc", "Acme", "ACME", "1", "BTC", "P", 1000, 80_000.0, None, TODAY.isoformat(), "8-K", "u"))
     menu.show_signals(conn)
     out = _shown(capsys)
     assert "Сильные" in out and "AAPL" in out and "CRYPTO:BTC" in out and "ZZZZ" not in out
+
+
+def test_view_shows_crypto_cautions(conn, keyed, scored, no_prices, capsys, monkeypatch):
+    monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
+    monkeypatch.setattr("crypto.price_trend", lambda conn, sym: {"ret_7d": -4.0, "above_ma20": False})
+    db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
+        "acc-s", "Acme", "ACME", "1", "BTC", "S", 200, 80_000.0, None, TODAY.isoformat(), "8-K", "u"))
+    menu.show_signals(conn)
+    out = _shown(capsys)
+    assert "Осторожно (1)" in out and "КОМПАНИЯ ПРОДАЛА" in out and "цена подтверждает" in out
 
 
 def test_view_drops_signals_disclosed_before_the_window(conn, keyed, scored, no_prices, capsys,

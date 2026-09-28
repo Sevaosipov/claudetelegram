@@ -150,3 +150,9 @@ def price_trend(conn, symbol: str) -> dict | None:
 
 def trend_confirms(trend: dict | None) -> bool:
     return bool(trend) and trend["ret_7d"] > 0 and trend["above_ma20"]
+
+
+def trend_confirms_down(trend: dict | None) -> bool:
+    """The mirror of trend_confirms, for a caution signal: down over 7 days and below
+    the 20-day average."""
+    return bool(trend) and trend["ret_7d"] < 0 and not trend["above_ma20"]

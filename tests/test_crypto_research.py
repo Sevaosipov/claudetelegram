@@ -6,6 +6,7 @@ import datetime as dt
 import pytest
 
 import assets
+import crypto_etf
 import crypto_research
 import outlook
 import crypto_treasury as ct
@@ -44,6 +45,14 @@ def test_build_collects_price_trend_and_the_bots_own_data(conn, offline):
     assert rep["changes"]["30 дней"] == pytest.approx((1.001 ** 30 - 1) * 100)
     assert rep["trend"] == "up" and rep["sources"]["prices"] == "Binance"
     assert rep["treasury"][0][1] == "Strategy Inc" and rep["political"]
+
+
+def test_the_etf_line_counts_the_funds_rather_than_listing_them(conn, offline):
+    day = (TODAY - dt.timedelta(days=1)).isoformat()
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", day, "IBIT", 100e6),
+                             crypto_etf.Flow("BTC", day, "FBTC", 20e6)])
+    report = crypto_research.format_report(crypto_research.build(conn, BTC))
+    assert "спот-ETF, фондов: 2: +120 млн $" in report and "IBIT" not in report
 
 
 def test_the_outlook_reuses_the_dossiers_bars(conn, offline, monkeypatch):

@@ -202,6 +202,8 @@ def collect_signals(conn, horizons=HORIZONS) -> list[dict]:
                   holder_only, first_buy, lag_days, market_cap_eur, value_pct_of_mcap,
                   score, emitted_at
            FROM signal_journal WHERE ticker IS NOT NULL AND ticker != ''
+             -- a caution shares source and kind with a buy; it'd mix directions here
+             AND COALESCE(tier, '') != 'caution'
            ORDER BY emitted_at"""
     ).fetchall()
     out = []

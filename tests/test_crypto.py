@@ -14,6 +14,7 @@ import crypto_etf
 import crypto_treasury as ct
 import db
 import house_ptr
+import strategy
 import telegram_notify
 import tradingview
 from conftest import add_house_txn, fixture_text
@@ -136,45 +137,152 @@ def test_company_and_ticker_from_display_name():
     assert ct._company("Private Co  (CIK 0000000001)") == ("Private Co  (CIK 0000000001)", None)
 
 
+def test_backfill_walks_the_range_in_weekly_slices_and_stores_trades(conn):
+    slices = []
+
+    def scan(start, end, seen, cik_lookup=None):
+        slices.append((start, end))
+        if start == dt.date(2026, 9, 1):
+            yield "doc-1", [ct.TreasuryTxn("acc-b", "Acme", "ACME", "1", "BTC", "P", 10, 80_000.0,
+                                           None, "2026-09-02", "8-K", "u")]
+    assert ct.backfill(conn, 20, today=dt.date(2026, 9, 21), scan=scan) == 1
+    assert slices == [(dt.date(2026, 9, 15), dt.date(2026, 9, 21)),      # newest first
+                      (dt.date(2026, 9, 8), dt.date(2026, 9, 14)),
+                      (dt.date(2026, 9, 1), dt.date(2026, 9, 7))]
+    assert "doc-1" in db.crypto_treasury_seen(conn)
+
+
+def test_backfill_resumes_past_documents_already_read(conn):
+    db.mark_crypto_treasury_seen(conn, "doc-1")
+    conn.commit()
+    seen_args = []
+
+    def scan(start, end, seen, cik_lookup=None):
+        seen_args.append(set(seen))
+        return iter(())
+    ct.backfill(conn, 6, today=dt.date(2026, 9, 21), scan=scan)
+    assert seen_args == [{"doc-1"}]
+
+
+def test_backfill_uses_the_paced_scanner_by_default(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ct, "scan_new_filings",
+                        lambda s, e, seen, cik_lookup=None: calls.append((s, e)) or iter(()))
+    ct.backfill(conn, 3, today=dt.date(2026, 9, 21))
+    assert calls == [(dt.date(2026, 9, 18), dt.date(2026, 9, 21))]
+
+
+def test_backfill_command(conn, monkeypatch):
+    got = {}
+    monkeypatch.setattr(ct, "backfill", lambda c, days, cik_lookup=None: got.setdefault("days", days) and 0)
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    monkeypatch.setattr("cik_map.CikMap", lambda: None)
+    assert ct.main(["--backfill", "365"]) == 0 and got["days"] == 365
+
+
 # ------------------------------------------------------ treasury: signals
 def _add_treasury(conn, units, avg=80_000.0, total=None, side="P", filed=None, acc="acc-1",
-                  coin="BTC"):
+                  coin="BTC", company="Acme Corp", cik="1", co_ticker="ACME"):
     db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
-        accession=acc, company="Acme Corp", ticker="ACME", cik="1", coin=coin, side=side,
-        units=units, avg_price_usd=avg, total_usd=total, filed_date=filed or _days_ago(1),
+        accession=acc, company=company, ticker=co_ticker, cik=cik, coin=coin, side=side,
+        units=units, avg_price_usd=avg, total_usd=total, filed_date=filed or TODAY.isoformat(),
         form="8-K", source_url="https://sec.test/doc"))
     conn.commit()
 
 
-def test_treasury_purchase_is_a_signal(conn):
-    _add_treasury(conn, 100)                    # $8m
-    [sig] = cluster.find_treasury_signals(conn)
-    assert sig.ticker == "CRYPTO:BTC" and sig.bullish and sig.company == "Acme Corp (ACME)"
-    assert sig.total_value == pytest.approx(8_000_000 / 1.16)
+def _weeks_ago(n: int) -> str:
+    """A day inside the calendar week n weeks before this one."""
+    return (TODAY - dt.timedelta(weeks=n)).isoformat()
 
 
-def test_small_treasury_purchase_is_not(conn):
-    _add_treasury(conn, 1)                      # $80k
-    assert cluster.find_treasury_signals(conn) == []
+def test_a_big_week_of_company_buying_is_a_signal(conn):
+    _add_treasury(conn, 1_000)                                   # $80m this week, no history yet
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.bullish and sig.ticker == "CRYPTO:BTC" and sig.company == "компании: Acme Corp"
+    assert sig.total_value == pytest.approx(80_000_000 / 1.16)
+    assert sig.details[0] == "$80.0 млн за неделю"
+    assert "порог по умолчанию: мало истории" in sig.details
 
 
-def test_treasury_purchase_with_no_price_is_kept(conn):
-    """Unknown is not small: it is valued at spot later, by enrich_signals."""
-    _add_treasury(conn, 100, avg=None)
-    [sig] = cluster.find_treasury_signals(conn)
-    assert sig.total_value is None and sig.units == 100
+def test_a_trade_without_a_filing_date_is_ignored(conn):
+    db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
+        "acc-undated", "Other Co", "OTH", "2", "BTC", "P", 5_000, 80_000.0, None, "", "8-K", "u"))
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.units == 1_000 and sig.company == "компании: Acme Corp"
 
 
-def test_old_treasury_filing_is_not_resurfaced(conn):
-    _add_treasury(conn, 100, filed=_days_ago(60))
-    assert cluster.find_treasury_signals(conn) == []
+def test_a_small_week_is_not(conn):
+    _add_treasury(conn, 500)                                     # $40m, under €50m
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
 
 
-def test_treasury_signal_fires_once(conn):
-    _add_treasury(conn, 100)
-    [sig] = cluster.find_treasury_signals(conn)
+def test_a_routine_week_for_a_weekly_buyer_is_not(conn):
+    for k in range(1, 21):                                       # $160m every week for 20 weeks
+        _add_treasury(conn, 2_000, filed=_weeks_ago(k), acc=f"w{k}")
+    _add_treasury(conn, 2_000, acc="now")                        # the same again this week
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_a_week_above_the_usual_says_how_unusual(conn):
+    for k in range(1, 21):
+        _add_treasury(conn, 2_000, filed=_weeks_ago(k), acc=f"w{k}")
+    _add_treasury(conn, 6_000, acc="now")                        # three times the usual week
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.details[0] == "$480.0 млн за неделю — больше, чем в 100% из 20 недель"
+
+
+def test_buyers_are_listed_largest_first_and_a_first_time_buyer_is_marked(conn):
+    _add_treasury(conn, 1, filed=(TODAY - dt.timedelta(days=400)).isoformat(), acc="old",
+                  company="Strategy Inc", cik="2", co_ticker="MSTR")      # history reaches a year back
+    _add_treasury(conn, 900, acc="s", company="Strategy Inc", cik="2", co_ticker="MSTR")
+    _add_treasury(conn, 300, acc="a")                                     # Acme's first purchase ever
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.details[1] == "Strategy Inc (MSTR) $72.0 млн · Acme Corp (ACME) $24.0 млн (впервые)"
+    assert sig.member_names == ["Strategy Inc", "Acme Corp"]
+
+
+def test_no_first_time_mark_before_a_year_of_history(conn):
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert "впервые" not in sig.details[1]
+
+
+def test_units_only_purchase_is_valued_at_the_latest_stated_price(conn):
+    _add_treasury(conn, 1, acc="priced")                          # states $80,000 a coin
+    _add_treasury(conn, 1_000, avg=None, acc="unpriced")          # no price in the filing
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.total_value == pytest.approx(1_001 * 80_000 / 1.16)
+
+
+def test_a_week_alerts_once(conn):
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
     bot._commit_signals(conn, [sig])
-    assert cluster.find_treasury_signals(conn) == []
+    _add_treasury(conn, 1_000, acc="acc-2")                       # more buying the same week
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_last_weeks_buying_is_not_this_weeks_signal(conn):
+    _add_treasury(conn, 1_000, filed=_weeks_ago(1))
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_a_large_company_sale_is_a_caution(conn):
+    _add_treasury(conn, 200, side="S", filed=_days_ago(3))        # $16m
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert not sig.bullish and sig.company == "Acme Corp (ACME)"
+    assert sig.window_end == _days_ago(3)
+
+
+def test_a_small_company_sale_is_not(conn):
+    _add_treasury(conn, 100, side="S")                            # $8m, under €10m
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_an_old_sale_is_not_resurfaced(conn):
+    _add_treasury(conn, 200, side="S", filed=_days_ago(30))
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
 
 
 # ------------------------------------------------------------ ETF flows
@@ -191,6 +299,92 @@ def test_ishares_page_without_figures_is_none():
 def test_flow_is_share_change_times_nav():
     [(prev, day, flow)] = crypto_etf.flows([("2026-09-22", 1_010, 50.0), ("2026-09-21", 1_000, 40.0)])
     assert (prev, day, flow) == ("2026-09-21", "2026-09-22", 500.0)
+
+
+def test_farside_page_parses():
+    flows = crypto_etf.parse_farside("BTC", fixture_text("farside_btc_snippet.html"))
+    got = sorted((f.coin, f.date, f.fund, f.flow_usd) for f in flows)
+    want = sorted([("BTC", "2026-09-24", "IBIT", 162.6e6), ("BTC", "2026-09-24", "FBTC", 12.9e6),
+                   ("BTC", "2026-09-24", "GBTC", -4.0e6), ("BTC", "2026-09-25", "IBIT", 1_097.0e6),
+                   ("BTC", "2026-09-25", "FBTC", -49.3e6)])
+    assert [g[:3] for g in got] == [w[:3] for w in want]
+    assert [g[3] for g in got] == pytest.approx([w[3] for w in want])
+
+
+def test_farside_page_without_a_table_is_empty():
+    assert crypto_etf.parse_farside("BTC", "<html>redesigned</html>") == []
+
+
+def test_etf_flows_are_stored_and_the_newest_day_is_rewritten(conn):
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", "2026-09-25", "IBIT", 1e6)])
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", "2026-09-25", "IBIT", 5e6)])   # late funds filled in
+    assert conn.execute("SELECT flow_usd FROM crypto_etf_flows").fetchall() == [(5e6,)]
+    assert db.etf_flow_count(conn, "BTC") == 1 and db.etf_flow_count(conn, "ETH") == 0
+    assert db.etf_flow_latest(conn, "BTC") == "2026-09-25" and db.etf_flow_latest(conn, "ETH") is None
+
+
+def _farside(calls=None, down=()):
+    """A fetch_farside stand-in: one fund-day per coin, dated yesterday; a coin in
+    `down` raises instead."""
+    def fetch(coin, full_history=False, session=None):
+        if calls is not None:
+            calls.append((coin, full_history))
+        if coin in down:
+            raise crypto_etf.requests.RequestException("down")
+        return [crypto_etf.Flow(coin, _days_ago(1), "IBIT" if coin == "BTC" else "ETHA", 1e6)]
+    return fetch
+
+
+def test_etf_pass_loads_the_full_history_once(conn, monkeypatch):
+    import passes
+    calls = []
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(calls))
+    passes.run_farside_pass(conn, None)
+    passes.run_farside_pass(conn, None)
+    assert calls == [("BTC", True), ("ETH", True), ("BTC", False), ("ETH", False)]
+
+
+def test_etf_pass_survives_farside_being_down(conn, monkeypatch):
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(down={"BTC"}))
+    assert passes.run_farside_pass(conn, None) == 1                  # ETH still collected
+    assert db.etf_flow_count(conn, "BTC") == 0 and db.etf_flow_count(conn, "ETH") == 1
+
+
+def test_farside_pass_fails_when_every_coin_is_down(conn, monkeypatch):
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(down=set(crypto_etf.FARSIDE_URLS)))
+    with pytest.raises(RuntimeError, match="Farside unavailable for every coin"):
+        passes.run_farside_pass(conn, None)
+
+
+def test_farside_pass_reloads_the_history_after_a_gap(conn, monkeypatch):
+    import passes
+    calls = []
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(11), "IBIT", 1e6),
+                             crypto_etf.Flow("ETH", _days_ago(10), "ETHA", 1e6)])
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(calls))
+    passes.run_farside_pass(conn, None)
+    assert calls == [("BTC", True), ("ETH", False)]
+
+
+def test_farside_page_parsing_to_nothing_is_reported(conn, monkeypatch, capsys):
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_farside", lambda coin, full_history=False, session=None: [])
+    assert passes.run_farside_pass(conn, None) == 0
+    assert "Farside BTC: 0 rows parsed — page layout may have changed" in capsys.readouterr().err
+
+
+def test_an_ishares_failure_does_not_stop_farside(conn, monkeypatch):
+    import passes
+
+    def ishares_down(session=None):
+        raise ValueError("IBIT: shares outstanding / NAV not found on the product page")
+    monkeypatch.setattr(crypto_etf, "fetch_snapshots", ishares_down)
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside())
+    assert bot._run_source("CRYPTO_ETF", passes.run_crypto_etf_pass, conn, None) is None
+    assert bot._run_source("CRYPTO_ETF_FARSIDE", passes.run_farside_pass, conn, None) == 2
+    assert db.etf_flow_count(conn, "BTC") == 1 and db.etf_flow_count(conn, "ETH") == 1
 
 
 def _add_etf(conn, fund, days_ago, shares, nav=50.0):
@@ -227,6 +421,79 @@ def test_stale_etf_snapshot_is_ignored(conn):
     _add_etf(conn, "IBIT", 30, 1_000_000_000)
     _add_etf(conn, "IBIT", 29, 1_100_000_000)
     assert cluster.find_etf_flow_signals(conn) == []
+
+
+def _add_farside(conn, coin, flows_musd, fund="IBIT", newest_days_ago=1):
+    """One stored day per value (in $m), oldest first, the last one `newest_days_ago` ago."""
+    n = len(flows_musd)
+    db.save_etf_flows(conn, [crypto_etf.Flow(coin, _days_ago(newest_days_ago + n - 1 - i), fund, m * 1e6)
+                             for i, m in enumerate(flows_musd)])
+
+
+def test_unusual_etf_day_is_measured_against_its_own_history(conn):
+    _add_farside(conn, "BTC", [50, -40] * 30 + [300])        # 60 ordinary days, then $300m
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.bullish and sig.company == "спот-ETF США, фондов: 1"
+    assert "больше, чем в 100% из 60 дней" in sig.details[0]
+    assert not any("IBIT/ETHA" in d for d in sig.details)
+
+
+def test_ordinary_day_in_a_busy_market_is_not(conn):
+    _add_farside(conn, "BTC", [300, -250] * 30 + [120])
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_etf_day_floor_applies_in_a_quiet_market(conn):
+    _add_farside(conn, "BTC", [5, -4] * 30 + [60])            # top of its history, but under $100m
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_etf_streak_floor_applies_in_a_quiet_market(conn):
+    _add_farside(conn, "BTC", [-10, 10] * 30 + [-60, -60, -60])   # top 3-day total, but $180m < $250m
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_unusual_outflow_streak_is_a_bearish_signal(conn):
+    _add_farside(conn, "ETH", [-30, 40] * 30 + [-90, -90, -90])
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert not sig.bullish and "3 дн. подряд оттока" in sig.details[1]
+
+
+def test_under_30_days_of_history_uses_the_fixed_thresholds(conn):
+    _add_farside(conn, "BTC", [10, -10] * 5 + [450])
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert "порог по умолчанию: мало истории" in sig.details
+
+
+def test_stale_farside_falls_back_to_the_issuer_snapshots(conn):
+    _add_farside(conn, "BTC", [50, -40] * 30 + [900], newest_days_ago=10)
+    _add_etf(conn, "IBIT", 2, 1_000_000_000)
+    _add_etf(conn, "IBIT", 1, 1_010_000_000)                  # +$500m on the issuer page
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert "IBIT" in sig.company and "только IBIT/ETHA (Farside недоступен)" in sig.details
+
+
+def test_a_partial_newest_day_waits_for_every_fund(conn):
+    for fund in ("IBIT", "GBTC"):
+        _add_farside(conn, "BTC", [5, -4] * 30, fund=fund, newest_days_ago=2)
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(1), "GBTC", -150e6)])   # IBIT still "-"
+    assert cluster.find_etf_flow_signals(conn) == []
+    assert cluster.daily_etf_flows(conn)["BTC"][-1][0] == _days_ago(2)
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(1), "IBIT", 700e6)])
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.bullish and sig.details[0].startswith(f"за {_days_ago(1)}: +$550 млн")
+
+
+def test_dossier_flows_are_summed_across_farside_funds(conn):
+    _add_farside(conn, "BTC", [10, 20])
+    db.save_etf_flows(conn, [crypto_etf.Flow("BTC", _days_ago(1), "FBTC", 5e6)])
+    days = cluster.daily_etf_flows(conn)["BTC"]
+    assert days[-1][1] == pytest.approx(25e6) and days[-1][2] == ["FBTC", "IBIT"]
+
+
+def test_calibration_hides_future_etf_flows():
+    import calibrate_strategy
+    assert calibrate_strategy._VISIBLE["crypto_etf_flows"] == "date <= '{d}'"
 
 
 # ------------------------------------------------------------- on-chain
@@ -303,19 +570,29 @@ def test_politician_and_company_buying_the_same_coin_corroborate(conn):
     for member in ("Member One", "Member Two"):
         add_house_txn(conn, "CRYPTO:BTC", member, "$250,001 - $500,000",
                       date=(TODAY - dt.timedelta(days=3)).strftime("%m/%d/%Y"))
-    _add_treasury(conn, 100)
+    _add_treasury(conn, 1_000)
     sigs = cluster.find_house_clusters(conn) + cluster.find_treasury_signals(conn)
     cluster.find_corroboration(conn, sigs)
     assert {s.source: s.corroborated_by for s in sigs} == {
         "HOUSE": ["CRYPTO_TREASURY"], "CRYPTO_TREASURY": ["HOUSE"]}
 
 
+def test_a_caution_does_not_corroborate_a_buy(conn):
+    db.journal_signal(conn, {"source": "CRYPTO_ETF", "kind": "etf_flow", "ticker": "CRYPTO:BTC",
+                             "tier": "caution"})
+    db.journal_signal(conn, {"source": "HOUSE", "kind": "cluster", "ticker": "CRYPTO:BTC"})
+    _add_treasury(conn, 1_000)
+    [sig] = cluster.find_treasury_signals(conn)
+    cluster.find_corroboration(conn, [sig])
+    assert sig.corroborated_by == ["HOUSE"]
+
+
 @pytest.mark.parametrize("html", [False, True])
 def test_crypto_signal_formats(conn, html):
-    _add_treasury(conn, 100)
+    _add_treasury(conn, 1_000)
     [sig] = cluster.find_treasury_signals(conn)
     text = telegram_notify.format_any_signal(sig, html=html)
-    assert "КОМПАНИЯ КУПИЛА: CRYPTO:BTC" in text and "100 BTC" in text
+    assert "ПОКУПКИ КОМПАНИЙ ЗА НЕДЕЛЮ: CRYPTO:BTC" in text and "1,000 BTC" in text
     assert "1 крипто" in telegram_notify.format_signals_digest([sig])
 
 
@@ -326,7 +603,7 @@ def test_onchain_alert_says_it_is_not_a_disclosure(conn):
 
 
 def test_crypto_signal_journals_with_its_kind(conn):
-    _add_treasury(conn, 100)
+    _add_treasury(conn, 1_000)
     [sig] = cluster.find_treasury_signals(conn)
     row = bot._signal_features(sig)
     assert (row["source"], row["kind"], row["ticker"]) == ("CRYPTO_TREASURY", "treasury", "CRYPTO:BTC")
@@ -372,3 +649,24 @@ def test_trend_is_cached_between_calls(conn, monkeypatch):
 def test_no_price_history_means_no_trend(conn, monkeypatch):
     _closes(monkeypatch, None)
     assert crypto.price_trend(conn, "BTC") is None and not crypto.trend_confirms(None)
+
+
+def test_falling_price_below_its_average_confirms_a_caution(conn, monkeypatch):
+    _closes(monkeypatch, [100.0] * 20 + [99, 98, 97, 96, 95, 94, 93, 92])
+    assert crypto.trend_confirms_down(crypto.price_trend(conn, "BTC"))
+
+
+def test_rising_price_does_not_confirm_a_caution(conn, monkeypatch):
+    _closes(monkeypatch, [100.0] * 20 + [101, 102, 103, 104, 105, 106, 107, 110])
+    assert not crypto.trend_confirms_down(crypto.price_trend(conn, "BTC"))
+    assert not crypto.trend_confirms_down(None)
+
+
+def test_cautions_are_journaled_and_marked_even_though_never_sent(conn):
+    _add_treasury(conn, 200, side="S")
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    sig.tier = strategy.CAUTION
+    bot._record_cautions(conn, strategy.Selection([], [], True, cautions=[strategy.Tiered(sig, "caution")]))
+    assert conn.execute("SELECT tier, kind, ticker FROM signal_journal").fetchall() == [
+        ("caution", "treasury", "CRYPTO:BTC")]
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []

@@ -8,8 +8,13 @@ first of:
   insider_sell  one of the insiders behind the "Сильный" signal it came from sells
                 after the open date -- Form 4 (not a 10b5-1 planned sale), a Form 144
                 notice of intent, or a sale row from Oslo, FI or BaFin;
+  caution       (coins) a caution signal on the coin -- ETF outflows, a company
+                selling, coins moving onto exchanges -- journaled in the last
+                CAUTION_LOOKBACK_DAYS and not before the open date, and the price
+                confirms it: down over 7 days and below the 20-day average;
   time          EXIT_MAX_DAYS held -- the horizon insider-buying research looks at;
-  stop_loss     the last close is EXIT_STOP_LOSS_PCT or more below the entry.
+  stop_loss     the last close is EXIT_STOP_LOSS_PCT (stocks) or
+                EXIT_STOP_LOSS_PCT_CRYPTO (coins) or more below the entry.
 
 The alert doesn't close the position; /sold does. The user stays in control.
 """
@@ -25,6 +30,13 @@ import marketcap
 
 EXIT_MAX_DAYS = 90
 EXIT_STOP_LOSS_PCT = 15.0
+# Coins swing far more than stocks: 15% is an ordinary month for bitcoin. A fixed 25%
+# until the volatility-scaled stop (the bottom of the coin's usual monthly range)
+# ships with the range calculation.
+EXIT_STOP_LOSS_PCT_CRYPTO = 25.0
+CAUTION_LOOKBACK_DAYS = 7
+_CAUTION_TEXT = {"etf_flow": "отток из спот-ETF", "treasury": "компания продала монеты",
+                 "exchange_flow": "монеты заводят на биржи"}
 
 # (label, SQL returning (person, sale date) for one issuer key and an ISO since-date).
 # BaFin is handled separately: its dates are DD.MM.YYYY and don't compare as text.
@@ -58,7 +70,7 @@ class Position:
 @dataclass
 class CloseAlert:
     position: Position
-    trigger: str            # insider_sell / time / stop_loss
+    trigger: str            # insider_sell / caution / time / stop_loss
     detail: str
     last_price: float | None
 
@@ -186,9 +198,32 @@ def _insider_sale(conn, pos: Position) -> str | None:
     return None
 
 
-def check_exits(conn, today: dt.date | None = None, price_fn=None) -> list[CloseAlert]:
+def _crypto_caution(conn, pos: Position, today: dt.date, trend_fn) -> str | None:
+    """The newest caution signal on this coin from the last CAUTION_LOOKBACK_DAYS, not
+    before the position opened, when the price confirms it today -- else None."""
+    if not crypto.is_crypto(pos.ticker):
+        return None
+    since = max(pos.opened_at, (today - dt.timedelta(days=CAUTION_LOOKBACK_DAYS)).isoformat())
+    row = conn.execute(
+        "SELECT kind, total_value_eur FROM signal_journal WHERE ticker = ? AND tier = 'caution' "
+        "AND date(emitted_at) >= ? AND date(emitted_at) <= ? ORDER BY emitted_at DESC, id DESC LIMIT 1",
+        (pos.ticker, since, today.isoformat())).fetchone()
+    if row is None:
+        return None
+    trend = trend_fn(conn, crypto.symbol_of(pos.ticker))
+    if not crypto.trend_confirms_down(trend):
+        return None
+    kind, value = row
+    what = _CAUTION_TEXT.get(kind, "сигнал осторожности") + (f" (€{value / 1e6:,.0f} млн)" if value else "")
+    return (f"{what}; цена подтверждает: {trend['ret_7d']:+.1f}% за 7 дн., "
+            f"ниже 20-дн. средней")
+
+
+def check_exits(conn, today: dt.date | None = None, price_fn=None,
+                trend_fn=None) -> list[CloseAlert]:
     today = today or dt.date.today()
     price_fn = price_fn or last_close
+    trend_fn = trend_fn or crypto.price_trend
     alerts = []
     for pos in open_positions(conn):
         if pos.close_alerted_at:
@@ -198,6 +233,10 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None) -> list[Close
         if sale:
             alerts.append(CloseAlert(pos, "insider_sell", sale, price))
             continue
+        caution = _crypto_caution(conn, pos, today, trend_fn)
+        if caution:
+            alerts.append(CloseAlert(pos, "caution", caution, price))
+            continue
         held = (today - dt.date.fromisoformat(pos.opened_at)).days
         if held >= EXIT_MAX_DAYS:
             alerts.append(CloseAlert(pos, "time", f"{held} дн. в позиции", price))
@@ -205,7 +244,8 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None) -> list[Close
         if price is None:
             print(f"[positions] no price for {pos.ticker}; stop-loss check skipped today")
             continue
-        if price <= pos.entry_price * (1 - EXIT_STOP_LOSS_PCT / 100):
+        stop = EXIT_STOP_LOSS_PCT_CRYPTO if crypto.is_crypto(pos.ticker) else EXIT_STOP_LOSS_PCT
+        if price <= pos.entry_price * (1 - stop / 100):
             change = (price / pos.entry_price - 1) * 100
             alerts.append(CloseAlert(pos, "stop_loss", f"{change:+.1f}% от входа", price))
     return alerts

@@ -5,8 +5,12 @@ Telegram) and are intentionally left as plain text -- untested here since
 they render no markup."""
 from __future__ import annotations
 
+import cluster
 from cluster import ClusterSignal, ExitSignal, StakeSignal
 
+import positions
+import strategy
+import telegram_notify
 import telegram_notify as tn
 
 
@@ -313,3 +317,39 @@ def test_condensed_stock_reply_names_fallback_sources():
     text = tn.format_condensed(_stock_rep(sources={"prices": "TradingView", "news": "Yahoo"}))
     assert "Источники: цены: TradingView (Yahoo недоступен)" in text
     assert "Источники" not in tn.format_condensed(_stock_rep())
+
+
+# --------------------------------------------------------- caution signals
+#
+# format_tiered_digest's ⚠️ Осторожно section: shown only when the caller passes
+# include_cautions=True (the menu's Сигналы view), never in the daily Telegram
+# digest -- see bot._send_digest and the global constraint it's guarding.
+
+def _caution_selection():
+    sig = cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF США, фондов: 12",
+                               False, None, 9e8, "2026-09-24", "2026-09-26",
+                               ["3 дн. подряд оттока, всего $1,050 млн"], None, ["k"])
+    t = strategy.Tiered(sig, strategy.CAUTION,
+                        ["цена подтверждает: BTC -6.2% за 7 дн., ниже 20-дн. средней"], [])
+    return strategy.Selection(strong=[], candidates=[], t212_checked=True, exits=[], cautions=[t])
+
+
+def test_cautions_are_listed_when_the_menu_asks():
+    text = telegram_notify.format_tiered_digest(_caution_selection(), [], html=False,
+                                                include_cautions=True)
+    assert "⚠️ Осторожно (1)" in text and "ОТТОК ИЗ СПОТ-ETF" in text and "цена подтверждает" in text
+    assert "сигналов нет" not in text
+
+
+def test_cautions_are_never_in_the_telegram_digest():
+    text = telegram_notify.format_tiered_digest(_caution_selection(), [])
+    assert "Осторожно" not in text and "ОТТОК" not in text
+
+
+def test_caution_close_alert_reads_as_such():
+    pos = positions.Position(1, "CRYPTO:BTC", "CRYPTO", "2026-09-20", 84_500.0, [], None,
+                             None, None, None)
+    alert = positions.CloseAlert(pos, "caution", "отток из спот-ETF (€900,000,000); цена "
+                                 "подтверждает: -6.2% за 7 дн., ниже 20-дн. средней", 79_900.0)
+    text = telegram_notify.format_close_alert(alert, html=False)
+    assert "CRYPTO:BTC — сигнал осторожности" in text and "отток из спот-ETF" in text
