@@ -327,3 +327,80 @@ def fill_orders(conn, code: str, prices: Prices, today: dt.date) -> None:
         else:
             _fill_buy(conn, code, order, lst[0], lst[1], day, close)
     conn.commit()
+
+
+# ------------------------------------------------------------ stock books
+def stock_signals(selection, book: Book) -> list:
+    """R1: the day's Сильный stock signals. R2: plus Кандидаты scoring R2_MIN_SCORE
+    or more. A CRYPTO: ticker (a congressional crypto buy) never enters a stock book."""
+    sigs = [t.signal for t in selection.strong if not crypto.is_crypto(t.signal.ticker)]
+    if book.buy == "R2":
+        sigs += [t.signal for t in selection.candidates
+                 if not crypto.is_crypto(t.signal.ticker)
+                 and (getattr(t.signal, "score", 0) or 0) >= R2_MIN_SCORE]
+    return sigs
+
+
+def insiders_of(sig) -> list[str]:
+    names = list(getattr(sig, "member_names", None) or [])
+    person = getattr(sig, "person", None)
+    return names or ([person] if person else [])
+
+
+def _buy_reason(sig) -> str:
+    tier = "Сильный" if getattr(sig, "tier", None) == "strong" else "Кандидат"
+    return f"{tier}: {sig.source}, {getattr(sig, 'company', None) or sig.ticker}"
+
+
+def _analyst_target(ticker: str, source: str | None) -> float | None:
+    """The analysts' consensus target when the shadow book buys, or None. Network seam."""
+    try:
+        import research
+        lst = listing(ticker, source)
+        if lst is None:
+            return None
+        raw, _src = research._analyst_raw(assets.stock_asset(lst[0]))
+        view = research.analyst_view(raw, positions.last_close(ticker, source)) if raw else None
+        return view.get("target_mean") if view else None
+    except Exception as e:
+        print(f"[paper] no analyst target for {ticker}: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
+def stock_exit_reason(conn, book: Book, pos: dict, bars: list[tuple[str, float]],
+                      today: dt.date) -> str | None:
+    """The first exit that holds for this book's rules, or None."""
+    hold, stop, take, insider = EXITS[book.exit]
+    if insider:
+        sale = positions._insider_sale(conn, types.SimpleNamespace(
+            ticker=pos["ticker"], opened_at=pos["fill_date"],
+            insiders=json.loads(pos["insiders"] or "[]")))
+        if sale:
+            return f"продаёт инсайдер: {sale}"
+    if book.analyst and pos["target"] and bars and bars[-1][1] >= pos["target"]:
+        return f"цель аналитиков {pos['target']:,.2f} достигнута"
+    if (today - dt.date.fromisoformat(pos["fill_date"])).days >= hold:
+        return f"{hold} дн. в позиции"
+    if pos["last_value"] is None:
+        return None
+    ret = pos["last_value"] / pos["net_eur"] - 1
+    if stop is not None and ret <= stop:
+        return f"стоп {stop:+.0%}"
+    if take is not None and ret >= take:
+        return f"цель {take:+.0%}"
+    return None
+
+
+def stock_step(conn, book: Book, selection, prices: Prices, today: dt.date) -> None:
+    """Sales for every exit that holds, then a buy per new signal: a tenth of the
+    book's value, at most MAX_POSITIONS, half a slice at least."""
+    for pos in open_positions(conn, book.code):
+        reason = stock_exit_reason(conn, book, pos, prices.bars(pos["symbol"]), today)
+        if reason:
+            place_sell(conn, book.code, pos, reason, today)
+    value = book_value(conn, book.code)
+    for sig in stock_signals(selection, book):
+        target = _analyst_target(sig.ticker, sig.source) if book.analyst else None
+        place_buy(conn, book.code, sig.ticker, sig.source, _buy_reason(sig), today, SLICE * value,
+                  max_positions=MAX_POSITIONS, min_fraction=0.5, insiders=insiders_of(sig),
+                  target=target)

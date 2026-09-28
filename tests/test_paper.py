@@ -201,3 +201,101 @@ def test_a_held_or_pending_ticker_is_not_ordered_again(conn):
     assert paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY, 8_000.0,
                            max_positions=10) == "duplicate"
     assert len(paper.orders(conn, code)) == 1
+
+
+# --------------------------------------------------------------- stock books
+def _position(conn, code, ticker="AAA", fill_days_ago=10, net=8_000.0, value=None,
+              insiders=("Jane Doe",), target=None, source="SEC"):
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx, insiders, target, reason, last_value) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (code, ticker, source, ticker, "USD", _days(fill_days_ago), net, net, 100.0, 1.16,
+         json.dumps(list(insiders)), target, "Сильный", value if value is not None else net))
+    conn.commit()
+    return paper.open_positions(conn, code)[-1]
+
+
+def _exit(conn, code, pos, bars=None):
+    return paper.stock_exit_reason(conn, paper.BOOK_BY_CODE[code], pos, bars or [], TODAY)
+
+
+def test_r1_takes_strong_stock_signals_and_r2_adds_high_scoring_candidates():
+    sel = _sel([_sig("AAA"), _sig("CRYPTO:BTC", source="HOUSE")],
+               [_sig("BBB", tier="candidate", score=75), _sig("CCC", tier="candidate", score=60)])
+    assert [s.ticker for s in paper.stock_signals(sel, paper.BOOK_BY_CODE["R1-E1"])] == ["AAA"]
+    assert [s.ticker for s in paper.stock_signals(sel, paper.BOOK_BY_CODE["R2-E1"])] == ["AAA", "BBB"]
+
+
+def test_stock_step_orders_a_tenth_of_the_book_with_the_signals_insiders(conn):
+    code = _book(conn)
+    paper.stock_step(conn, paper.BOOK_BY_CODE[code], _sel([_sig("AAA", members=("Jane Doe", "John Roe"))]),
+                     paper.Prices(Fetch({})), TODAY)
+    [o] = paper.orders(conn, code)
+    assert (o["ticker"], o["side"], o["amount_eur"]) == ("AAA", "buy", 8_000.0)
+    assert json.loads(o["insiders"]) == ["Jane Doe", "John Roe"]
+    assert o["reason"] == "Сильный: SEC, AAA Corp"
+
+
+@pytest.mark.parametrize("code,days,expected", [
+    ("R1-E1", 89, None), ("R1-E1", 90, "90 дн. в позиции"),
+    ("R1-E2", 181, None), ("R1-E2", 182, "182 дн. в позиции"),
+    ("R1-E3", 91, "91 дн. в позиции"), ("R1-E4", 90, "90 дн. в позиции"),
+])
+def test_holding_limits(conn, code, days, expected):
+    _book(conn)
+    assert _exit(conn, code, _position(conn, code, fill_days_ago=days)) == expected
+
+
+@pytest.mark.parametrize("code,value,expected", [
+    ("R1-E1", 6_799.0, "стоп -15%"), ("R1-E1", 10_001.0, None),
+    ("R1-E2", 4_000.0, None),
+    ("R1-E3", 6_799.0, "стоп -15%"),
+    ("R1-E4", 6_799.0, "стоп -15%"), ("R1-E4", 10_001.0, "цель +25%"),
+])
+def test_stops_and_profit_targets(conn, code, value, expected):
+    _book(conn)
+    assert _exit(conn, code, _position(conn, code, value=value)) == expected
+
+
+def test_an_insider_selling_after_the_buy_closes_e1_and_e4_only(conn):
+    _book(conn)
+    add_sec_sale(conn, "AAA", "Jane Doe", 500_000, _days(2))
+    for code, expected in (("R1-E1", True), ("R1-E4", True), ("R1-E2", False), ("R1-E3", False)):
+        reason = _exit(conn, code, _position(conn, code))
+        assert (reason or "").startswith("продаёт инсайдер") is expected
+
+
+def test_an_insider_sale_before_the_buy_does_not_count(conn):
+    _book(conn)
+    add_sec_sale(conn, "AAA", "Jane Doe", 500_000, _days(20))
+    assert _exit(conn, "R1-E1", _position(conn, "R1-E1", fill_days_ago=10)) is None
+
+
+def test_the_shadow_sells_at_the_analyst_target(conn):
+    _book(conn)
+    pos = _position(conn, "R1-E1-AN", target=150.0)
+    assert _exit(conn, "R1-E1-AN", pos, _bars([140, 151])) == "цель аналитиков 150.00 достигнута"
+    assert _exit(conn, "R1-E1-AN", pos, _bars([140, 149])) is None
+
+
+def test_without_a_target_the_shadow_behaves_like_r1_e1(conn):
+    _book(conn)
+    pos = _position(conn, "R1-E1-AN", fill_days_ago=90)
+    assert _exit(conn, "R1-E1-AN", pos, _bars([140, 151])) == "90 дн. в позиции"
+
+
+def test_the_shadow_records_the_target_at_the_buy(conn, monkeypatch):
+    _book(conn)
+    monkeypatch.setattr(paper, "_analyst_target", lambda ticker, source: 150.0)
+    paper.stock_step(conn, paper.BOOK_BY_CODE["R1-E1-AN"], _sel([_sig("AAA")]),
+                     paper.Prices(Fetch({})), TODAY)
+    assert paper.orders(conn, "R1-E1-AN")[0]["target"] == 150.0
+
+
+def test_stock_step_places_a_sale_when_an_exit_holds(conn):
+    _book(conn)
+    _position(conn, "R1-E3", fill_days_ago=91)
+    paper.stock_step(conn, paper.BOOK_BY_CODE["R1-E3"], _sel(), paper.Prices(Fetch({})), TODAY)
+    [o] = paper.orders(conn, "R1-E3")
+    assert (o["side"], o["reason"]) == ("sell", "91 дн. в позиции")
