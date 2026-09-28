@@ -289,6 +289,14 @@ _PAPER_SKIP_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "swe
                      "crypto_only", "min_score", "min_liquidity")
 
 
+def _filtered_run(args) -> bool:
+    """True when a flag limits this run to some sources or scores, so it sees only
+    part of the day's signals -- shared by _run_paper (it then neither trades the
+    books nor starts their clock) and main()'s guard around _record_high_risk (it
+    then must not journal a high-risk signal before a later, full run can find it)."""
+    return any(getattr(args, name, False) for name in _PAPER_SKIP_FLAGS)
+
+
 def _run_paper(conn, selection, args) -> None:
     """The paper portfolio's daily pass (paper.py) -- after the digest, whether or not
     Telegram is on. It trades virtual books only. A crash is reported like a failed
@@ -296,7 +304,7 @@ def _run_paper(conn, selection, args) -> None:
     monthly report goes out (paper_report.py). A run filtered to some sources or
     scores sees only part of the day's signals, so it neither trades the books nor
     starts their clock."""
-    if any(getattr(args, name, False) for name in _PAPER_SKIP_FLAGS):
+    if _filtered_run(args):
         print("[paper] skipped: filtered run")
         return
     if _run_source("PAPER", paper.run, conn, selection) is None:
@@ -640,7 +648,12 @@ def main():
 
         selection = run_cluster_pass(conn, args)
         _record_cautions(conn, selection)
-        _record_high_risk(conn, selection)
+        # A filtered run (--sec-only, --min-score, ...) sees only part of the day's
+        # signals -- journalling here would mark a high-risk signal alerted before a
+        # later, full run ever sees it, and the paper books (which also skip a
+        # filtered run, see _run_paper) would never get to buy it.
+        if not _filtered_run(args):
+            _record_high_risk(conn, selection)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))

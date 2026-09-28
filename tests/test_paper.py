@@ -619,6 +619,16 @@ def test_bot_skips_the_paper_pass_on_a_filtered_run(conn, monkeypatch, capsys):
     assert calls == [1]
 
 
+def test_filtered_run_is_true_for_any_skip_flag_and_false_for_a_plain_run():
+    """bot._filtered_run -- the same condition _run_paper skips on, extracted so
+    main() can also skip journalling a high-risk signal on a filtered run (K3):
+    otherwise the next full run would never see it again."""
+    import bot
+    assert bot._filtered_run(types.SimpleNamespace()) is False
+    assert bot._filtered_run(types.SimpleNamespace(sec_only=True)) is True
+    assert bot._filtered_run(types.SimpleNamespace(min_score=35)) is True
+
+
 def test_a_failing_monthly_report_does_not_escape_the_paper_pass(conn, monkeypatch):
     import bot
     import paper_report
