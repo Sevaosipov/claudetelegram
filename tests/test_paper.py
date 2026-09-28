@@ -157,6 +157,23 @@ def test_value_follows_the_adjusted_close_and_the_currency(conn):
     assert paper.book_value(conn, code) == pytest.approx(72_000 + p["net_eur"] * 1.25)
 
 
+def test_a_position_held_past_the_usual_history_is_still_valued_and_sold(conn):
+    code = _book(conn, "C-B")
+    pos = _coin_position(conn, code, "BTC", fill_days_ago=500)      # entry close 100
+    asked = []
+
+    def fetch(symbol, days):
+        asked.append(days)
+        return _bars([100.0] * 598 + [140.0, 150.0]) if days >= 530 else _bars([150.0] * days)
+    paper.mark_to_market(conn, code, paper.Prices(fetch), TODAY)
+    assert paper.open_positions(conn, code)[0]["last_value"] == pytest.approx(15_000.0)
+    paper.place_sell(conn, code, pos, "ниже 200-дн. средней", TODAY - dt.timedelta(days=2))
+    paper.fill_orders(conn, code, paper.Prices(fetch), TODAY)       # at TODAY-1's 140
+    [closed] = paper.closed_positions(conn, code)
+    assert closed["proceeds_eur"] == pytest.approx(14_000.0 * (1 - 0.005))
+    assert asked == [530, 530]
+
+
 def test_a_sale_fills_at_the_next_close_and_pays_the_fee(conn):
     code = _book(conn)
     paper.place_buy(conn, code, "AAA", "SEC", "Сильный", TODAY - dt.timedelta(days=4),

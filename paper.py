@@ -220,10 +220,18 @@ def position_value(pos: dict, bars: list[tuple[str, float]], fx_now: float) -> f
     return pos["net_eur"] * (bars[-1][1] / entry) * (pos["entry_fx"] / fx_now)
 
 
-def mark_to_market(conn, code: str, prices: Prices) -> None:
+def history_days(fill_date: str, today: dt.date) -> int:
+    """Days of history that reach back past a position's fill day: a position held
+    longer than PRICE_DAYS (C-B has no time limit) would otherwise lose its entry close."""
+    return max(PRICE_DAYS, (today - dt.date.fromisoformat(fill_date)).days + 30)
+
+
+def mark_to_market(conn, code: str, prices: Prices, today: dt.date | None = None) -> None:
     """Revalue every open position; one with no price keeps its last value."""
+    today = today or dt.date.today()
     for p in open_positions(conn, code):
-        value = position_value(p, prices.bars(p["symbol"]), fx.per_eur(p["currency"], conn))
+        bars = prices.bars(p["symbol"], history_days(p["fill_date"], today))
+        value = position_value(p, bars, fx.per_eur(p["currency"], conn))
         if value is not None:
             conn.execute("UPDATE paper_positions SET last_value = ? WHERE id = ?", (value, p["id"]))
     conn.commit()
@@ -342,7 +350,12 @@ def fill_orders(conn, code: str, prices: Prices, today: dt.date) -> None:
     last value."""
     for order in sorted(pending_orders(conn, code), key=lambda o: (o["side"] != "sell", o["id"])):
         lst = listing(order["ticker"], order["source"])
-        bars = prices.bars(lst[0]) if lst else []
+        days = PRICE_DAYS
+        if order["side"] == "sell":
+            (fill_date,) = conn.execute("SELECT fill_date FROM paper_positions WHERE id = ?",
+                                        (order["position_id"],)).fetchone()
+            days = history_days(fill_date, today)
+        bars = prices.bars(lst[0], days) if lst else []
         nxt = first_close_after(bars, order["created"])
         if nxt is None:
             if business_days_between(order["created"], today) > ORDER_MAX_BUSINESS_DAYS:
@@ -556,7 +569,7 @@ def run(conn, selection, today: dt.date | None = None, fetch=None, trend_fn=None
     for book in BOOKS:
         try:
             fill_orders(conn, book.code, prices, today)
-            mark_to_market(conn, book.code, prices)
+            mark_to_market(conn, book.code, prices, today)
             if book.sleeve == "stock":
                 stock_step(conn, book, selection, prices, today)
             else:
