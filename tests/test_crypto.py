@@ -4,8 +4,10 @@ the parser tests read excerpts of real filings saved in tests/fixtures/."""
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
+import requests
 
 import bot
 import cluster
@@ -178,6 +180,85 @@ def test_backfill_command(conn, monkeypatch):
     monkeypatch.setattr(db, "connect", lambda path: conn)
     monkeypatch.setattr("cik_map.CikMap", lambda: None)
     assert ct.main(["--backfill", "365"]) == 0 and got["days"] == 365
+
+
+# ------------------------------------------------------ treasury: retries
+_HIT = {"_id": "0001-26-1:ex99.htm", "_source": {
+    "ciks": ["0001829311"], "display_names": ["BITMINE  (BMNR)  (CIK 0001829311)"],
+    "file_date": "2026-09-21", "form": "8-K"}}
+
+
+def _resp(status, body=""):
+    """A real requests.Response, so raise_for_status behaves as it does live."""
+    r = requests.Response()
+    r.status_code = status
+    r._content = (body if isinstance(body, str) else json.dumps(body)).encode()
+    r.encoding = "utf-8"
+    r.url = "https://example.test/"
+    return r
+
+
+class _Session:
+    """Answers each GET with the next queued reply, raising it if it is an exception."""
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), 0
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+@pytest.fixture
+def sleeps(monkeypatch):
+    """Every pause the scanner takes, recorded instead of waited out."""
+    got = []
+    monkeypatch.setattr(ct.time, "sleep", got.append)
+    return got
+
+
+def test_efts_search_retries_a_transient_server_error(sleeps):
+    session = _Session(_resp(500), _resp(200, {"hits": {"hits": [_HIT]}}),   # bitcoin
+                       _resp(200, {"hits": {"hits": []}}))                   # ether
+    assert ct.search(dt.date(2026, 9, 15), dt.date(2026, 9, 21), session) == [_HIT]
+    # The retry waits first; the fair-access pause still follows every answered request.
+    assert sleeps == [ct.RETRY_PAUSES_SECONDS[0], ct.REQUEST_PAUSE_SECONDS,
+                      ct.REQUEST_PAUSE_SECONDS]
+
+
+@pytest.mark.parametrize("failure", [
+    _resp(500), _resp(429), _resp(503), requests.ConnectionError("reset"),
+    requests.Timeout("read timed out"),
+])
+def test_document_fetch_retries_a_transient_failure(failure, sleeps, monkeypatch):
+    monkeypatch.setattr(ct, "search", lambda start, end, session: [_HIT])
+    session = _Session(failure, _resp(200, "Over the past week, we acquired 27,562 ETH."))
+    [(doc_id, txns)] = ct.scan_new_filings(dt.date(2026, 9, 15), dt.date(2026, 9, 21),
+                                           set(), session=session)
+    assert doc_id == _HIT["_id"] and [t.units for t in txns] == [27_562]
+    assert sleeps == [ct.RETRY_PAUSES_SECONDS[0], ct.REQUEST_PAUSE_SECONDS]
+
+
+def test_a_missing_document_is_not_retried(sleeps, monkeypatch):
+    monkeypatch.setattr(ct, "search", lambda start, end, session: [_HIT])
+    session = _Session(_resp(404))
+    assert list(ct.scan_new_filings(dt.date(2026, 9, 15), dt.date(2026, 9, 21), set(),
+                                    session=session)) == [(_HIT["_id"], [])]
+    assert session.calls == 1 and sleeps == [ct.REQUEST_PAUSE_SECONDS]
+
+
+@pytest.mark.parametrize("failure,raised", [
+    (_resp(500), requests.HTTPError), (requests.ConnectionError("reset"), requests.ConnectionError),
+])
+def test_a_persistent_failure_still_raises(failure, raised, sleeps):
+    """So bot._run_source reports the source as failed rather than as quiet."""
+    session = _Session(failure, failure, failure)
+    with pytest.raises(raised):
+        ct.search(dt.date(2026, 9, 15), dt.date(2026, 9, 21), session)
+    assert session.calls == 3
+    assert sleeps == list(ct.RETRY_PAUSES_SECONDS)
 
 
 # ------------------------------------------------------ treasury: signals
