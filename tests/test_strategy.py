@@ -517,6 +517,15 @@ def test_a_ceo_buying_alone_is_found_by_the_lower_threshold_pass(conn, sized):
     assert t.signal.ticker == "BBB" and "CEO купил 0,15% компании" in t.met
 
 
+def test_a_cfo_buying_alone_qualifies(conn, sized):
+    _small(sized)
+    _buy(conn, "BBB", "Pat Money", usd=139_200, officer=1, director=0,
+         title="Chief Financial Officer")            # €120k = 0.12% of €100M
+    sel = _select_all(conn)
+    [t] = sel.high_risk
+    assert t.signal.ticker == "BBB" and "CFO купил 0,12% компании" in t.met
+
+
 def test_a_lone_director_is_not_high_risk(conn, sized):
     _small(sized, cap=80e6)
     _buy(conn, "BBB", "Dee Rector", usd=139_200)
@@ -551,13 +560,59 @@ def test_politicians_are_not_high_risk(conn, sized):
     assert _hr(_select(conn)) == set()
 
 
-def test_trading212_and_recency_apply_to_high_risk(conn, sized):
+def test_a_coin_is_never_high_risk(conn, sized, monkeypatch):
+    """High-risk is a small-cap stock rule -- neither a congressional crypto buy
+    (a ClusterSignal with a CRYPTO: ticker) nor a CryptoSignal (ETF inflow,
+    treasury buy, on-chain flow) may ever land in .high_risk."""
+    _small(sized)
+    date = (TODAY - dt.timedelta(days=1)).strftime("%m/%d/%Y")
+    for m in ("One", "Two"):
+        add_house_txn(conn, "CRYPTO:BTC", m, "$250,001 - $500,000", date=date)
+    assert _hr(_select(conn)) == set()
+
+    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
+    assert strategy.select(conn, [_etf()], _T212()).high_risk == []
+
+
+def test_an_oslo_cluster_buying_0_1_percent_qualifies_under_rule_one(conn, sized):
+    """Oslo filings carry no insider rank -- find_norway_clusters tags every buyer
+    role "insider" (cluster.roles.Buyer), so rule (2) (a CEO/CFO/Chair among the
+    buyers) can never fire for a Norway cluster; only rule (1) (2+ insiders buying
+    a combined HIGH_RISK_MIN_PCT_OF_MCAP) can qualify it."""
+    _small(sized)
+    for i, person in enumerate(("A Person", "B Person")):
+        conn.execute(
+            "INSERT INTO norway_purchases (message_id, person, issuer_name, ticker, txn_type, "
+            "txn_date, shares, price, currency, value, source_url) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (900 + i, person, "Test ASA", "AAA", "P", RECENT, 1000, 100.0, "NOK", 644_400, "u"))
+    conn.commit()
+    [sig] = cluster.find_norway_clusters(conn)
+    assert [b.role for b in sig.buyers] == ["insider", "insider"]
+    sel = strategy.select(conn, [sig], _T212())
+    assert _hr(sel) == {"AAA"}
+    [t] = sel.high_risk
+    assert "2 инсайдера(ов) купили вместе 0,12% компании" in t.met
+
+
+def test_trading212_drops_a_qualifying_high_risk_signal(conn, sized):
     _small(sized)
     for o in ("A", "B"):
-        _buy(conn, "AAA", o, usd=69_600)
-        add_sec_purchase(conn, "OLD", o, 69_600, (TODAY - dt.timedelta(days=20)).isoformat(),
-                         filed_date=(TODAY - dt.timedelta(days=10)).isoformat())
+        _buy(conn, "AAA", o, usd=69_600)            # €60k each: €120k = 0.12% of €100M
     assert _hr(_select_all(conn, _T212(missing={"AAA"}))) == set()
+
+
+def test_high_risk_recency_is_measured_from_the_filing_not_the_trade(conn, sized):
+    """Traded about 8 days ago -- inside find_sec_clusters' 14-day window, so the
+    cluster is found at all -- but filed 5 days ago, outside the 3-day recency
+    select() applies. (The version of this test that traded 20 days ago put the
+    trade outside the cluster finder's own window, so no signal was ever produced
+    for it and the recency filter was never actually exercised.)"""
+    _small(sized)
+    traded = (TODAY - dt.timedelta(days=8)).isoformat()
+    filed = (TODAY - dt.timedelta(days=5)).isoformat()
+    for o in ("A", "B"):
+        add_sec_purchase(conn, "AAA", o, 69_600, traded, filed_date=filed)
+    assert _hr(_select_all(conn)) == set()
 
 
 def test_the_lower_threshold_pass_uses_its_own_bars(conn, monkeypatch):

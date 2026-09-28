@@ -153,6 +153,12 @@ def test_cli_shows_a_book_and_rejects_an_unknown_one(conn, monkeypatch, capsys):
     assert paper.main(["X-9"]) == 2 and "Нет такой книги" in capsys.readouterr().out
 
 
+def test_cli_shows_a_high_risk_book(conn, monkeypatch, capsys):
+    _start(conn, 10)
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    assert paper.main(["H1"]) == 0 and "H1" in capsys.readouterr().out
+
+
 def test_menu_shows_the_paper_portfolio(conn, capsys):
     import menu
     _start(conn, 10)

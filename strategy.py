@@ -43,9 +43,10 @@ HIGH_RISK_MIN_PCT_OF_MCAP = 0.1         # percent of market value
 HIGH_RISK_MIN_INSIDERS = 2
 HIGH_RISK_SOURCES = ("SEC", "NORWAY")
 # The finders' own bars (€100k cluster total, €500k solo) were set for large
-# companies; a small company's 0.1% can be €50k. A second, lower-threshold pass
-# feeds only the high-risk rule -- its extra signals never get a main tier.
-HIGH_RISK_FINDER_MIN_EUR = 50_000
+# companies; a small company's 0.1% can be as little as HIGH_RISK_MIN_MCAP_EUR's
+# own 0.1% -- €50k. A second, lower-threshold pass feeds only the high-risk rule
+# -- its extra signals never get a main tier.
+HIGH_RISK_FINDER_MIN_EUR = HIGH_RISK_MIN_MCAP_EUR * HIGH_RISK_MIN_PCT_OF_MCAP / 100
 
 STRONG, CANDIDATE, CAUTION, HIGH_RISK = "strong", "candidate", "caution", "high_risk"
 _ROLE_LABEL = {"ceo": "CEO", "cfo": "CFO", "chair": "Chair"}

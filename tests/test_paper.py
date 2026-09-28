@@ -63,6 +63,7 @@ def test_book_labels():
     assert paper.BOOK_BY_CODE["R2-E3"].label == "R2·E3"
     assert paper.BOOK_BY_CODE["R1-E1-AN"].label == "R1·E1+аналитики"
     assert paper.BOOK_BY_CODE["C-A"].label == "C-A"
+    assert paper.BOOK_BY_CODE["H1"].label == "H1"
 
 
 @pytest.mark.parametrize("ticker,source,expected", [

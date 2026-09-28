@@ -205,6 +205,8 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
         print(f"[{t.tier}] " + telegram_notify.format_any_signal(t.signal))
     for t in selection.cautions:
         print("[caution] " + telegram_notify.format_any_signal(t.signal))
+    for t in selection.high_risk:
+        print("[high_risk] " + telegram_notify.format_any_signal(t.signal))
     return selection
 
 
@@ -668,7 +670,8 @@ def main():
         db.save_cached_value(conn, "last_successful_run", time.time())
 
         print(f"--- poll finished, {total_new} new purchase(s), {signal_count} signal(s), "
-              f"{len(closes)} close alert(s), took {time.time()-started:.1f}s ---")
+              f"{len(selection.high_risk)} high-risk, {len(closes)} close alert(s), "
+              f"took {time.time()-started:.1f}s ---")
 
         if args.once:
             break

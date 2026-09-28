@@ -82,8 +82,8 @@ BOOKS = tuple(
     + [Book("R1-E1-AN", "stock", "R1", "E1", analyst=True),
        Book("C-A", "crypto", rule="A"),
        Book("C-B", "crypto", rule="B"),
-       Book("H1", "small", "H", "H1"),
-       Book("H2", "small", "H", "H2")])
+       Book("H1", "small", None, "H1"),
+       Book("H2", "small", None, "H2")])
 BOOK_BY_CODE = {b.code: b for b in BOOKS}
 
 
