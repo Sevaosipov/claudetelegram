@@ -52,10 +52,11 @@ def test_books_are_created_once_with_their_money(conn):
     paper.create_books(conn, TODAY + dt.timedelta(days=1))
     rows = conn.execute("SELECT code, sleeve, start_date, start_eur, cash_eur, bench_symbol "
                         "FROM paper_books").fetchall()
-    assert len(rows) == 11
+    assert len(rows) == 13
     assert ("R1-E1", "stock", TODAY.isoformat(), 80_000.0, 80_000.0, "SPY") in rows
     assert ("R1-E1-AN", "stock", TODAY.isoformat(), 80_000.0, 80_000.0, "SPY") in rows
     assert ("C-B", "crypto", TODAY.isoformat(), 20_000.0, 20_000.0, "BTC-USD") in rows
+    assert ("H1", "small", TODAY.isoformat(), 20_000.0, 20_000.0, "IWM") in rows
 
 
 def test_book_labels():
@@ -529,7 +530,7 @@ def test_run_opens_books_places_orders_and_fills_them_at_the_next_completed_clos
                                  "AAA": _live(_bars([100, 100], day0), day1),
                                  "BTC-USD": _live(_trend_bars(110, day0), day1),
                                  "ETH-USD": _live(_trend_bars(90, day0), day1)},    # 999 open: no buy
-                    _sel([_sig("AAA")])) == 11
+                    _sel([_sig("AAA")])) == 13
     assert [o["status"] for o in paper.orders(conn, "R1-E1")] == ["pending"]
     _run_day(conn, day3, {"SPY": _live(_bars([500, 505, 505, 510], day2), day3),
                           "AAA": _live(_bars([100, 100, 100, 120], day2), day3),
@@ -575,7 +576,7 @@ def test_one_failing_book_does_not_stop_the_others(conn, monkeypatch):
             raise RuntimeError("bad")
         return real(conn, book, *a, **k)
     monkeypatch.setattr(paper, "crypto_step", boom)
-    assert _run_day(conn, TODAY, {}) == 10
+    assert _run_day(conn, TODAY, {}) == 12
 
 
 def test_bot_warns_when_the_paper_pass_fails(conn, monkeypatch):
@@ -627,3 +628,47 @@ def test_a_failing_monthly_report_does_not_escape_the_paper_pass(conn, monkeypat
         raise RuntimeError("report")
     monkeypatch.setattr(paper_report, "maybe_send_monthly_report", boom)
     bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=False))    # no exception
+
+
+# ------------------------------------------------------- small-company books
+def _hr_sel(*sigs):
+    return strategy.Selection(strong=[], candidates=[], t212_checked=True,
+                              high_risk=[strategy.Tiered(s, "high_risk") for s in sigs])
+
+
+def test_small_books_buy_only_high_risk_signals(conn):
+    sel = strategy.Selection(strong=[strategy.Tiered(_sig("AAA"), "strong")], candidates=[],
+                             t212_checked=True,
+                             high_risk=[strategy.Tiered(_sig("SML", tier="high_risk"), "high_risk")])
+    assert [s.ticker for s in paper.stock_signals(sel, paper.BOOK_BY_CODE["H1"])] == ["SML"]
+    assert [s.ticker for s in paper.stock_signals(sel, paper.BOOK_BY_CODE["R1-E1"])] == ["AAA"]
+
+
+def test_small_books_buy_a_fifth_and_hold_five(conn):
+    _book(conn)
+    sigs = [_sig(f"S{i}", tier="high_risk") for i in range(6)]
+    paper.stock_step(conn, paper.BOOK_BY_CODE["H1"], _hr_sel(*sigs), paper.Prices(Fetch({})), TODAY)
+    orders = paper.orders(conn, "H1")
+    assert [o["amount_eur"] for o in orders if o["status"] == "pending"] == [4_000.0] * 5
+    assert [o["note"] for o in orders if o["status"] == "skipped"] == ["мест нет"]
+
+
+@pytest.mark.parametrize("code,days,value,expected", [
+    ("H1", 181, 1_000.0, None), ("H1", 182, 4_000.0, "182 дн. в позиции"),
+    ("H2", 91, 4_000.0, "91 дн. в позиции"), ("H2", 10, 2_799.0, "стоп -30%"),
+    ("H2", 10, 6_001.0, "цель +50%"), ("H2", 10, 3_000.0, None),
+])
+def test_small_book_exits(conn, code, days, value, expected):
+    _book(conn)
+    pos = _position(conn, code, fill_days_ago=days, net=4_000.0, value=value)
+    assert _exit(conn, code, pos) == expected
+
+
+def test_run_trades_the_small_books_against_iwm(conn):
+    day1 = TODAY - dt.timedelta(days=1)
+    before = day1 - dt.timedelta(days=1)       # run() only uses bars dated before its day
+    _run_day(conn, day1, {"IWM": _bars([200, 210], before), "SML": _bars([10, 10], before)},
+             _hr_sel(_sig("SML", tier="high_risk")))
+    assert [o["ticker"] for o in paper.orders(conn, "H1")] == ["SML"]
+    assert conn.execute("SELECT bench FROM paper_equity WHERE book = 'H1'").fetchone()[0] == \
+        pytest.approx(20_000.0)

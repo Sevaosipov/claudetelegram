@@ -9,7 +9,8 @@ import db
 import paper
 import telegram_notify
 
-_BENCH_NAME = {"stock": "S&P 500", "crypto": "BTC"}
+_BENCH_NAME = {"stock": "S&P 500", "crypto": "BTC", "small": "Russell 2000"}
+_GROUPS = (("stock", "АКЦИИ"), ("crypto", "КРИПТО"), ("small", "ВЫСОКИЙ РИСК"))
 _REPORT_KEY_TTL = 40 * 86400
 
 
@@ -53,7 +54,7 @@ def stats(conn, book: paper.Book, today: dt.date) -> dict:
         status = "тень"
     elif day < paper.SUCCESS_DAYS:
         status = "идёт"
-    elif book.sleeve == "stock" and trades < paper.MIN_STOCK_TRADES:
+    elif book.sleeve in ("stock", "small") and trades < paper.MIN_STOCK_TRADES:
         # A stock book turns a slot over only about twice in 182 days, so the verdict
         # waits for the trade minimum rather than failing on the count alone.
         status = f"идёт (сделок {trades} из {paper.MIN_STOCK_TRADES})"
@@ -84,15 +85,21 @@ def format_summary(conn, today: dt.date, *, monthly: bool = False, html: bool = 
     day = (f"день {first['day']} из {paper.SUCCESS_DAYS}" if first["day"] <= paper.SUCCESS_DAYS
            else f"день {first['day']} (итог — после {paper.SUCCESS_DAYS} дней)")
     lines = [telegram_notify._b(f"Бумажный портфель — {day} (с {start})", html)]
-    for sleeve, title in (("stock", "АКЦИИ"), ("crypto", "КРИПТО")):
-        books = [b for b in paper.BOOKS if b.sleeve == sleeve]
+    for sleeve, title in _GROUPS:
+        # A book added to the code after the database was created exists only from
+        # the next run on -- leave it out until then.
+        books = [b for b in paper.BOOKS if b.sleeve == sleeve and _book_row(conn, b.code)]
+        if not books:
+            continue
         head = stats(conn, books[0], today)
+        since = ("" if head["start"] == first["start"]
+                 else f", с {dt.date.fromisoformat(head['start']).strftime('%d.%m.%Y')}")
         month = (f", за месяц {_pct(_month_return(conn, books[0].code, today, 'bench'))}"
                  if monthly else "")
         lines.append("")
         lines.append(telegram_notify._b(
             f"{title} ({_BENCH_NAME[sleeve]}: {_pct(head['bench_ret'])}, "
-            f"худшая просадка {_pct(head['bench_dd'])}{month})", html))
+            f"худшая просадка {_pct(head['bench_dd'])}{month}{since})", html))
         rows = []
         for b in books:
             s = stats(conn, b, today)
