@@ -468,15 +468,16 @@ def crypto_step(conn, book: Book, selection, prices: Prices, today: dt.date, tre
                 place_buy(conn, book.code, ticker, "CRYPTO", "Сильный крипто-сигнал", today, share,
                           min_fraction=0.0)
             continue
+        # None = too little history to tell: a held coin stays, and only a signal buys.
         trend = above_trend(prices.bars(listing(ticker, "CRYPTO")[0]))
         recent = coin in signalled or _recent_strong(conn, coin, today)
         if pos:
             caution = _caution(conn, pos, today, trend_fn)
             if caution:
                 place_sell(conn, book.code, pos, caution, today)
-            elif not trend and not recent:
+            elif trend is False and not recent:
                 place_sell(conn, book.code, pos, "ниже 200-дн. средней", today)
-        elif (trend or recent) and not _rebuy_blocked(conn, book.code, coin, today):
+        elif (trend is True or recent) and not _rebuy_blocked(conn, book.code, coin, today):
             reason = "выше 200-дн. средней" if trend else "Сильный крипто-сигнал"
             place_buy(conn, book.code, ticker, "CRYPTO", reason, today, share, min_fraction=0.0)
 

@@ -390,6 +390,18 @@ def test_c_b_sells_below_the_average(conn):
     assert (o["side"], o["reason"]) == ("sell", "ниже 200-дн. средней")
 
 
+def test_c_b_keeps_a_held_coin_when_its_trend_is_unknown(conn):
+    _book(conn)
+    _coin_position(conn, "C-B", "BTC")
+    assert _crypto(conn, "C-B", series={}) == []                      # no series at all
+
+
+def test_c_b_does_not_buy_on_a_short_series(conn):
+    _book(conn)
+    short = {"BTC-USD": _bars([100.0] * 49 + [150.0]), "ETH-USD": _bars([100.0] * 49 + [150.0])}
+    assert _crypto(conn, "C-B", series=short) == []
+
+
 def test_c_b_keeps_a_coin_for_30_days_after_a_strong_signal(conn):
     _book(conn)
     _coin_position(conn, "C-B", "BTC")
