@@ -110,20 +110,27 @@ def _closes(symbol: str, days: int) -> list[tuple[str, float]]:
 
 
 class Prices:
-    """Each (symbol, days) fetched once per run; a failing fetch is an empty series."""
+    """Each (symbol, days) fetched once per run; a failing fetch is an empty series.
+    With `today`, only completed bars count: Yahoo, Binance and Bybit return the
+    current day as a bar still in progress, and a fill or a value on it would differ
+    from that day's final close."""
 
-    def __init__(self, fetch=None):
+    def __init__(self, fetch=None, today: dt.date | None = None):
         self._fetch = fetch or _closes
+        self._cutoff = today.isoformat() if today else None
         self._cache: dict[tuple[str, int], list[tuple[str, float]]] = {}
 
     def bars(self, symbol: str, days: int = PRICE_DAYS) -> list[tuple[str, float]]:
         key = (symbol, days)
         if key not in self._cache:
             try:
-                self._cache[key] = list(self._fetch(symbol, days) or [])
+                bars = list(self._fetch(symbol, days) or [])
             except Exception as e:
                 print(f"[paper] no prices for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
-                self._cache[key] = []
+                bars = []
+            if self._cutoff:
+                bars = [b for b in bars if b[0] < self._cutoff]
+            self._cache[key] = bars
         return self._cache[key]
 
 
@@ -521,7 +528,7 @@ def run(conn, selection, today: dt.date | None = None, fetch=None, trend_fn=None
     today = today or dt.date.today()
     trend_fn = trend_fn or crypto.price_trend
     create_books(conn, today)
-    prices = Prices(fetch)
+    prices = Prices(fetch, today)
     ran = 0
     for book in BOOKS:
         try:

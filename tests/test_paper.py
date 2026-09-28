@@ -95,6 +95,12 @@ def test_prices_are_fetched_once_and_a_failure_is_empty():
     assert p.bars("BAD") == [] and calls == ["AAA", "BAD"]
 
 
+def test_prices_with_a_date_keep_only_completed_bars():
+    series = {"AAA": _bars([100, 110, 120])}                          # ... TODAY-1, TODAY
+    assert paper.Prices(Fetch(series), today=TODAY).bars("AAA") == [(_days(2), 100.0), (_days(1), 110.0)]
+    assert paper.Prices(Fetch(series)).bars("AAA") == series["AAA"]   # without a date: every bar
+
+
 def test_series_helpers():
     bars = [("2026-10-01", 10.0), ("2026-10-02", 11.0), ("2026-10-05", 12.0)]
     assert paper.close_on_or_before(bars, "2026-10-03") == 11.0
@@ -438,25 +444,49 @@ def _run_day(conn, day, series, selection=None):
                      trend_fn=lambda c, s: None)
 
 
-def test_run_opens_books_places_orders_and_fills_them_the_next_day(conn, monkeypatch):
+def _live(bars, day, partial=999.0):
+    """`bars` (completed) plus `day`'s still-open bar, which a run on `day` must never use."""
+    return bars + [(day.isoformat(), float(partial))]
+
+
+def test_run_opens_books_places_orders_and_fills_them_at_the_next_completed_close(conn, monkeypatch):
     monkeypatch.setattr(paper, "_analyst_target", lambda ticker, source: None)   # the shadow's network seam
-    day1, day2 = TODAY - dt.timedelta(days=1), TODAY
-    assert _run_day(conn, day1, {"SPY": _bars([500, 505], day1), "AAA": _bars([100, 100], day1),
-                                 "BTC-USD": _trend_bars(110, day1), "ETH-USD": _trend_bars(90, day1)},
+    day1, day3 = TODAY - dt.timedelta(days=2), TODAY
+    day0, day2 = day1 - dt.timedelta(days=1), day3 - dt.timedelta(days=1)
+    assert _run_day(conn, day1, {"SPY": _live(_bars([500, 505], day0), day1),
+                                 "AAA": _live(_bars([100, 100], day0), day1),
+                                 "BTC-USD": _live(_trend_bars(110, day0), day1),
+                                 "ETH-USD": _live(_trend_bars(90, day0), day1)},    # 999 open: no buy
                     _sel([_sig("AAA")])) == 11
     assert [o["status"] for o in paper.orders(conn, "R1-E1")] == ["pending"]
-    _run_day(conn, day2, {"SPY": _bars([500, 505, 510], day2), "AAA": _bars([100, 100, 120], day2),
-                          "BTC-USD": _trend_bars(110, day2), "ETH-USD": _trend_bars(90, day2)})
+    _run_day(conn, day3, {"SPY": _live(_bars([500, 505, 505, 510], day2), day3),
+                          "AAA": _live(_bars([100, 100, 100, 120], day2), day3),
+                          "BTC-USD": _live(_trend_bars(110, day2), day3),
+                          "ETH-USD": _live(_trend_bars(90, day2), day3)})
     [p] = paper.open_positions(conn, "R1-E1")
     assert p["fill_date"] == day2.isoformat() and p["entry_close"] == 120.0
     rows = conn.execute("SELECT date, value, cash, bench FROM paper_equity WHERE book = 'R1-E1' "
                         "ORDER BY date").fetchall()
-    assert [r[0] for r in rows] == [day1.isoformat(), day2.isoformat()]
+    assert [r[0] for r in rows] == [day1.isoformat(), day3.isoformat()]
     assert rows[0][1] == pytest.approx(80_000.0) and rows[0][3] == pytest.approx(80_000.0)
     assert rows[1][1] == pytest.approx(72_000.0 + p["net_eur"])
     assert rows[1][3] == pytest.approx(80_000.0 * 510 / 505)
     [btc] = paper.open_positions(conn, "C-B")
     assert btc["ticker"] == "CRYPTO:BTC"
+
+
+def test_a_crypto_buy_waits_for_the_next_close_to_complete(conn):
+    d = TODAY - dt.timedelta(days=2)
+    d1, d2 = d + dt.timedelta(days=1), d + dt.timedelta(days=2)
+    _run_day(conn, d, {"BTC-USD": _live(_bars([100, 100], d - dt.timedelta(days=1)), d, 105)},
+             _sel([_coin_sig("BTC")]))
+    assert [(o["side"], o["status"]) for o in paper.orders(conn, "C-A")] == [("buy", "pending")]
+    _run_day(conn, d1, {"BTC-USD": _live(_bars([100, 100, 104], d), d1, 115)})    # D+1 still open
+    assert [o["status"] for o in paper.orders(conn, "C-A")] == ["pending"]
+    assert paper.open_positions(conn, "C-A") == []
+    _run_day(conn, d2, {"BTC-USD": _live(_bars([100, 100, 104, 120], d1), d2, 130)})
+    [p] = paper.open_positions(conn, "C-A")
+    assert (p["fill_date"], p["entry_close"]) == (d1.isoformat(), 120.0)     # D+1's final close
 
 
 def test_a_book_without_a_benchmark_price_stores_no_benchmark(conn):
