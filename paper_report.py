@@ -45,9 +45,12 @@ def stats(conn, book: paper.Book, today: dt.date) -> dict:
         status = "тень"
     elif day < paper.SUCCESS_DAYS:
         status = "идёт"
+    elif book.sleeve == "stock" and trades < paper.MIN_STOCK_TRADES:
+        # A stock book turns a slot over only about twice in 182 days, so the verdict
+        # waits for the trade minimum rather than failing on the count alone.
+        status = f"идёт (сделок {trades} из {paper.MIN_STOCK_TRADES})"
     else:
-        ok = (bench_ret is not None and ret > bench_ret and bench_dd is not None and dd > bench_dd
-              and (book.sleeve == "crypto" or trades >= paper.MIN_STOCK_TRADES))
+        ok = (bench_ret is not None and ret > bench_ret and bench_dd is not None and dd > bench_dd)
         status = "пройдено" if ok else "не пройдено"
     return {"day": day, "start": start_date, "ret": ret, "bench_ret": bench_ret, "dd": dd,
             "bench_dd": bench_dd, "trades": trades, "open": len(paper.open_positions(conn, book.code)),

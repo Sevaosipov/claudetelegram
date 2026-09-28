@@ -52,11 +52,12 @@ def test_passing_needs_a_better_return_a_smaller_drop_and_20_trades(conn):
     assert paper_report.stats(conn, paper.BOOK_BY_CODE["R1-E1"], TODAY)["status"] == "пройдено"
 
 
-def test_a_stock_book_with_too_few_trades_does_not_pass(conn):
+def test_a_stock_book_with_too_few_trades_waits_for_them(conn):
     _start(conn, 190)
     _equity(conn, "R1-E1", [(190, 80_000, 80_000), (100, 76_000, 64_000), (0, 90_000, 84_000)])
     _closed_trades(conn, "R1-E1", 19)
-    assert paper_report.stats(conn, paper.BOOK_BY_CODE["R1-E1"], TODAY)["status"] == "не пройдено"
+    assert paper_report.stats(conn, paper.BOOK_BY_CODE["R1-E1"], TODAY)["status"] == \
+        "идёт (сделок 19 из 20)"
 
 
 def test_a_crypto_book_needs_no_trade_minimum(conn):
