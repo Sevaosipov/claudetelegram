@@ -278,11 +278,20 @@ def _record_cautions(conn, selection) -> None:
     _commit_signals(conn, [t.signal for t in selection.cautions])
 
 
+_PAPER_SKIP_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only",
+                     "crypto_only", "min_score", "min_liquidity")
+
+
 def _run_paper(conn, selection, args) -> None:
     """The paper portfolio's daily pass (paper.py) -- after the digest, whether or not
     Telegram is on. It trades virtual books only. A crash is reported like a failed
     source rather than taking the run down; on the first good pass of a month the
-    monthly report goes out (paper_report.py)."""
+    monthly report goes out (paper_report.py). A run filtered to some sources or
+    scores sees only part of the day's signals, so it neither trades the books nor
+    starts their clock."""
+    if any(getattr(args, name, False) for name in _PAPER_SKIP_FLAGS):
+        print("[paper] skipped: filtered run")
+        return
     if _run_source("PAPER", paper.run, conn, selection) is None:
         if not args.no_telegram:
             telegram_notify.send_text("⚠️ disclosure-bot: бумажный портфель упал в этом прогоне. "
@@ -290,7 +299,7 @@ def _run_paper(conn, selection, args) -> None:
         return
     if not args.no_telegram:
         import paper_report
-        paper_report.maybe_send_monthly_report(conn, dt.date.today())
+        _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, dt.date.today())
 
 
 def _send_digest(conn, selection, closes) -> bool:

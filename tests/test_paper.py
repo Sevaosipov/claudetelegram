@@ -576,3 +576,27 @@ def test_bot_sends_the_monthly_report_after_a_good_pass(conn, monkeypatch):
     bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=False))
     bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=True))
     assert len(calls) == 1
+
+
+def test_bot_skips_the_paper_pass_on_a_filtered_run(conn, monkeypatch, capsys):
+    import bot
+    calls = []
+    monkeypatch.setattr(paper, "run", lambda conn, selection: calls.append(1) or 11)
+    for flag, value in (("sec_only", True), ("crypto_only", True), ("min_score", 50.0),
+                        ("min_liquidity", 1e6)):
+        bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=True, **{flag: value}))
+        assert "[paper] skipped: filtered run" in capsys.readouterr().out
+    assert calls == []
+    bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=True, min_score=0))
+    assert calls == [1]
+
+
+def test_a_failing_monthly_report_does_not_escape_the_paper_pass(conn, monkeypatch):
+    import bot
+    import paper_report
+    monkeypatch.setattr(paper, "run", lambda conn, selection: 11)
+
+    def boom(conn, today):
+        raise RuntimeError("report")
+    monkeypatch.setattr(paper_report, "maybe_send_monthly_report", boom)
+    bot._run_paper(conn, _sel(), types.SimpleNamespace(no_telegram=False))    # no exception
