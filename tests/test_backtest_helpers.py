@@ -166,6 +166,20 @@ def test_collect_signals_leaves_out_cautions(conn, monkeypatch):
     assert len(backtest.collect_signals(conn, (21,))) == 2
 
 
+def test_collect_signals_leaves_out_high_risk(conn, monkeypatch):
+    """A journaled high_risk row is a small company the bot never sends -- mixed
+    into "all signals", "by source", "by kind", "by buyers" and "by score" next
+    to strong/candidate rows on the same source and kind, it would skew the
+    evidence for the main strategy. Its own track record is the H1/H2 paper
+    books, not this backtest."""
+    import db
+    for tier in (None, "candidate", "high_risk"):
+        db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAA", "tier": tier})
+    monkeypatch.setattr(backtest, "forward_returns",
+                        lambda t, s, h: {21: {"return": 4.0, "excess": 2.0}})
+    assert len(backtest.collect_signals(conn, (21,))) == 2
+
+
 def test_collect_opinions_reads_journal_and_attaches_returns(conn, monkeypatch):
     import db
     db.journal_opinion(conn, "AAA", {"score": 24.0, "label": "Скорее покупать",
