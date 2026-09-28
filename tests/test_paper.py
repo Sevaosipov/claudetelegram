@@ -644,6 +644,17 @@ def test_small_books_buy_only_high_risk_signals(conn):
     assert [s.ticker for s in paper.stock_signals(sel, paper.BOOK_BY_CODE["R1-E1"])] == ["AAA"]
 
 
+def test_high_risk_buy_is_labelled_high_risk_not_candidate(conn):
+    """paper._buy_reason used to map every non-strong tier to "Кандидат" -- a
+    high-risk buy (H1/H2) was recorded as "Кандидат: SEC, ...", indistinguishable
+    from a stock book's R2 candidate buys."""
+    code = _book(conn, "H1")
+    sel = _hr_sel(_sig("AAA", tier="high_risk"))
+    paper.stock_step(conn, paper.BOOK_BY_CODE[code], sel, paper.Prices(Fetch({})), TODAY)
+    [o] = paper.orders(conn, code)
+    assert o["reason"] == "Высокий риск: SEC, AAA Corp"
+
+
 def test_small_books_buy_a_fifth_and_hold_five(conn):
     _book(conn)
     sigs = [_sig(f"S{i}", tier="high_risk") for i in range(6)]

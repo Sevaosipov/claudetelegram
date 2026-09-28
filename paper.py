@@ -404,7 +404,7 @@ def insiders_of(sig) -> list[str]:
 
 
 def _buy_reason(sig) -> str:
-    tier = "Сильный" if getattr(sig, "tier", None) == "strong" else "Кандидат"
+    tier = {"strong": "Сильный", "high_risk": "Высокий риск"}.get(getattr(sig, "tier", None), "Кандидат")
     return f"{tier}: {sig.source}, {getattr(sig, 'company', None) or sig.ticker}"
 
 
