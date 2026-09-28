@@ -3,6 +3,7 @@ Offline: enrich_signals is replaced by `sized`, price trends by a stub."""
 from __future__ import annotations
 
 import datetime as dt
+import types
 
 import pytest
 
@@ -457,7 +458,9 @@ def test_buy_side_signals_forwards_cluster_and_source_specific_kwargs(conn, monk
     strategy.buy_side_signals(
         conn, cluster_kwargs={"min_value": 1.0, "solo_threshold": 2.0},
         sec_kwargs={"insiders_only": True}, sweden_kwargs={"include_share_programs": True})
-    by_name = dict(calls)
+    by_name = {}
+    for name, kw in calls:
+        by_name.setdefault(name, kw)
     assert by_name["find_sec_clusters"]["min_value"] == 1.0
     assert by_name["find_sec_clusters"]["insiders_only"] is True
     assert by_name["find_house_clusters"]["min_value"] == 1.0
@@ -470,3 +473,126 @@ def test_buy_side_signals_forwards_ignore_alert_state_to_every_finder(conn, monk
     calls = _recording_finders(monkeypatch)
     strategy.buy_side_signals(conn, ignore_alert_state=True, onchain=True)
     assert all(kw["ignore_alert_state"] is True for _, kw in calls)
+
+
+# ---------------------------------------------------------------- high risk
+def _hr(sel):
+    return {t.signal.ticker for t in sel.high_risk}
+
+
+def _select_all(conn, t212=None):
+    """Both finder passes, as the bot runs them."""
+    return strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}),
+                           t212 or _T212())
+
+
+def _small(sized, cap=100e6, adv=500_000):
+    sized["cap"], sized["adv"] = cap, adv
+
+
+def test_two_directors_buying_0_12_percent_of_a_small_company_is_high_risk(conn, sized):
+    _small(sized)
+    for o in ("A", "B"):
+        _buy(conn, "AAA", o, usd=69_600)            # €60k each: €120k = 0.12% of €100M
+    sel = _select_all(conn)
+    assert _hr(sel) == {"AAA"} and _tiers(sel) == (set(), set())
+    [t] = sel.high_risk
+    assert t.tier == strategy.HIGH_RISK and t.signal.tier == strategy.HIGH_RISK
+    assert "2 инсайдера(ов) купили вместе 0,12% компании" in t.met
+
+
+def test_below_0_1_percent_is_not_high_risk(conn, sized):
+    _small(sized)
+    for o in ("A", "B"):
+        _buy(conn, "AAA", o, usd=52_200)            # €45k each: €90k = 0.09%
+    assert _hr(_select_all(conn)) == set()
+
+
+def test_a_ceo_buying_alone_is_found_by_the_lower_threshold_pass(conn, sized):
+    _small(sized, cap=80e6)
+    _buy(conn, "BBB", "Pat Chief", usd=139_200, officer=1, director=0,
+         title="Chief Executive Officer")           # €120k = 0.15% of €80M, below the €500k solo bar
+    sel = _select_all(conn)
+    [t] = sel.high_risk
+    assert t.signal.ticker == "BBB" and "CEO купил 0,15% компании" in t.met
+
+
+def test_a_lone_director_is_not_high_risk(conn, sized):
+    _small(sized, cap=80e6)
+    _buy(conn, "BBB", "Dee Rector", usd=139_200)
+    assert _hr(_select_all(conn)) == set()
+
+
+@pytest.mark.parametrize("cap,adv,expected", [
+    (49e6, 2e6, None), (50e6, 2e6, "high_risk"), (299e6, 2e6, "high_risk"),
+    (300e6, 2e6, "strong"), (100e6, 99_000, None),
+])
+def test_the_small_company_band(conn, sized, cap, adv, expected):
+    _small(sized, cap=cap, adv=adv)
+    for o in ("A", "B", "C"):
+        _buy(conn, "AAA", o, usd=348_000)           # €300k each, three directors
+    sel = _select_all(conn)
+    got = "high_risk" if _hr(sel) else "strong" if sel.strong else None
+    assert got == expected
+
+
+def test_an_unknown_size_is_not_high_risk(conn, sized):
+    sized["cap"] = None
+    for o in ("A", "B", "C"):
+        _buy(conn, "AAA", o)
+    assert _hr(_select_all(conn)) == set()
+
+
+def test_politicians_are_not_high_risk(conn, sized):
+    _small(sized)
+    for member in ("Member One", "Member Two"):
+        add_house_txn(conn, "AAA", member, "$250,001 - $500,000",
+                      date=(TODAY - dt.timedelta(days=3)).strftime("%m/%d/%Y"))
+    assert _hr(_select(conn)) == set()
+
+
+def test_trading212_and_recency_apply_to_high_risk(conn, sized):
+    _small(sized)
+    for o in ("A", "B"):
+        _buy(conn, "AAA", o, usd=69_600)
+        add_sec_purchase(conn, "OLD", o, 69_600, (TODAY - dt.timedelta(days=20)).isoformat(),
+                         filed_date=(TODAY - dt.timedelta(days=10)).isoformat())
+    assert _hr(_select_all(conn, _T212(missing={"AAA"}))) == set()
+
+
+def test_the_lower_threshold_pass_uses_its_own_bars(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, sources={"sec": True, "norway": True}, ignore_alert_state=True)
+    sec = [kw for name, kw in calls if name == "find_sec_clusters"]
+    nor = [kw for name, kw in calls if name == "find_norway_clusters"]
+    assert len(sec) == 2 and len(nor) == 2
+    for kw in (sec[1], nor[1]):
+        assert kw["min_value"] == kw["solo_threshold"] == strategy.HIGH_RISK_FINDER_MIN_EUR
+        assert kw["ignore_alert_state"] is True
+
+
+def test_the_lower_threshold_pass_can_be_turned_off(conn, monkeypatch):
+    calls = _recording_finders(monkeypatch)
+    strategy.buy_side_signals(conn, sources={"sec": True}, high_risk=False)
+    assert [name for name, _ in calls].count("find_sec_clusters") == 1
+
+
+def test_a_cluster_both_passes_find_is_kept_once_and_untagged(conn, monkeypatch):
+    def sec(conn, **kw):
+        if kw.get("solo_threshold") == strategy.HIGH_RISK_FINDER_MIN_EUR:
+            return [types.SimpleNamespace(source="SEC", ticker="AAA"),
+                    types.SimpleNamespace(source="SEC", ticker="BBB")]
+        return [types.SimpleNamespace(source="SEC", ticker="AAA")]
+    monkeypatch.setattr(cluster, "find_sec_clusters", sec)
+    monkeypatch.setattr(cluster, "find_stake_signals", lambda conn, **kw: [])
+    sigs = strategy.buy_side_signals(conn, sources={"sec": True})
+    assert [s.ticker for s in sigs] == ["AAA", "BBB"]
+    assert not getattr(sigs[0], "high_risk_only", False) and sigs[1].high_risk_only is True
+
+
+def test_a_lower_pass_signal_never_gets_a_main_tier(conn, sized):
+    sized["cap"], sized["adv"] = BIG, LIQUID
+    _buy(conn, "BIG", "Pat Chief", usd=139_200, officer=1, director=0,
+         title="Chief Executive Officer")           # €120k solo: only the lower pass finds it
+    sel = _select_all(conn)
+    assert _tiers(sel) == (set(), set()) and _hr(sel) == set()
