@@ -19,6 +19,21 @@ def _sized(monkeypatch):
     monkeypatch.setattr(cluster, "enrich_signals", fake)
 
 
+def test_signals_disables_the_high_risk_pass(conn, monkeypatch):
+    """The replay only reads .strong/.candidates -- the lower-threshold high-risk
+    pass (strategy.buy_side_signals' high_risk=True default) would re-fetch market
+    caps on every replayed day for output the replay never looks at."""
+    import strategy
+    calls = []
+
+    def fake(conn, **kw):
+        calls.append(kw)
+        return []
+    monkeypatch.setattr(strategy, "buy_side_signals", fake)
+    calibrate_strategy._signals(conn)
+    assert calls == [{"ignore_alert_state": True, "onchain": True, "high_risk": False}]
+
+
 def test_a_strong_signal_is_counted_once_in_the_week_it_appeared(conn, monkeypatch):
     _sized(monkeypatch)
     day = dt.date(2026, 9, 9)                       # ISO week 37

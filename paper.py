@@ -448,8 +448,11 @@ def stock_exit_reason(conn, book: Book, pos: dict, bars: list[tuple[str, float]]
 
 
 def stock_step(conn, book: Book, selection, prices: Prices, today: dt.date) -> None:
-    """Sales for every exit that holds, then a buy per new signal: a tenth of the
-    book's value, at most MAX_POSITIONS, half a slice at least."""
+    """Sales for every exit that holds, then a buy per new signal: a slice of the
+    book's value, at most a cap of open positions, half a slice at least. Both the
+    slice and the cap depend on the sleeve -- a tenth and 10 positions for the stock
+    books (R1/R2), a fifth and 5 for the small-company books (H1/H2), which see far
+    fewer signals a month."""
     for pos in open_positions(conn, book.code):
         reason = stock_exit_reason(conn, book, pos, prices.bars(pos["symbol"]), today)
         if reason:
