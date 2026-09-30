@@ -584,6 +584,11 @@ _ADDED_COLUMNS = [
     ("outlook_table", "assets", "INTEGER"),
     ("outlook_table", "oos_folds", "INTEGER"),
     ("outlook_table", "oos_fold_wins", "INTEGER"),
+    # The model portfolio (model.py): the stop distance and score a buy was sized and ranked by.
+    ("paper_orders", "stop_pct", "REAL"),
+    ("paper_orders", "score", "REAL"),
+    ("paper_positions", "stop_pct", "REAL"),
+    ("paper_positions", "score", "REAL"),
 ]
 
 

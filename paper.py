@@ -256,30 +256,34 @@ def book_value(conn, code: str) -> float:
 def _record(conn, code: str, ticker: str, source: str | None, side: str, reason: str,
             today: dt.date, status: str, *, amount: float | None = None,
             position_id: int | None = None, note: str | None = None, insiders=(),
-            target: float | None = None) -> None:
+            target: float | None = None, stop_pct: float | None = None,
+            score: float | None = None) -> None:
     conn.execute(
         "INSERT INTO paper_orders (book, ticker, source, side, amount_eur, position_id, reason, "
-        "created, status, note, insiders, target) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "created, status, note, insiders, target, stop_pct, score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (code, ticker, source, side, amount, position_id, reason, today.isoformat(), status, note,
-         json.dumps(list(insiders), ensure_ascii=False), target))
+         json.dumps(list(insiders), ensure_ascii=False), target, stop_pct, score))
     conn.commit()
 
 
 def place_buy(conn, code: str, ticker: str, source: str | None, reason: str, today: dt.date,
               amount_eur: float, *, max_positions: int | None = None, min_fraction: float = 0.5,
-              insiders=(), target: float | None = None) -> str:
+              insiders=(), target: float | None = None, stop_pct: float | None = None,
+              score: float | None = None) -> str:
     """Queue a buy of `amount_eur`, filled at the next close. Returns "pending",
     "skipped" (recorded, with why) or "duplicate" (not recorded: the book already
     holds the ticker or has a buy pending for it). With less cash than
     `amount_eur`, it buys with what's left if that is at least `min_fraction` of
-    the amount."""
+    the amount. `stop_pct` and `score` (the model portfolio's) ride along on the
+    order, and from it on the position."""
     held = {p["ticker"] for p in open_positions(conn, code)}
     buys = [o for o in pending_orders(conn, code) if o["side"] == "buy"]
     if ticker in held or any(o["ticker"] == ticker for o in buys):
         return "duplicate"
 
     def skip(note: str) -> str:
-        _record(conn, code, ticker, source, "buy", reason, today, "skipped", note=note)
+        _record(conn, code, ticker, source, "buy", reason, today, "skipped", note=note,
+                stop_pct=stop_pct, score=score)
         return "skipped"
 
     if listing(ticker, source) is None:
@@ -294,7 +298,7 @@ def place_buy(conn, code: str, ticker: str, source: str | None, reason: str, tod
     else:
         return skip("нет денег")
     _record(conn, code, ticker, source, "buy", reason, today, "pending", amount=amount,
-            insiders=insiders, target=target)
+            insiders=insiders, target=target, stop_pct=stop_pct, score=score)
     return "pending"
 
 
@@ -319,10 +323,11 @@ def _fill_buy(conn, code: str, order: dict, symbol: str, currency: str, day: str
     net = amount * (1 - fee(order["ticker"], currency))
     conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-        "net_eur, entry_close, entry_fx, insiders, target, reason, last_value) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "net_eur, entry_close, entry_fx, insiders, target, reason, last_value, stop_pct, score) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (code, order["ticker"], order["source"], symbol, currency, day, amount, net, close,
-         fx.per_eur(currency, conn), order["insiders"], order["target"], order["reason"], net))
+         fx.per_eur(currency, conn), order["insiders"], order["target"], order["reason"], net,
+         order["stop_pct"], order["score"]))
     _add_cash(conn, code, -amount)
     _set_order(conn, order["id"], "filled")
 
