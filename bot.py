@@ -275,6 +275,16 @@ def _run_model(conn, args) -> "model.DayReport | None":
     return report
 
 
+def _journal_cautions(conn, signals: list) -> list:
+    """Journal today's bearish coin signals (tier `caution`) now, before the model runs, so a
+    caution found today can close a MODEL-C coin today (model reads it back through
+    positions._crypto_caution). Returns the other signals, for _journal after the model."""
+    cautions = [s for s in signals if strategy.is_caution(s)]
+    if cautions:
+        _journal(conn, cautions, None)
+    return [s for s in signals if not strategy.is_caution(s)]
+
+
 def _journal(conn, signals: list, report) -> None:
     """Enrich the buy-side signals, set each one's journal tier, and commit them (alert
     state and journal row) -- in this run, whatever happens to the Telegram message.
@@ -622,8 +632,9 @@ def main():
             print(f"[stale] {x}", file=sys.stderr)
 
         buys, exits = collect_new_signals(conn, args)
+        rest = _journal_cautions(conn, buys)          # a caution found today counts today
         report = _run_model(conn, args)
-        _journal(conn, buys + exits, report)
+        _journal(conn, rest + exits, report)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))

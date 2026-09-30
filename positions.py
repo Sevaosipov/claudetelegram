@@ -16,6 +16,8 @@ and a close alert fires once per position, on the first of:
                  (the entry price counts as one). The stop is fixed when the position is
                  recorded, from the price history then; a position without one takes it
                  from the closes before its open date, else the model's fallback;
+  activist_cut   (a position bought on a 13D/G stake) one of its filers has since reported
+                 a smaller stake -- model._activist_cut, the model's own rule;
   trend_down     (coins) below the 100-day average and down over 20 days;
   dead_money     (stocks) 60 business days held and a return under 5%;
   time           a year held;
@@ -75,7 +77,8 @@ class Position:
 @dataclass
 class CloseAlert:
     position: Position
-    trigger: str            # insider_sell / caution / trailing_stop / trend_down / dead_money / time / news
+    trigger: str            # insider_sell / caution / trailing_stop / activist_cut / trend_down /
+                            # dead_money / time / news
     detail: str
     last_price: float | None
 
@@ -275,11 +278,16 @@ def _trailing_stop(pos: Position, bars: list[tuple[str, float]], price: float) -
     return None
 
 
-def _model_exit(pos: Position, today: dt.date, price: float | None, closes_fn,
+def _pct(x: float) -> str:
+    return f"{x:.1f}%".replace(".", ",")
+
+
+def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes_fn,
                 news_fn) -> tuple[str, str] | None:
     """The model's exits (model.py) for a position that no insider or caution rule closed:
-    (trigger, detail) for the first that holds, else None. The headlines are fetched only
-    when every rule before them has passed."""
+    (trigger, detail) for the first that holds, else None -- in the model's order, with the
+    model's constants. The headlines are fetched only when every rule before them has
+    passed."""
     import model
     import paper
     coin = crypto.is_crypto(pos.ticker)
@@ -292,6 +300,10 @@ def _model_exit(pos: Position, today: dt.date, price: float | None, closes_fn,
         stop = _trailing_stop(pos, bars, price)
         if stop:
             return "trailing_stop", stop
+    if pos.source == model.STAKE_SOURCE:
+        cut = model._activist_cut(conn, pos.ticker, pos.insiders, pos.opened_at)
+        if cut:
+            return "activist_cut", f"доля {_pct(cut[0])} → {_pct(cut[1])}"
     if coin:
         trend = model_score.coin_trend([c for _d, c in bars])
         if trend and trend["down"]:
@@ -335,7 +347,7 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None, trend_fn=None
         if caution:
             alerts.append(CloseAlert(pos, "caution", caution, price))
             continue
-        found = _model_exit(pos, today, price, closes_fn, news_fn)
+        found = _model_exit(conn, pos, today, price, closes_fn, news_fn)
         if found:
             alerts.append(CloseAlert(pos, found[0], found[1], price))
     return alerts

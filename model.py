@@ -325,22 +325,30 @@ def _trailing_stop(pos: dict, bars: list[tuple[str, float]], kind: str) -> str |
     return None
 
 
-def _activist_cut(conn, pos: dict) -> bool:
-    """A position bought on a 13D/G whose filer has since reported a smaller stake."""
-    people = json.loads(pos["insiders"] or "[]")
-    if pos["source"] != "SEC13DG" or not people:
-        return False
+STAKE_SOURCE = "SEC13DG"      # a position bought on a 13D/G stake: its filers' later stakes count
+
+
+def _activist_cut(conn, ticker: str, insiders, opened: str) -> tuple[float, float] | None:
+    """(the stake before, the stake since) when one of `insiders` -- the filers of the 13D/G a
+    position was bought on -- has reported a smaller stake in `ticker` after `opened` than
+    their last one on or before it; else None. The one rule for the model's positions and the
+    /bought ones (positions._model_exit); the callers check the position came from a stake."""
+    people = list(insiders or [])
+    if not people:
+        return None
 
     def newest(comparison: str) -> float | None:
         row = conn.execute(
             f"SELECT percent_of_class FROM sec_stakes WHERE ticker = ? AND person_name IN "
             f"({','.join('?' * len(people))}) AND event_date {comparison} ? "
             f"AND percent_of_class IS NOT NULL ORDER BY event_date DESC LIMIT 1",
-            (pos["ticker"], *people, pos["fill_date"])).fetchone()
+            (ticker, *people, opened)).fetchone()
         return row[0] if row else None
 
     after, before = newest(">"), newest("<=")
-    return after is not None and before is not None and after < before
+    if after is not None and before is not None and after < before:
+        return before, after
+    return None
 
 
 def _news_red_flag(headlines, *, coin: bool = False) -> str | None:
@@ -361,7 +369,8 @@ def stock_exit_reason(conn, pos: dict, bars: list[tuple[str, float]], today: dt.
         ticker=pos["ticker"], opened_at=pos["fill_date"], insiders=json.loads(pos["insiders"] or "[]")))
     if sale:
         return f"продаёт инсайдер: {sale}"
-    if _activist_cut(conn, pos):
+    if pos["source"] == STAKE_SOURCE and _activist_cut(
+            conn, pos["ticker"], json.loads(pos["insiders"] or "[]"), pos["fill_date"]):
         return "активист сократил долю"
     if (pos["last_value"] is not None
             and paper.business_days_between(pos["fill_date"], today) >= DEAD_MONEY_BDAYS

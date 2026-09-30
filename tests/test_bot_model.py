@@ -290,7 +290,7 @@ def main_run(monkeypatch, tmp_path):
     calls = []
     closes = ["close-alert"]
     report = _report({"AAA": "buy"}, buys=[object()], sells=[object()])
-    buy_sig, exit_sig = _cluster_sig(), _exit_sig()
+    buy_sig, exit_sig, caution_sig = _cluster_sig(), _exit_sig(), _coin_sig(False)
 
     monkeypatch.setattr(bot, "DB_PATH", tmp_path / "data" / "d.db")
     monkeypatch.setattr(bot, "LOG_PATH", tmp_path / "data" / "bot.log")
@@ -304,7 +304,7 @@ def main_run(monkeypatch, tmp_path):
 
     def collect(conn, args):
         calls.append("collect")
-        return [buy_sig], [exit_sig]
+        return [buy_sig] + ([caution_sig] if run.cautions else []), [exit_sig]
 
     def run_model(conn, args):
         calls.append("model")
@@ -342,6 +342,7 @@ def main_run(monkeypatch, tmp_path):
         return calls
 
     run.report, run.buy_sig, run.exit_sig, run.closes = report, buy_sig, exit_sig, closes
+    run.caution_sig, run.cautions = caution_sig, False
     return run
 
 
@@ -353,6 +354,40 @@ def test_main_runs_collect_model_journal_closes_send_monthly_in_that_order(main_
     assert calls[4] == ("send", main_run.report, main_run.closes, [main_run.exit_sig])
     assert calls[5] == "monthly"
     assert len(calls) == 6
+
+
+def test_main_journals_todays_cautions_before_the_model_and_the_rest_after(main_run):
+    """A bearish coin signal found today can close a MODEL-C coin today: the model's exit
+    reads the caution from the journal."""
+    main_run.cautions = True
+    calls = main_run()
+    assert calls[:4] == ["collect", ("journal", [main_run.caution_sig], None), "model",
+                         ("journal", [main_run.buy_sig, main_run.exit_sig], main_run.report)]
+    assert calls[4] == "check_exits"
+
+
+def test_the_caution_is_in_the_journal_when_the_model_runs(conn, monkeypatch):
+    monkeypatch.setattr(cluster, "enrich_signals", lambda conn, signals: signals)
+    seen = []
+
+    def run_model(conn_, args):
+        seen.append(conn_.execute("SELECT ticker, tier FROM signal_journal").fetchall())
+        return _report({"AAA": "buy"})
+
+    monkeypatch.setattr(bot, "_run_model", run_model)
+    rest = bot._journal_cautions(conn, [_cluster_sig(), _coin_sig(False), _coin_sig(True)])
+    report = bot._run_model(conn, None)
+    bot._journal(conn, rest, report)
+    assert seen == [[("CRYPTO:BTC", "caution")]]
+    assert [(s.ticker, getattr(s, "bullish", None)) for s in rest] == [("AAA", None), ("CRYPTO:BTC", True)]
+    assert conn.execute("SELECT ticker, tier FROM signal_journal ORDER BY id").fetchall() == [
+        ("CRYPTO:BTC", "caution"), ("AAA", "buy"), ("CRYPTO:BTC", None)]
+
+
+def test_no_caution_journals_nothing_before_the_model(conn, recorded):
+    sig = _cluster_sig()
+    assert bot._journal_cautions(conn, [sig]) == [sig]
+    assert recorded["committed"] == [] and recorded["enriched"] == []
 
 
 def test_main_prints_the_poll_finished_line(main_run, capsys):

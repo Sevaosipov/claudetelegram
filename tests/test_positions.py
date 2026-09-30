@@ -11,7 +11,7 @@ import model
 import model_score
 import paper
 import positions
-from conftest import add_bafin_txn, add_form_144, add_sec_sale, add_sweden_txn
+from conftest import add_bafin_txn, add_form_144, add_sec_sale, add_stake, add_sweden_txn
 
 TODAY = dt.date(2026, 9, 23)
 
@@ -625,6 +625,105 @@ def test_time_comes_before_news(conn):
     _open(conn, price=100.0, days_ago=days, stop=0.10)
     [alert] = _check(conn, price=130.0, bars=_held_bars([], [100.0, 130.0], days_ago=days), news=_RED)
     assert alert.trigger == "time"
+
+
+# ------------------------------------------------------------------ an activist's cut
+def _stake_journal(conn, ticker="AAA", person="Fund LP"):
+    """The journal row of a 13D/G stake the model scored (bot._signal_features' shape)."""
+    db.journal_signal(conn, {"source": "SEC13DG", "kind": "stake", "ticker": ticker, "tier": "buy",
+                             "members": json.dumps([person])})
+
+
+def _day(days_ago: int) -> str:
+    return (TODAY - dt.timedelta(days=days_ago)).isoformat()
+
+
+@pytest.mark.parametrize("before,after,fires", [
+    (9.0, 6.0, True), (9.0, 11.0, False), (9.0, 9.0, False), (9.0, None, False)])
+def test_an_activist_cutting_the_stake_you_bought_on_closes_it(conn, before, after, fires):
+    _stake_journal(conn)
+    pos = _open(conn, price=100.0, days_ago=10, stop=0.10)
+    assert (pos.source, pos.insiders) == ("SEC13DG", ["Fund LP"])
+    add_stake(conn, "AAA", "Fund LP", before, event_date=_day(30))
+    if after is not None:
+        add_stake(conn, "AAA", "Fund LP", after, event_date=_day(3))
+    add_stake(conn, "AAA", "Someone Else", 1.0, event_date=_day(2))           # another holder: ignored
+    alerts = _check(conn, price=100.0, bars=_held_bars([], [100.0], days_ago=10))
+    if not fires:
+        assert alerts == []
+        return
+    [alert] = alerts
+    assert (alert.trigger, alert.detail) == ("activist_cut", "доля 9,0% → 6,0%")
+    import telegram_notify
+    assert "активист сократил долю" in telegram_notify.format_close_alert(alert, html=False)
+
+
+def test_a_stake_cut_counts_only_for_a_position_bought_on_the_stake(conn):
+    _strong_journal(conn, "AAA", ["Fund LP"])                     # an SEC cluster, same name
+    _open(conn, price=100.0, days_ago=10, stop=0.10)
+    add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(30))
+    add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
+    assert _check(conn, price=100.0, bars=_held_bars([], [100.0], days_ago=10)) == []
+
+
+def test_the_stop_comes_before_the_activist_cut_and_the_cut_before_dead_money(conn):
+    days = _days_ago_for_bdays(61)
+    _stake_journal(conn)
+    _open(conn, price=100.0, days_ago=days, stop=0.10)
+    add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(days + 5))
+    add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
+    bars = _held_bars([], [100.0, 102.0], days_ago=days)
+    assert [a.trigger for a in _check(conn, price=85.0, bars=bars)] == ["trailing_stop"]
+    assert [a.trigger for a in _check(conn, price=102.0, bars=bars)] == ["activist_cut"]
+
+
+def test_the_model_and_the_positions_read_the_same_cut(conn):
+    """One rule, model._activist_cut, for a paper position and a /bought one."""
+    add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(30))
+    add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
+    assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(10)) == (9.0, 6.0)
+    assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(2)) is None       # nothing filed since
+    assert model._activist_cut(conn, "AAA", [], _day(10)) is None
+
+
+# ------------------------------------------------------ one set of exit constants, the model's
+def _paper_pos(days_ago, *, value=10_000.0):
+    return {"ticker": "AAA", "source": "SEC", "fill_date": _day(days_ago), "stop_pct": None,
+            "insiders": "[]", "last_value": value, "net_eur": 10_000.0}
+
+
+def test_the_position_exits_and_the_models_share_their_constants(conn, monkeypatch):
+    """Both read model's stop fallback, dead-money and year constants when they run: change
+    one and both move together."""
+    for name in ("FALLBACK_STOP", "DEAD_MONEY_BDAYS", "DEAD_MONEY_MIN_RETURN", "MAX_HOLD_DAYS"):
+        assert not hasattr(positions, name), name
+    flat = [(d, 100.0) for d, _c in _days(TODAY - dt.timedelta(days=40), [100.0] * 40)]
+
+    # the stop fallback: -20% with no stop and no history before the buy
+    _open(conn, "AAA", 100.0, days_ago=5)
+    fall = _held_bars([], [100.0, 80.0], days_ago=5)
+    assert [a.trigger for a in _check(conn, price=80.0, bars=fall)] == ["trailing_stop"]
+    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
+                                   TODAY, []) is not None
+    monkeypatch.setattr(model, "FALLBACK_STOP", {"stock": 0.40, "crypto": 0.50})
+    assert _check(conn, price=80.0, bars=fall) == []
+    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
+                                   TODAY, []) is None
+    positions.close_position(conn, "AAA")
+
+    # dead money and the year, moved to a few days
+    monkeypatch.setattr(model, "DEAD_MONEY_BDAYS", 3)
+    _open(conn, "BBB", 100.0, days_ago=7, stop=0.10)
+    [alert] = _check(conn, price=101.0, bars=_held_bars([], [100.0, 101.0], days_ago=7))
+    assert alert.trigger == "dead_money"
+    assert model.stock_exit_reason(conn, _paper_pos(7, value=10_100.0), flat, TODAY, []) == "стоит на месте"
+    positions.close_position(conn, "BBB")
+    monkeypatch.setattr(model, "DEAD_MONEY_BDAYS", 10_000)
+    monkeypatch.setattr(model, "MAX_HOLD_DAYS", 7)
+    _open(conn, "CCC", 100.0, days_ago=7, stop=0.10)
+    [alert] = _check(conn, price=130.0, bars=_held_bars([], [100.0, 130.0], days_ago=7))
+    assert alert.trigger == "time"
+    assert model.stock_exit_reason(conn, _paper_pos(7, value=13_000.0), flat, TODAY, []) == "год в позиции"
 
 
 def test_an_older_positions_table_gains_the_stop_column(tmp_path):
