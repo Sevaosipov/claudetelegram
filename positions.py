@@ -283,7 +283,9 @@ def _model_exit(pos: Position, today: dt.date, price: float | None, closes_fn,
     import model
     import paper
     coin = crypto.is_crypto(pos.ticker)
-    bars = closes_fn(pos.ticker, pos.source)
+    # Completed bars only, as the model's paper.Prices(today) does: a bar for today is still
+    # in progress (a coin's always is) and must not set a peak or trip a stop or a trend.
+    bars = [b for b in closes_fn(pos.ticker, pos.source) if b[0] < today.isoformat()]
     if price is None:
         print(f"[positions] no price for {pos.ticker}; stop check skipped today")
     else:

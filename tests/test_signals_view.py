@@ -190,6 +190,8 @@ def test_view_lists_open_positions(conn, keyed, scored, capsys, monkeypatch):
     import positions
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 110.0)
+    monkeypatch.setattr("paper._closes", lambda symbol, days: [])        # no history, no headlines
+    monkeypatch.setattr("model.default_news", lambda ticker, source: [])
     positions.open_position(conn, "AAPL", 100.0)
     menu.show_signals(conn)
     out = _shown(capsys)

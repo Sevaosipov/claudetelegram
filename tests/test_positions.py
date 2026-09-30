@@ -442,6 +442,22 @@ def test_a_stock_with_too_little_history_to_size_a_stop_falls_back_to_15_percent
     assert alert.trigger == "trailing_stop" and alert.detail == "−15% от максимума 100.00"
 
 
+def test_a_bar_dated_today_is_still_in_progress_and_is_ignored(conn):
+    """A coin's (or a stock's) bar for the current day is not a close yet: a spike in it must
+    not set the peak, or a dip in it trip the stop."""
+    _open(conn, price=100.0, stop=0.10)
+    bars = _held_bars([], [100.0, 130.0]) + [(TODAY.isoformat(), 200.0)]
+    assert _check(conn, price=150.0, bars=bars) == []               # peak 130 -> stop 117; 200 would give 180
+    [alert] = _check(conn, price=116.0, bars=bars)
+    assert alert.detail == "−10% от максимума 130.00"
+
+
+def test_a_bar_dated_today_does_not_flip_a_coins_trend(conn):
+    _open(conn, "CRYPTO:BTC", 100.0, stop=0.25)
+    bars = _days(TODAY - dt.timedelta(days=130), _CLIMB) + [(TODAY.isoformat(), 50.0)]
+    assert _check(conn, price=_CLIMB[-1], bars=bars) == []
+
+
 def test_without_a_price_the_price_rules_wait(conn):
     _open(conn, price=100.0, stop=0.10)
     assert _check(conn, price=None, bars=_held_bars([], [100.0, 50.0])) == []
