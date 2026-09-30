@@ -109,6 +109,18 @@ def test_monthly_report_waits_for_the_model(conn):
     assert paper_report.maybe_send_monthly_report(conn, TODAY, lambda t: True) is False
 
 
+def test_monthly_report_needs_the_models_statistics(conn):
+    """A stock book without its crypto book (a half-created model) has no statistics: nothing
+    is sent -- not the «ещё не запущен» line as a monthly report."""
+    sent = []
+    conn.execute("INSERT INTO paper_books (code, sleeve, start_date, start_eur, cash_eur, bench_symbol) "
+                 "VALUES (?,?,?,?,?,?)", (S, "stock", "2026-08-01", 70_000.0, 70_000.0, "SPY"))
+    conn.commit()
+    assert paper_report.model_stats(conn, TODAY) is None
+    assert paper_report.maybe_send_monthly_report(conn, TODAY, lambda t: sent.append(t) or True) is False
+    assert sent == []
+
+
 def test_a_failed_send_is_retried_the_next_run(conn):
     _start(conn, 60)
     assert paper_report.maybe_send_monthly_report(conn, TODAY, lambda t: False) is False

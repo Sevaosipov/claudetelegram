@@ -404,9 +404,6 @@ def format_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этому тикеру: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     return "\n".join(lines)
 
 
@@ -461,9 +458,6 @@ def format_exit_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этому тикеру: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     return "\n".join(lines)
 
 
@@ -492,9 +486,6 @@ def format_stake_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этому тикеру: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     if html:
         lines.append(f'   <a href="{_esc(sig.url)}">источник</a>')
     else:
@@ -538,9 +529,6 @@ def format_crypto_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этой монете: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     if sig.url:
         lines.append(f'   <a href="{_esc(sig.url)}">источник</a>' if html else f"   {sig.url}")
     return "\n".join(lines)
@@ -721,14 +709,18 @@ def _score_line(s, html: bool) -> str:
 
 def format_scored(scored: list, *, html: bool = False) -> str:
     """The model's scores, one line each (the menu's «Сигналы»): the buys, the watched and the
-    blocked first, the stocks that scored below the watch line after «Прочие»."""
+    blocked first, the stocks that scored below the watch line after «Прочие». The bars
+    named are model_score's own."""
+    import model_score      # light (pure functions); imported here like model elsewhere in this file
     if not scored:
         return "Свежих сигналов за 14 дней нет."
+    buy, watch = model_score.STOCK_BUY, model_score.STOCK_WATCH
     others = [s for s in scored if s.kind == "stock" and s.decision == "skip"]
     main = [s for s in scored if s.kind != "stock" or s.decision != "skip"]
-    lines = [_b("СИГНАЛЫ — оценка модели (покупка от 60, наблюдение 45–59)", html)]
+    lines = [_b(f"СИГНАЛЫ — оценка модели (покупка от {buy:.0f}, наблюдение {watch:.0f}–{buy - 1:.0f})",
+                html)]
     lines += [_score_line(s, html) for s in main]
     if others:
-        lines.append("Прочие (балл ниже 45):")
+        lines.append(f"Прочие (балл ниже {watch:.0f}):")
         lines += [_score_line(s, html) for s in others[:_MAX_OTHER_STOCKS]]
     return "\n".join(lines)

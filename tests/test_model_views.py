@@ -226,6 +226,14 @@ def test_skipped_stocks_go_below_a_line_and_at_most_15():
     assert below[0].startswith("· S00")
 
 
+def test_the_header_and_the_prochie_line_follow_the_models_bars(monkeypatch):
+    monkeypatch.setattr(model_score, "STOCK_BUY", 70.0)
+    monkeypatch.setattr(model_score, "STOCK_WATCH", 50.0)
+    lines = tn.format_scored([_stock("TOP", 74.0), _stock("LOW", 30.0, model_score.SKIP)]).splitlines()
+    assert lines[0] == "СИГНАЛЫ — оценка модели (покупка от 70, наблюдение 50–69)"
+    assert "Прочие (балл ниже 50):" in lines
+
+
 def test_no_prochie_line_without_skipped_stocks():
     assert "Прочие" not in tn.format_scored([_stock(), _coin()])
 
@@ -440,6 +448,12 @@ def test_summary_names_the_archived_books(conn):
 def test_summary_without_archive_has_no_archive_line(conn):
     _start(conn, 47)
     assert "Архив" not in paper_report.format_summary(conn, TODAY)
+
+
+def test_the_archive_line_uses_the_messages_plural_rule():
+    import inspect
+    src = inspect.getsource(paper_report)
+    assert "telegram_notify._plural(" in src and "model_score._plural" not in src
 
 
 def test_archive_line_agrees_with_the_count(conn):

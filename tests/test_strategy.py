@@ -1,5 +1,5 @@
-"""strategy.py: the finder list (buy_side_signals, exit_signals) and the two predicates that
-say what kind of signal a finder made. What to do with a signal is model_score.py's and
+"""strategy.py: the finder list (buy_side_signals, exit_signals) and the predicate that says
+a finder's signal is a caution. What to do with a signal is model_score.py's and
 model.py's business, tested there. Offline: the finders are replaced by recorders."""
 from __future__ import annotations
 
@@ -20,19 +20,19 @@ def _exit():
                               seller_count=2, lines=[], seller_names=["A", "B"])
 
 
-def test_a_bullish_coin_signal_and_a_cluster_are_buy_side_and_never_caution():
+def test_a_bullish_coin_signal_and_a_cluster_are_never_caution():
     cluster_sig = cluster.ClusterSignal(source="SEC", ticker="AAA", company="C", buyer_count=2,
                                         total_value=1e6, members=[], window_start="", window_end="")
     for sig in (_coin(True), cluster_sig):
-        assert strategy.is_buy_side(sig) and not strategy.is_caution(sig)
+        assert not strategy.is_caution(sig)
 
 
-def test_a_bearish_coin_signal_is_a_caution_and_not_buy_side():
-    assert strategy.is_caution(_coin(False)) and not strategy.is_buy_side(_coin(False))
+def test_a_bearish_coin_signal_is_a_caution():
+    assert strategy.is_caution(_coin(False))
 
 
-def test_an_exit_signal_is_neither():
-    assert not strategy.is_buy_side(_exit()) and not strategy.is_caution(_exit())
+def test_an_exit_signal_is_not_a_caution():
+    assert not strategy.is_caution(_exit())
 
 
 def test_the_journal_tier_for_a_caution_is_the_word_caution():

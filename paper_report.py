@@ -9,7 +9,6 @@ import datetime as dt
 
 import db
 import model
-import model_score
 import paper
 import telegram_notify
 from telegram_notify import money_eur, signed_pct
@@ -166,8 +165,8 @@ def format_summary(conn, today: dt.date, *, monthly: bool = False, html: bool = 
     archived = _archived(conn)
     if archived:
         n = len(archived)
-        what = model_score._plural(n, "прежняя книга остановлена", "прежние книги остановлены",
-                                   "прежних книг остановлены")
+        what = telegram_notify._plural(n, "прежняя книга остановлена", "прежние книги остановлены",
+                                       "прежних книг остановлены")
         lines += ["", esc(f"Архив: {n} {what} — python paper.py {archived[0]}")]
     return "\n".join(lines)
 
@@ -199,10 +198,12 @@ def format_book(conn, code: str) -> str:
 
 def maybe_send_monthly_report(conn, today: dt.date, send=None) -> bool:
     """The first run of each month sends the summary, with each sleeve's month, once.
-    Nothing until the model has started, and nothing in the month it started. True when
-    it was sent."""
+    Nothing until the model has started (both books, with statistics), and nothing in the
+    month it started. True when it was sent."""
     row = _book_row(conn, model.STOCK_BOOK)
     if row is None or row[0][:7] == today.strftime("%Y-%m"):
+        return False
+    if model_stats(conn, today) is None:
         return False
     key = f"paper_report_{today:%Y-%m}"
     if db.get_cached_value(conn, key, _REPORT_KEY_TTL) is not None:

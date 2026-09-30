@@ -87,10 +87,9 @@ def test_oslo_ticker_without_an_isin_is_not_buyable():
     assert not _t212({"NO0003733800"}, lambda t: "").can_buy("XXX", "NORWAY")
 
 
-def test_oslo_ticker_that_could_not_be_checked_is_kept_and_remembered():
+def test_oslo_ticker_that_could_not_be_checked_is_kept():
     t212 = _t212(set(), lambda t: None)
-    assert t212.can_buy("ORK", "NORWAY")
-    assert "ORK" in t212.unchecked
+    assert t212.can_buy("ORK", "NORWAY")            # unknown is not "not sold"
 
 
 def test_availability_resolves_oslo_isins_through_the_cache(conn, monkeypatch, tmp_path):

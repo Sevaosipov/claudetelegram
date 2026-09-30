@@ -20,14 +20,6 @@ import cluster
 CAUTION = "caution"
 
 
-def is_buy_side(sig) -> bool:
-    if hasattr(sig, "seller_count"):          # ExitSignal
-        return False
-    if hasattr(sig, "crypto_kind"):           # CryptoSignal
-        return bool(sig.bullish)
-    return True
-
-
 def is_caution(sig) -> bool:
     return hasattr(sig, "crypto_kind") and not sig.bullish
 
