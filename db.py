@@ -589,6 +589,8 @@ _ADDED_COLUMNS = [
     ("paper_orders", "score", "REAL"),
     ("paper_positions", "stop_pct", "REAL"),
     ("paper_positions", "score", "REAL"),
+    # The trailing stop of a /bought position, fixed when it is recorded (positions.py).
+    ("positions", "stop_pct", "REAL"),
 ]
 
 

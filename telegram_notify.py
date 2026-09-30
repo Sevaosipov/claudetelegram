@@ -570,7 +570,8 @@ def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
 
 
 _CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution": "сигнал осторожности",
-                 "time": "срок вышел", "stop_loss": "стоп-лосс"}
+                 "trailing_stop": "стоп от максимума", "dead_money": "стоит на месте",
+                 "time": "год в позиции", "trend_down": "тренд вниз", "news": "плохие новости"}
 
 
 def format_close_alert(alert, *, html: bool = True) -> str:

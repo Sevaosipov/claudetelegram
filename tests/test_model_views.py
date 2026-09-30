@@ -59,7 +59,7 @@ def _report(buys=(), sells=(), value=101_230.0, bench=100_800.0, scored=()):
 
 def _close(ticker="CCC"):
     pos = positions.Position(1, ticker, "SEC", "2026-09-01", 100.0, ["A"], None, None, None, None)
-    return positions.CloseAlert(pos, "stop_loss", "−16.0% от входа", 84.0)
+    return positions.CloseAlert(pos, "trailing_stop", "−10% от максимума 100.00", 84.0)
 
 
 def _exit_signal(ticker="ZZZ"):
@@ -117,7 +117,7 @@ def test_sections_come_in_order_with_the_portfolio_line_last():
     assert positions_ == sorted(positions_)
     assert "• AAA — Acme Corp: €9 800" in text and "нет на T212" in text
     assert "• BBB — стоп: −10% от максимума (результат +8,3%)" in text
-    assert "CCC" in text and "стоп-лосс" in text and "ZZZ" in text
+    assert "CCC" in text and "стоп от максимума" in text and "ZZZ" in text
     assert text.splitlines()[-1] == "Портфель: €101 230 (+1,2%), смесь 70/30: +0,8%"
 
 
@@ -496,7 +496,7 @@ def test_menu_signals_print_the_scored_list(conn, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "СИГНАЛЫ — оценка модели (покупка от 60, наблюдение 45–59)" in out
     assert "🟢 AAA" in out and "CRYPTO:BTC" in out
-    assert "CCC" in out and "стоп-лосс" in out                 # the pending close alert
+    assert "CCC" in out and "стоп от максимума" in out         # the pending close alert
     assert "Открытые позиции" in out                            # the /bought positions
 
 

@@ -5,6 +5,8 @@ Telegram) and are intentionally left as plain text -- untested here since
 they render no markup."""
 from __future__ import annotations
 
+import pytest
+
 import cluster
 from cluster import ClusterSignal, ExitSignal, StakeSignal
 
@@ -337,6 +339,16 @@ def test_a_bearish_coin_signal_reads_as_an_outflow():
 
 def test_the_model_day_message_has_nothing_to_say_without_a_trade_a_close_or_an_exit():
     assert telegram_notify.format_model_day(None, [], []) is None
+
+
+@pytest.mark.parametrize("trigger, reason", [
+    ("insider_sell", "инсайдеры продают"), ("caution", "сигнал осторожности"),
+    ("trailing_stop", "стоп от максимума"), ("dead_money", "стоит на месте"),
+    ("time", "год в позиции"), ("trend_down", "тренд вниз"), ("news", "плохие новости")])
+def test_every_close_trigger_has_its_own_reason(trigger, reason):
+    pos = positions.Position(1, "AAA", "SEC", "2026-09-01", 100.0, [], None, None, None, None)
+    text = telegram_notify.format_close_alert(positions.CloseAlert(pos, trigger, "detail", 90.0), html=False)
+    assert text.startswith(f"🚪 AAA — {reason}\n")
 
 
 def test_caution_close_alert_reads_as_such():

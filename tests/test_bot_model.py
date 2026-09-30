@@ -44,6 +44,13 @@ def _report(decisions=None, buys=(), sells=()):
                            bench=100_000.0, decisions=decisions or {})
 
 
+@pytest.fixture(autouse=True)
+def _positions_offline(monkeypatch):
+    """/bought positions look at price history and headlines: none, here."""
+    monkeypatch.setattr(positions, "daily_closes", lambda ticker, source=None: [])
+    monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
+
+
 @pytest.fixture
 def recorded(monkeypatch):
     """_journal with the network out (enrich_signals is the identity) and the commit recorded."""

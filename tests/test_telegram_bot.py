@@ -13,8 +13,11 @@ import telegram_bot as tb
 
 @pytest.fixture(autouse=True)
 def _offline_lookup(monkeypatch):
+    import paper
     import sources
 
+    # /bought sizes its stop from the price history: none, offline.
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
     # A queued lookup runs run_claude_analysis.sh, i.e. a real headless Claude pass
     # over the real queue that can send Telegram messages. A test that doesn't stub
     # subprocess.run itself must never reach it -- not even while it is still red.
@@ -222,11 +225,44 @@ def test_bought_price_within_tolerance_of_last_close_is_accepted(conn, replies, 
 
 def test_bought_with_no_quote_stores_the_price_and_notes_it(conn, replies):
     """When last_close can't find a price at all (already the fixture's default),
-    the user's price is still stored -- only the stop-loss check is affected."""
+    the user's price is still stored -- only the stop check is affected."""
     import positions
     tb._handle_message(conn, "/bought ORK 12.5")
     assert positions.open_positions(conn)[0].entry_price == 12.5
     assert "стоп-лосс" in replies[-1] and "не отслеживается" in replies[-1]
+    assert "90" not in replies[-1]                      # the 90-day term is gone
+    assert "стоп −" not in replies[-1] and "по умолчанию" not in replies[-1]     # no stop is being watched
+
+
+def _august_closes(symbol, days):
+    return [(f"2026-08-{d:02d}", 180.0) for d in range(1, 31)]
+
+
+def test_bought_tells_the_stop_its_price_history_gave(conn, replies, monkeypatch):
+    import paper
+    import positions
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 180.0)
+    monkeypatch.setattr(paper, "_closes", _august_closes)
+    tb._handle_message(conn, "/bought NVDA 180")
+    assert replies[-1].startswith("Записал NVDA по 180,00; стоп −10% от максимума; ")
+    assert positions.open_positions(conn)[0].stop_pct == 0.10
+
+
+def test_bought_says_the_stop_is_the_default_when_there_is_no_history(conn, replies, monkeypatch):
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 180.0)
+    tb._handle_message(conn, "/bought NVDA 180")
+    assert replies[-1].startswith("Записал NVDA по 180,00; стоп — по умолчанию; ")
+    assert "не отслеживается" not in replies[-1]
+
+
+def test_bought_names_the_insiders_it_watches_escaped(conn, replies, monkeypatch):
+    import db
+    import json
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 180.0)
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "NVDA", "tier": "buy",
+                             "members": json.dumps(["A&B <Boss>"])})
+    tb._handle_message(conn, "/bought NVDA 180")
+    assert "слежу за продажами: A&amp;B &lt;Boss&gt;" in replies[-1]
 
 
 # ------------------------------------------------------- Oslo pricing (EQNR bug)

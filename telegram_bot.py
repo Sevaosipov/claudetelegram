@@ -179,7 +179,7 @@ def _handle_positions_command(conn, text: str) -> bool:
             return True
         if not market_price:
             note = (" (стоп-лосс не отслеживается для этого тикера — только "
-                    "инсайдерские продажи и 90-дн. срок)")
+                    "инсайдерские продажи, новости и срок в год)")
         price = user_price
     else:
         price = market_price
@@ -193,8 +193,12 @@ def _handle_positions_command(conn, text: str) -> bool:
         return True
     insiders = ", ".join(telegram_notify._esc(n) for n in pos.insiders)
     who = (f"слежу за продажами: {insiders}" if pos.insiders
-           else "сильного сигнала по нему не было — слежу только за сроком и стоп-лоссом")
-    telegram_notify.send_text(f"Записал {ticker} по {price:,.2f}; {who}{note}.")
+           else "сильного сигнала по нему не было — слежу за сроком и новостями")
+    # With no market price the stop can't be watched (the note says so): don't state one.
+    stop = "" if note else (f"стоп −{pos.stop_pct * 100:.0f}% от максимума; " if pos.stop_pct is not None
+                            else "стоп — по умолчанию; ")
+    shown = f"{price:,.2f}".replace(",", " ").replace(".", ",")
+    telegram_notify.send_text(f"Записал {ticker} по {shown}; {stop}{who}{note}.")
     return True
 
 

@@ -200,8 +200,9 @@ def test_view_shows_pending_close_alerts(conn, keyed, scored, capsys, monkeypatc
     import positions
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 84.0)
+    monkeypatch.setattr("paper._closes", lambda symbol, days: [])        # no history: the default stop
     positions.open_position(conn, "AAPL", 100.0)
     conn.execute("UPDATE positions SET opened_at = ?", ((TODAY - dt.timedelta(days=5)).isoformat(),))
     menu.show_signals(conn)
     out = _shown(capsys)
-    assert "🚪 AAPL — стоп-лосс" in out
+    assert "🚪 AAPL — стоп от максимума" in out
