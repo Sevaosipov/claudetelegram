@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+import analyst
 import db
 import model
 import paper_report
@@ -62,6 +63,19 @@ def show_paper(conn) -> None:
     print("\nПодробно: python paper.py MODEL-S (или MODEL-C, R1-E1 …)")
 
 
+def ask_analyst() -> None:
+    """A free-form question to the Claude analyst: the bot's own data plus the chart in the
+    user's TradingView Desktop. analyst.ask prints the answer; nothing goes to Telegram."""
+    question = input("Вопрос аналитику: ").strip()
+    if not question:
+        return
+    print("Спрашиваю… (1–5 мин, нужен открытый TradingView)")
+    try:
+        analyst.ask(question)
+    except Exception as e:  # a failed run must not end the menu
+        print(f"Ошибка: {type(e).__name__}: {e}")
+
+
 def main() -> None:
     conn = db.connect(DB_PATH)
     while True:
@@ -70,6 +84,7 @@ def main() -> None:
         print("1) Сигналы")
         print("2) Досье по тикеру или монете")
         print("3) Модельный портфель")
+        print("4) Спросить аналитика")
         print("0) Выход")
         choice = input("Выбор: ").strip()
 
@@ -79,10 +94,12 @@ def main() -> None:
             show_research(conn)
         elif choice == "3":
             show_paper(conn)
+        elif choice == "4":
+            ask_analyst()
         elif choice == "0":
             break
         else:
-            print("Не понял выбор, введите 0, 1, 2 или 3.")
+            print("Не понял выбор, введите 0, 1, 2, 3 или 4.")
 
 
 if __name__ == "__main__":

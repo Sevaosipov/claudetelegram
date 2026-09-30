@@ -1,14 +1,21 @@
-"""telegram_bot.py's message-handling control flow -- subprocess.run and all
-network calls (Telegram, research.build) are monkeypatched; no real claude
-invocation or Telegram send happens in tests."""
+"""telegram_bot.py's message-handling control flow -- the analysis runner (subprocess.Popen) and
+all network calls (Telegram, research.build) are monkeypatched; no real claude invocation or
+Telegram send happens in tests. The runner itself is exercised only against harmless scripts
+written to tmp_path, never the real run_claude_analysis.sh."""
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
 import telegram_bot as tb
+
+REAL_POPEN = subprocess.Popen
 
 
 @pytest.fixture(autouse=True)
@@ -18,15 +25,35 @@ def _offline_lookup(monkeypatch):
 
     # /bought sizes its stop from the price history: none, offline.
     monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
-    # A queued lookup runs run_claude_analysis.sh, i.e. a real headless Claude pass
-    # over the real queue that can send Telegram messages. A test that doesn't stub
-    # subprocess.run itself must never reach it -- not even while it is still red.
+    # A queued lookup or question runs run_claude_analysis.sh, i.e. a real headless Claude pass
+    # over the real queue that can send Telegram messages. A test that doesn't stub the runner
+    # itself must never reach it -- not even while it is still red.
     def no_real_subprocess(*a, **k):
-        raise AssertionError("test reached the real subprocess.run")
+        raise AssertionError("test reached a real subprocess")
     monkeypatch.setattr(subprocess, "run", no_real_subprocess)
+    monkeypatch.setattr(subprocess, "Popen", no_real_subprocess)
     monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "ETH", "SOL"})
     monkeypatch.setattr(sources, "stock_universe_symbols", lambda: set())
     monkeypatch.setattr(sources, "current_price", lambda asset: (100.0, "Yahoo"))
+
+
+@pytest.fixture
+def analysis(monkeypatch):
+    """Stubs the shared runner: records its labels; `.ok` is what it returns (True by default)."""
+    state = SimpleNamespace(labels=[], ok=True)
+
+    def run(label):
+        state.labels.append(label)
+        return state.ok
+    monkeypatch.setattr(tb, "_run_analysis", run)
+    return state
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    out = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: out.append(msg) or True)
+    return out
 
 
 def test_extract_ticker_accepts_plain_and_dollar_prefixed():
@@ -41,69 +68,49 @@ def test_extract_ticker_rejects_garbage():
     assert tb._extract_ticker("") is None
 
 
-def test_handle_message_success_does_not_send_its_own_reply(conn, monkeypatch):
+def test_handle_message_success_does_not_send_its_own_reply(conn, analysis, sent):
     """On a successful synchronous run, run_claude_analysis.sh itself sends
     the one merged message -- telegram_bot.py must not also send anything,
     or the user would get two messages, defeating the whole point."""
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
-    sent = []
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     tb._handle_message(conn, "AAPL")
-    assert sent == []
+    assert sent == [] and analysis.labels == ["$AAPL"]
 
 
-def test_handle_message_enqueues_before_running(conn, monkeypatch):
+def test_handle_message_enqueues_before_running(conn, analysis):
     import db
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
     tb._handle_message(conn, "AAPL")
     assert [t for _, t in db.pending_analysis(conn)] == ["$AAPL"]  # stays pending; only
     # run_claude_analysis.sh itself marks a row processed, on a confirmed send
 
 
-def test_handle_message_falls_back_on_subprocess_failure(conn, monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stderr="boom"))
-    fake_rep = {"ticker": "AAPL", "opinion": None, "insiders": {"buys": [], "sells": []},
+_FAKE_REPORT = {"ticker": "AAPL", "opinion": None, "insiders": {"buys": [], "sells": []},
                 "stakes": [], "political": [], "tradingview": None}
-    monkeypatch.setattr("research.build", lambda conn, ticker: fake_rep)
-    sent = []
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+
+
+def test_handle_message_falls_back_when_the_run_fails(conn, analysis, sent, monkeypatch):
+    analysis.ok = False
+    monkeypatch.setattr("research.build", lambda conn, ticker: _FAKE_REPORT)
     tb._handle_message(conn, "AAPL")
     assert len(sent) == 1
     assert "попробуется снова" in sent[0]
 
 
-def test_handle_message_falls_back_on_subprocess_timeout(conn, monkeypatch):
-    def raise_timeout(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="run_claude_analysis.sh", timeout=300)
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
-    fake_rep = {"ticker": "AAPL", "opinion": None, "insiders": {"buys": [], "sells": []},
-                "stakes": [], "political": [], "tradingview": None}
-    monkeypatch.setattr("research.build", lambda conn, ticker: fake_rep)
-    sent = []
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
-    tb._handle_message(conn, "AAPL")
-    assert len(sent) == 1
-
-
-def test_handle_message_double_failure_sends_generic_error(conn, monkeypatch):
+def test_handle_message_double_failure_sends_generic_error(conn, analysis, sent, monkeypatch):
     """If the fallback itself blows up too (e.g. research.build fails), the
     user still gets SOME reply, not silence."""
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stderr="boom"))
+    analysis.ok = False
+
     def raise_error(conn, ticker):
         raise ValueError("network down")
     monkeypatch.setattr("research.build", raise_error)
-    sent = []
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     tb._handle_message(conn, "AAPL")
     assert len(sent) == 1
     assert "Не удалось" in sent[0]
 
 
-def test_handle_message_unrecognized_text_shows_help(conn, monkeypatch):
-    sent = []
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
-    tb._handle_message(conn, "???")
-    assert len(sent) == 1 and "тикер" in sent[0].lower()
+def test_a_ticker_runs_labelled_with_its_key(conn, analysis):
+    tb._handle_message(conn, "aapl")
+    assert analysis.labels == ["$AAPL"]
 
 
 def test_get_updates_treats_a_read_timeout_as_an_empty_poll():
@@ -314,54 +321,49 @@ def test_bought_oslo_ticker_without_a_price_uses_its_own_close(conn, monkeypatch
 
 
 # ------------------------------------------------------------- any-asset lookup
-def test_a_coin_is_queued_as_a_coin(conn, monkeypatch):
+def test_a_coin_is_queued_as_a_coin(conn, analysis):
     import db
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
     tb._handle_message(conn, "btc")
     tb._handle_message(conn, "$BTC")
     assert [t for _, t in db.pending_analysis(conn)] == ["CRYPTO:BTC", "$BTC"]
+    assert analysis.labels == ["CRYPTO:BTC", "$BTC"]
 
 
-def test_a_coin_symbol_in_the_stock_universe_is_queued_as_the_stock(conn, monkeypatch):
+def test_a_coin_symbol_in_the_stock_universe_is_queued_as_the_stock(conn, analysis, monkeypatch):
     import db
     import sources
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
     monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "DASH"})
     monkeypatch.setattr(sources, "stock_universe_symbols", lambda: {"DASH"})
     tb._handle_message(conn, "dash")
     assert [t for _, t in db.pending_analysis(conn)] == ["$DASH"]
 
 
-def test_an_unknown_stock_is_not_queued(conn, monkeypatch):
+def test_an_unknown_stock_is_not_queued(conn, analysis, sent, monkeypatch):
     import db
     import sources
-    sent = []
     monkeypatch.setattr(sources, "current_price", lambda asset: (None, None))
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     tb._handle_message(conn, "ZZZZQ")
-    assert db.pending_analysis(conn) == []
+    assert db.pending_analysis(conn) == [] and analysis.labels == []
     assert sent[0].startswith("Не нашёл такой тикер: ZZZZQ (или источники цен сейчас не отвечают). ")
     assert sent[0].endswith(tb.LOOKUP_HINT)
 
 
 @pytest.mark.parametrize("text", ["CRYPTO:FOO", "foo-usd"])
-def test_an_unknown_coin_is_not_queued(conn, monkeypatch, text):
-    import db
-    import sources
-    sent, priced = [], []
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
-    monkeypatch.setattr(sources, "current_price", lambda asset: priced.append(asset) or (None, None))
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
-    tb._handle_message(conn, text)
-    assert db.pending_analysis(conn) == [] and [a.symbol for a in priced] == ["FOO"]
-    assert "Не нашёл такой тикер: FOO (или источники цен сейчас не отвечают)" in sent[0]
-
-
-def test_a_listed_coin_is_queued_without_a_price_call(conn, monkeypatch):
+def test_an_unknown_coin_is_not_queued(conn, analysis, sent, monkeypatch, text):
     import db
     import sources
     priced = []
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr(sources, "current_price", lambda asset: priced.append(asset) or (None, None))
+    tb._handle_message(conn, text)
+    assert db.pending_analysis(conn) == [] and [a.symbol for a in priced] == ["FOO"]
+    assert analysis.labels == []
+    assert "Не нашёл такой тикер: FOO (или источники цен сейчас не отвечают)" in sent[0]
+
+
+def test_a_listed_coin_is_queued_without_a_price_call(conn, analysis, monkeypatch):
+    import db
+    import sources
+    priced = []
     monkeypatch.setattr(sources, "current_price", lambda asset: priced.append(asset) or (None, None))
     for text in ("sol", "CRYPTO:ETH", "btc-usd"):
         tb._handle_message(conn, text)
@@ -369,27 +371,310 @@ def test_a_listed_coin_is_queued_without_a_price_call(conn, monkeypatch):
     assert [t for _, t in db.pending_analysis(conn)] == ["CRYPTO:SOL", "CRYPTO:ETH", "CRYPTO:BTC"]
 
 
-def test_an_unknown_coin_with_a_price_is_queued(conn, monkeypatch):
+def test_an_unknown_coin_with_a_price_is_queued(conn, analysis):
     import db
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stderr=""))
     tb._handle_message(conn, "CRYPTO:NEWCOIN")
     assert [t for _, t in db.pending_analysis(conn)] == ["CRYPTO:NEWCOIN"]
 
 
-def test_not_a_ticker_gets_the_hint(conn, monkeypatch):
-    sent = []
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
-    tb._handle_message(conn, "#$%")
-    assert "BTC" in sent[0] and "EQNR.OL" in sent[0]
-
-
-def test_crypto_fallback_reply_uses_the_crypto_format(conn, monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stderr="x"))
+def test_crypto_fallback_reply_uses_the_crypto_format(conn, analysis, sent, monkeypatch):
+    analysis.ok = False
     monkeypatch.setattr("research.build", lambda conn, text: {
         "kind": "crypto", "ticker": "BTC", "name": "Bitcoin", "current": 1.0, "changes": {},
         "trend": None, "treasury": [], "etf_flows": [], "political": [], "onchain": [],
         "outlook": {"status": "no_table"}})
-    sent = []
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     tb._handle_message(conn, "BTC")
     assert sent[0].startswith("<b>BTC — Bitcoin</b>") and "Прогноз на месяц" in sent[0]
+
+
+# ------------------------------------------------------------------- questions
+def test_free_text_about_a_ticker_is_a_question_not_a_ticker(conn, analysis, sent):
+    import db
+    tb._handle_message(conn, "что думаешь про NVDA?")
+    [(qid, ticker)] = db.pending_analysis(conn)
+    assert ticker == "ВОПРОС" and db.queued_question(conn, qid) == "что думаешь про NVDA?"
+    assert analysis.labels == [f"question {qid}"]
+    assert sent == ["Думаю над вопросом… (1–5 мин)"]      # the analyst sends the answer itself
+
+
+def test_several_words_starting_with_a_ticker_are_a_question(conn, analysis):
+    import db
+    tb._handle_message(conn, "AAPL buy now")
+    assert [t for _, t in db.pending_analysis(conn)] == ["ВОПРОС"]
+
+
+def test_an_unresolved_single_word_is_a_question(conn, analysis, sent):
+    import db
+    tb._handle_message(conn, "привет")
+    [(qid, ticker)] = db.pending_analysis(conn)
+    assert ticker == "ВОПРОС" and db.queued_question(conn, qid) == "привет"
+    assert analysis.labels == [f"question {qid}"] and sent == ["Думаю над вопросом… (1–5 мин)"]
+
+
+@pytest.mark.parametrize("text", ["???", "#$%"])
+def test_punctuation_is_a_question_too(conn, analysis, text):
+    import db
+    tb._handle_message(conn, text)
+    assert [t for _, t in db.pending_analysis(conn)] == ["ВОПРОС"]
+
+
+def test_a_failed_question_run_says_it_stays_queued(conn, analysis, sent):
+    import db
+    analysis.ok = False
+    tb._handle_message(conn, "как дела у Tesla и Nvidia")
+    assert sent == ["Думаю над вопросом… (1–5 мин)",
+                    "Не успел ответить — вопрос в очереди, ответ придёт позже."]
+    assert len(db.pending_analysis(conn)) == 1            # still pending for the next run
+
+
+def test_ask_command_takes_the_text_after_it(conn, analysis, sent):
+    import db
+    tb._handle_message(conn, "/ask как выглядит BTC?")
+    [(qid, _)] = db.pending_analysis(conn)
+    assert db.queued_question(conn, qid) == "как выглядит BTC?"
+    assert analysis.labels == [f"question {qid}"]
+
+
+def test_ask_command_with_the_bot_name_and_any_case(conn, analysis):
+    import db
+    tb._handle_message(conn, "/Ask@my_bot  что с рынком")
+    [(qid, _)] = db.pending_analysis(conn)
+    assert db.queued_question(conn, qid) == "что с рынком"
+
+
+@pytest.mark.parametrize("text", ["/ask", "/ask   ", "/ask@my_bot"])
+def test_ask_without_text_shows_the_usage_line(conn, analysis, sent, text):
+    import db
+    tb._handle_message(conn, text)
+    assert sent == ["/ask ваш вопрос"]
+    assert db.pending_analysis(conn) == [] and analysis.labels == []
+
+
+def test_a_command_that_only_starts_with_ask_is_not_ask(conn, analysis, sent):
+    import db
+    tb._handle_message(conn, "/asking something")
+    assert sent == [tb.HELP_TEXT] and db.pending_analysis(conn) == []
+
+
+def test_a_question_is_capped_at_2000_characters(conn, analysis):
+    import db
+    tb._handle_message(conn, "я " * 3000)
+    [(qid, _)] = db.pending_analysis(conn)
+    assert len(db.queued_question(conn, qid)) == 2000
+
+
+def test_two_identical_questions_are_two_rows(conn, analysis):
+    import db
+    tb._handle_message(conn, "что нового?")
+    tb._handle_message(conn, "что нового?")
+    assert len(db.pending_analysis(conn)) == 2 and len(analysis.labels) == 2
+
+
+# ------------------------------------------------------------ /portfolio, help
+def test_portfolio_sends_the_model_summary_without_claude(conn, analysis, sent, monkeypatch):
+    import datetime as dt
+    import paper_report
+    seen = []
+    monkeypatch.setattr(paper_report, "format_summary",
+                        lambda c, today, **kw: seen.append((c, today, kw)) or "СВОДКА <b>x</b>")
+    tb._handle_message(conn, "/portfolio")
+    assert sent == ["СВОДКА <b>x</b>"] and analysis.labels == []
+    assert seen == [(conn, dt.date.today(), {"html": True})]
+
+
+def test_portfolio_before_any_run_says_so(conn, analysis, sent):
+    tb._handle_message(conn, "/portfolio@my_bot")
+    assert len(sent) == 1 and "ещё не запущен" in sent[0]
+
+
+def test_portfolio_failure_is_a_reply_not_a_crash(conn, analysis, sent, monkeypatch):
+    import paper_report
+
+    def boom(*a, **k):
+        raise ValueError("bad row")
+    monkeypatch.setattr(paper_report, "format_summary", boom)
+    tb._handle_message(conn, "/portfolio")
+    assert len(sent) == 1 and "ValueError" in sent[0]
+
+
+@pytest.mark.parametrize("text", ["/start", "/help", "/whatever", "", "   ", "/HELP@my_bot"])
+def test_help_for_start_help_unknown_commands_and_empty(conn, analysis, sent, text):
+    import db
+    tb._handle_message(conn, text)
+    assert sent == [tb.HELP_TEXT] and db.pending_analysis(conn) == [] and analysis.labels == []
+
+
+def test_help_text_lists_questions_and_the_portfolio():
+    assert "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком TradingView " \
+           "и данными бота." in tb.HELP_TEXT
+    assert "/portfolio — модельный портфель." in tb.HELP_TEXT
+    assert "/backtest" in tb.HELP_TEXT and "/bought" in tb.HELP_TEXT
+
+
+def test_the_module_docstring_mentions_questions():
+    assert "/ask" in tb.__doc__ and "question" in tb.__doc__.lower()
+
+
+def test_the_positions_commands_and_backtest_come_first(conn, analysis, sent, monkeypatch):
+    import backtest
+    monkeypatch.setattr(backtest, "backtest_ticker", lambda conn, t: {"n_purchases": 0, "ticker": t})
+    monkeypatch.setattr("telegram_notify.format_ticker_backtest", lambda r: f"BT {r['ticker']}")
+    tb._handle_message(conn, "/backtest aapl")
+    tb._handle_message(conn, "/positions")
+    assert sent[0] == "BT AAPL" and analysis.labels == []
+
+
+# ------------------------------------------------------------------ the runner
+def _script(tmp_path, body, name="run.sh"):
+    path = tmp_path / name
+    path.write_text("#!/bin/bash\n" + body)
+    path.chmod(0o755)
+    return path
+
+
+def _real_runner(monkeypatch, script, timeout=20, grace=15, reap=5):
+    monkeypatch.setattr(subprocess, "Popen", REAL_POPEN)      # only ever the tmp script below
+    monkeypatch.setattr(tb, "RUN_ANALYSIS_SCRIPT", script)
+    monkeypatch.setattr(tb, "RUN_ANALYSIS_TIMEOUT", timeout)
+    monkeypatch.setattr(tb, "RUN_ANALYSIS_KILL_GRACE", grace)
+    monkeypatch.setattr(tb, "RUN_ANALYSIS_REAP_WAIT", reap)
+
+
+def _gone(pid, within=5.0):
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_the_run_timeout_is_420_seconds():
+    assert tb.RUN_ANALYSIS_TIMEOUT == 420
+
+
+def test_the_runner_returns_true_on_exit_zero_and_false_otherwise(monkeypatch, tmp_path):
+    _real_runner(monkeypatch, _script(tmp_path, "exit 0\n"))
+    assert tb._run_analysis("t") is True
+    _real_runner(monkeypatch, _script(tmp_path, "echo boom >&2; exit 3\n", "bad.sh"))
+    assert tb._run_analysis("t") is False
+
+
+def test_the_runner_runs_the_script_from_the_project_in_a_session_of_its_own(monkeypatch):
+    calls = []
+
+    class Proc:
+        pid, returncode = 4242, 0
+
+        def communicate(self, timeout=None):
+            calls.append(("communicate", timeout))
+            return "", ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: calls.append((argv, kw)) or Proc())
+    assert tb._run_analysis("question 5") is True
+    (argv, kw), (name, timeout) = calls
+    assert argv == [str(tb.RUN_ANALYSIS_SCRIPT)] and kw["cwd"] == str(tb.BASE_DIR)
+    assert kw["start_new_session"] is True and kw["text"] is True
+    assert kw["stdout"] == subprocess.PIPE and kw["stderr"] == subprocess.PIPE
+    assert kw["stdin"] == subprocess.DEVNULL              # Claude never waits on a terminal
+    assert timeout == tb.RUN_ANALYSIS_TIMEOUT
+
+
+def test_the_runner_survives_a_script_that_cannot_start(monkeypatch, tmp_path):
+    _real_runner(monkeypatch, tmp_path / "missing.sh")
+    assert tb._run_analysis("t") is False
+
+
+def test_a_timeout_sends_sigterm_to_the_group_first(monkeypatch):
+    signals, waits = [], []
+
+    class Proc:
+        pid, returncode = 4242, None
+
+        def communicate(self, timeout=None):
+            waits.append(timeout)
+            if len(waits) == 1:
+                raise subprocess.TimeoutExpired("run.sh", timeout)
+            self.returncode = -15
+            return "", ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append((pgid, sig)))
+    assert tb._run_analysis("t") is False
+    assert signals == [(4242, signal.SIGTERM)]                 # the analyst was given time to clean up
+    assert waits[0] == tb.RUN_ANALYSIS_TIMEOUT and waits[1] == tb.RUN_ANALYSIS_KILL_GRACE
+
+
+def test_a_group_that_ignores_sigterm_is_killed_after_the_grace(monkeypatch):
+    signals = []
+
+    class Proc:
+        pid, returncode = 4242, None
+        calls = 0
+
+        def communicate(self, timeout=None):
+            Proc.calls += 1
+            if Proc.calls <= 2:
+                raise subprocess.TimeoutExpired("run.sh", timeout)
+            return "", ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append(sig))
+    assert tb._run_analysis("t") is False
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert tb.RUN_ANALYSIS_KILL_GRACE == 15
+
+
+def test_a_real_timeout_stops_the_whole_group_with_sigterm(monkeypatch, tmp_path):
+    """The script starts a background child and traps SIGTERM: the group gets SIGTERM (the
+    marker), the child dies with it, and the runner is back well inside the grace."""
+    marker, child = tmp_path / "term", tmp_path / "child.pid"
+    script = _script(tmp_path, f"""
+trap 'echo term > {marker}; kill $CHILD; exit 143' TERM
+sleep 60 &
+CHILD=$!
+echo $CHILD > {child}
+wait
+""")
+    _real_runner(monkeypatch, script, timeout=1)
+    started = time.monotonic()
+    assert tb._run_analysis("t") is False
+    assert time.monotonic() - started < 10
+    assert marker.read_text().strip() == "term"
+    assert _gone(int(child.read_text()))
+
+
+def test_a_real_group_that_ignores_sigterm_is_killed(monkeypatch, tmp_path):
+    child = tmp_path / "child.pid"
+    script = _script(tmp_path, f"""
+trap '' TERM
+sleep 60 &
+echo $! > {child}
+while true; do sleep 1; done
+""")
+    _real_runner(monkeypatch, script, timeout=1, grace=1)
+    assert tb._run_analysis("t") is False
+    assert _gone(int(child.read_text()))
+
+
+def test_a_real_run_does_not_wait_for_a_grandchild_that_keeps_the_pipes(monkeypatch, tmp_path):
+    """Claude runs in a session of its own and can hold the bot's pipes after the group is
+    gone: the runner must still come back."""
+    grandchild = tmp_path / "grandchild.pid"
+    script = _script(tmp_path, f"""
+trap '' TERM
+{sys.executable} -c "import os, time; os.setsid(); open('{grandchild}', 'w').write(str(os.getpid())); time.sleep(30)" &
+while true; do sleep 1; done
+""")
+    _real_runner(monkeypatch, script, timeout=1, grace=1, reap=1)
+    try:
+        started = time.monotonic()
+        assert tb._run_analysis("t") is False
+        assert time.monotonic() - started < 10
+    finally:
+        try:
+            os.kill(int(grandchild.read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
