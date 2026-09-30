@@ -288,6 +288,16 @@ def test_a_thirteenth_buy_finds_no_place(conn):
     assert len(report.buys) == 12
 
 
+def test_the_same_skip_on_consecutive_days_is_recorded_once(conn):
+    tickers = [f"T{i:02d}" for i in range(13)]
+    series = {t: _stock_bars() for t in tickers}
+    _run(conn, [_sig(t) for t in tickers], series)
+    _run(conn, [_sig(t) for t in tickers], series, today=TODAY + dt.timedelta(days=1))
+    [skipped] = _by_status(conn, S, "skipped")
+    assert (skipped["ticker"], skipped["note"], skipped["created"]) == ("T12", "мест нет", TODAY.isoformat())
+    assert len(_by_status(conn, S, "pending")) == 12
+
+
 def test_a_fourth_buy_in_one_sector_is_skipped_and_an_unknown_sector_is_free(conn):
     sectors = {"AAA": "Tech", "BBB": "Tech", "CCC": "Tech", "DDD": "Tech", "EEE": "Energy"}
     tickers = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]                 # FFF: no sector known
@@ -308,14 +318,49 @@ def test_held_positions_count_toward_the_sector_cap(conn):
     assert (o["ticker"], o["status"], o["note"]) == ("AAA", "skipped", "сектор заполнен")
 
 
-def test_the_default_sector_comes_from_yfinance_info(conn, monkeypatch):
-    import research
+def _fake_yfinance(monkeypatch, info=None, error=None):
+    """Stands in for yfinance.Ticker(symbol).info; returns the list of symbols asked."""
+    import yfinance
     asked = []
-    monkeypatch.setattr(research, "_yf_info", lambda symbol: asked.append(symbol) or {"sector": "Tech"})
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            asked.append(symbol)
+
+        @property
+        def info(self):
+            if error:
+                raise error
+            return info
+    monkeypatch.setattr(yfinance, "Ticker", FakeTicker)
+    return asked
+
+
+def test_the_default_sector_comes_from_yfinance_info(conn, monkeypatch):
+    asked = _fake_yfinance(monkeypatch, {"sector": "Tech"})
     tickers = ["AAA", "BBB", "CCC", "DDD"]
     _run(conn, [_sig(t) for t in tickers], {t: _stock_bars() for t in tickers}, sector_fn=None)
     assert [o["note"] for o in paper.orders(conn, S)] == [None, None, None, "сектор заполнен"]
     assert asked.count("AAA") == 1                            # looked up once for the whole run
+
+
+def test_the_default_sector_is_asked_on_the_listings_own_symbol(monkeypatch):
+    asked = _fake_yfinance(monkeypatch, {"sector": "Energy"})
+    assert model._default_sector("EQNR", "NORWAY") == "Energy"
+    assert model._default_sector("BRK.B", "SEC") == "Energy"
+    assert asked == ["EQNR.OL", "BRK-B"]                      # not EQNR-OL
+
+
+def test_the_default_sector_is_none_when_unknown_or_failing(monkeypatch, capsys):
+    asked = _fake_yfinance(monkeypatch, {"longName": "Acme"})
+    assert model._default_sector("AAA", "SEC") is None        # no sector in the info
+    asked.clear()
+    assert model._default_sector("DE0007164600", "BAFIN") is None and asked == []   # no listing
+    _fake_yfinance(monkeypatch, None)
+    assert model._default_sector("AAA", "SEC") is None        # info is None
+    _fake_yfinance(monkeypatch, error=OSError("down"))
+    assert model._default_sector("AAA", "SEC") is None
+    assert "no sector for AAA" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("closed_days_ago,placed", [(10, False), (30, False), (31, True)])
@@ -383,6 +428,12 @@ def _exit(conn, pos, closes=None, headlines=None, today=TODAY):
 def test_the_trailing_stop_follows_the_highest_close_since_the_fill(conn, last, expected):
     pos = _position(conn, stop_pct=0.10)                        # peak 130: the line is 117
     assert _exit(conn, pos, _path(last)) == expected
+
+
+def test_the_fill_days_own_close_can_be_the_peak(conn):
+    pos = _position(conn, stop_pct=0.10)
+    fell = [100, 95, 96, 95, 94, 93, 92, 91, 90, 89]         # the fill day is the highest close
+    assert _exit(conn, pos, fell) == "стоп: −10% от максимума"
 
 
 def test_a_high_before_the_fill_does_not_set_the_peak(conn):
@@ -459,6 +510,34 @@ def test_a_red_flag_headline_sells_and_other_news_does_not(conn):
     bad = [{"title": "Analyst downgrade for Acme", "published": "2026-10-01"}]
     assert _exit(conn, pos, [100.0] * 10, red) == "новости: Acme under SEC investigation"
     assert _exit(conn, pos, [100.0] * 10, bad) is None
+
+
+def test_headlines_are_fetched_only_when_no_earlier_rule_fires(conn):
+    asked = []
+
+    def headlines():
+        asked.append(1)
+        return [{"title": "Acme accused of fraud"}]
+
+    pos = _position(conn, stop_pct=0.10)
+    assert _exit(conn, pos, _path(116), headlines) == "стоп: −10% от максимума"
+    assert asked == []                                        # the stop decided: no fetch
+    assert _exit(conn, pos, _path(118), headlines) == "новости: Acme accused of fraud"
+    assert asked == [1]
+
+
+def test_a_coins_headlines_are_fetched_last_too(conn):
+    asked = []
+
+    def headlines():
+        asked.append(1)
+        return [{"title": "Exchange hack drains hot wallet"}]
+
+    pos = _coin_position(conn)
+    assert _coin_exit(conn, pos, _falling(), headlines) == "тренд вниз"
+    assert asked == []
+    assert _coin_exit(conn, pos, _rising(), headlines) == "новости: Exchange hack drains hot wallet"
+    assert asked == [1]
 
 
 def test_the_first_matching_exit_wins(conn):
@@ -547,6 +626,14 @@ def test_headlines_are_fetched_once_per_ticker_for_the_whole_run(conn):
     assert ("CRYPTO:BTC", "CRYPTO") in calls and ("CRYPTO:ETH", "CRYPTO") in calls
 
 
+def test_a_position_sold_on_the_stop_never_asks_for_its_headlines(conn):
+    _position(conn, "AAA", stop_pct=0.10)                     # the zigzag's peak 120 puts the line at 108
+    calls = []
+    report = _run(conn, [], {"AAA": _stock_bars()}, news_fn=lambda t, s: calls.append(t) or [])
+    assert [t.reasons for t in report.sells] == [["стоп: −10% от максимума"]]
+    assert "AAA" not in calls
+
+
 # ------------------------------------------------------------- the run: coins
 def test_a_rising_coin_with_a_bullish_flow_is_bought_for_the_crypto_sleeve(conn):
     report = _run(conn, [_flow("BTC")], {"BTC-USD": _rising()})
@@ -576,8 +663,20 @@ def test_a_falling_coin_that_is_held_is_sold_as_a_downtrend(conn):
     [o] = [o for o in paper.orders(conn, C) if o["side"] == "sell"]
     assert (o["status"], o["reason"]) == ("pending", "тренд вниз")
     [t] = report.sells
-    assert (t.ticker, t.reasons) == ("CRYPTO:BTC", ["тренд вниз"])
+    assert (t.ticker, t.company, t.reasons) == ("CRYPTO:BTC", "BTC", ["тренд вниз"])
     assert t.result == pytest.approx(101 / 105 - 1)
+
+
+@pytest.mark.parametrize("closed_days_ago,placed", [(3, False), (7, False), (8, True)])
+def test_a_coin_sold_within_7_days_is_not_bought_back_though_its_trend_is_up(conn, closed_days_ago, placed):
+    _coin_position(conn, fill_days_ago=20, closed_days_ago=closed_days_ago)
+    report = _run(conn, [_flow("BTC")], {"BTC-USD": _rising()})
+    [o] = paper.orders(conn, C)
+    if placed:
+        assert (o["status"], len(report.buys)) == ("pending", 1)
+    else:
+        assert (o["status"], o["note"], report.buys) == ("skipped", "недавно продан", [])
+        assert o["score"] == 75.0                              # the score it would have bought on
 
 
 def test_a_held_coin_is_not_bought_again(conn):
@@ -657,6 +756,7 @@ def test_a_red_flag_headline_blocks_a_stock(conn):
     (30, "SCHEDULE 13D/A", 8.0, 15),         # 30 days ago still counts
     (31, "SCHEDULE 13D", 8.0, 0),
     (10, "SCHEDULE 13G", 12.0, 6),           # a passive 10%+
+    (10, "SCHEDULE 13G", 10.0, 6),           # exactly 10% counts
     (10, "SCHEDULE 13G", 9.0, 0),
 ])
 def test_recent_stake_filings_are_a_trigger_for_a_cluster_on_the_same_ticker(
@@ -673,6 +773,13 @@ def test_todays_candidates_are_triggers_too_and_politicians_count(conn):
     scored = {s.ticker: s for s in _score(conn, signals, {"AAA": _stock_bars(), "BBB": _stock_bars()})}
     assert scored["AAA"].triggers == 20 and "покупают политики" in scored["AAA"].reasons   # 15 + 5
     assert scored["BBB"].triggers == 6 and scored["BBB"].total == 66.0
+
+
+@pytest.mark.parametrize("percent,points", [(10.0, 6), (9.9, 0)])
+def test_a_passive_stake_among_todays_candidates_counts_from_10_percent(conn, percent, points):
+    signals = [_sig("AAA"), _stake("AAA", "Big Fund", "SCHEDULE 13G", percent)]
+    [aaa] = [s for s in _score(conn, signals, {"AAA": _stock_bars()}) if s.ticker == "AAA"]
+    assert aaa.triggers == points
 
 
 def test_the_trading_212_label_never_changes_the_decision(conn):

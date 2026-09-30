@@ -252,6 +252,27 @@ def test_skips_are_recorded_with_why(conn):
     assert notes == ["нет котировки", "мест нет"]
 
 
+def test_a_repeated_skip_is_recorded_once_for_two_weeks(conn):
+    code = _book(conn)
+
+    def skip(ticker, source, on):
+        return paper.place_buy(conn, code, ticker, source, "Сильный", on, 8_000.0, max_positions=10)
+
+    def skips():
+        return [(o["ticker"], o["note"], o["created"]) for o in paper.orders(conn, code)]
+
+    assert skip("DE0007164600", "BAFIN", TODAY) == "skipped"
+    assert skip("DE0007164600", "BAFIN", TODAY + dt.timedelta(days=1)) == "skipped"   # still answered
+    assert skip("DE0007164600", "BAFIN", TODAY + dt.timedelta(days=14)) == "skipped"
+    assert skips() == [("DE0007164600", "нет котировки", TODAY.isoformat())]
+    assert skip("DE0007164600", "BAFIN", TODAY + dt.timedelta(days=15)) == "skipped"  # a fresh row
+    assert len(skips()) == 2
+    for i in range(10):                                        # another ticker, another reason: recorded
+        paper.place_buy(conn, code, f"T{i}", "SEC", "Сильный", TODAY, 100.0, max_positions=10)
+    assert skip("T10", "SEC", TODAY) == "skipped"
+    assert ("T10", "мест нет", TODAY.isoformat()) in skips()
+
+
 def test_a_partial_slice_needs_half_a_slice_of_cash(conn):
     code = _book(conn)
     conn.execute("UPDATE paper_books SET cash_eur = 5000 WHERE code = ?", (code,))

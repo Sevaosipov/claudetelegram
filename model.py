@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import functools
 import json
 import sys
 import types
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import assets
@@ -43,11 +45,14 @@ NEWS_MIN_PRESCORE = 35.0      # headlines are fetched only for a stock scoring t
 MAX_STOCK_POSITIONS = 12      # open plus pending buys
 MAX_PER_SECTOR = 3
 REBUY_COOLDOWN_DAYS = 30
+COIN_REBUY_COOLDOWN_DAYS = 7  # a coin's trend can stay up through a stop-out: don't buy it straight back
 DEAD_MONEY_BDAYS = 60
 DEAD_MONEY_MIN_RETURN = 0.05
 MAX_HOLD_DAYS = 365
 CAUTION_DAYS = 7              # a coin's inflow or outflow signal counts this long
 STAKE_LOOKBACK_DAYS = 30
+PASSIVE_BIG_PERCENT = 10.0    # a 13G at least this large counts as a trigger
+MIN_FILL_FRACTION = 0.5       # a buy with less cash than its size goes ahead if the cash is this much of it
 FALLBACK_STOP = {"stock": 0.15, "crypto": 0.25}    # a position with no stop and too little history
 FINDER_CLUSTER_KWARGS = {"min_value": 50_000, "solo_threshold": 250_000}
 FINDER_STAKE_KWARGS = {"min_percent": 5.0, "activist_only": False,
@@ -109,11 +114,12 @@ def _published_since(item: dict, since: str) -> bool:
 
 
 def _default_sector(ticker: str, source: str | None) -> str | None:
-    """The company's sector according to yfinance, or None (no listing, no data, no network)."""
+    """The company's sector according to yfinance, or None (no listing, no data, no network).
+    Asked on the listing's own Yahoo symbol: research._yf_info would turn EQNR.OL into EQNR-OL."""
     try:
-        import research
+        import yfinance as yf
         listed = paper.listing(ticker, source)
-        return (research._yf_info(listed[0]).get("sector") or None) if listed else None
+        return ((yf.Ticker(listed[0]).info or {}).get("sector") or None) if listed else None
     except Exception as e:
         print(f"[model] no sector for {ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return None
@@ -171,14 +177,14 @@ def candidate_signals(conn, today: dt.date) -> list:
 
 # ---------------------------------------------------------------- scoring
 def _context(conn, candidates: list, today: dt.date) -> tuple[set[str], set[str], set[str]]:
-    """The tickers that an activist 13D, a passive 13G of 10%+ or politicians are buying:
+    """The tickers that an activist 13D, a big passive 13G or politicians are buying:
     from today's candidates and from the stake filings of the last STAKE_LOOKBACK_DAYS."""
     since = (today - dt.timedelta(days=STAKE_LOOKBACK_DAYS)).isoformat()
     activist = {r[0] for r in conn.execute(
         "SELECT ticker FROM sec_stakes WHERE form_type LIKE '%13D%' AND event_date >= ?", (since,))}
     passive = {r[0] for r in conn.execute(
-        "SELECT ticker FROM sec_stakes WHERE form_type LIKE '%13G%' AND percent_of_class >= 10 "
-        "AND event_date >= ?", (since,))}
+        "SELECT ticker FROM sec_stakes WHERE form_type LIKE '%13G%' AND percent_of_class >= ? "
+        "AND event_date >= ?", (PASSIVE_BIG_PERCENT, since))}
     politicians: set[str] = set()
     for c in candidates:
         if getattr(c, "source", None) in _POLITICIANS:
@@ -186,7 +192,7 @@ def _context(conn, candidates: list, today: dt.date) -> tuple[set[str], set[str]
         if hasattr(c, "percent"):
             if c.is_activist:
                 activist.add(c.ticker)
-            elif c.percent >= 10:
+            elif c.percent >= PASSIVE_BIG_PERCENT:
                 passive.add(c.ticker)
     return activist, passive, politicians
 
@@ -286,8 +292,16 @@ def _activist_cut(conn, pos: dict) -> bool:
     return after is not None and before is not None and after < before
 
 
+def _news_red_flag(headlines, *, coin: bool = False) -> str | None:
+    """The first red-flag headline. `headlines` may be a function returning them, called
+    only now, so the earlier rules can decide without a news fetch."""
+    if callable(headlines):
+        headlines = headlines()
+    return model_score.news_part(headlines, coin=coin)[1]
+
+
 def stock_exit_reason(conn, pos: dict, bars: list[tuple[str, float]], today: dt.date,
-                      headlines: list[dict] | None) -> str | None:
+                      headlines: list[dict] | None | Callable[[], list[dict]]) -> str | None:
     """Why a stock position should be sold, or None. The first rule that holds wins."""
     reason = _trailing_stop(pos, bars, "stock")
     if reason:
@@ -304,12 +318,13 @@ def stock_exit_reason(conn, pos: dict, bars: list[tuple[str, float]], today: dt.
         return "стоит на месте"
     if (today - dt.date.fromisoformat(pos["fill_date"])).days >= MAX_HOLD_DAYS:
         return "год в позиции"
-    _points, red = model_score.news_part(headlines)
+    red = _news_red_flag(headlines)
     return f"новости: {red}" if red else None
 
 
 def coin_exit_reason(conn, pos: dict, bars: list[tuple[str, float]], today: dt.date,
-                     headlines: list[dict] | None, trend_fn) -> str | None:
+                     headlines: list[dict] | None | Callable[[], list[dict]],
+                     trend_fn) -> str | None:
     """Why a coin position should be sold, or None. The first rule that holds wins."""
     reason = _trailing_stop(pos, bars, "crypto")
     if reason:
@@ -321,7 +336,7 @@ def coin_exit_reason(conn, pos: dict, bars: list[tuple[str, float]], today: dt.d
         conn, types.SimpleNamespace(ticker=pos["ticker"], opened_at=pos["fill_date"]), today, trend_fn)
     if caution:
         return f"осторожно: {caution}"
-    _points, red = model_score.news_part(headlines, coin=True)
+    red = _news_red_flag(headlines, coin=True)
     return f"новости: {red}" if red else None
 
 
@@ -346,7 +361,7 @@ def _sell_exits(conn, code, prices, today, news_fn, trend_fn, sells: list[Trade]
         if pos["id"] in selling:
             continue
         bars = prices.bars(pos["symbol"], paper.history_days(pos["fill_date"], today))
-        headlines = news_fn(pos["ticker"], pos["source"])
+        headlines = functools.partial(news_fn, pos["ticker"], pos["source"])   # fetched last, if at all
         if code == STOCK_BOOK:
             reason = stock_exit_reason(conn, pos, bars, today, headlines)
         else:
@@ -355,7 +370,7 @@ def _sell_exits(conn, code, prices, today, news_fn, trend_fn, sells: list[Trade]
             continue
         paper.place_sell(conn, code, pos, reason, today)
         value = pos["last_value"] if pos["last_value"] is not None else pos["net_eur"]
-        sells.append(Trade("sell", pos["ticker"], pos["ticker"], value, pos["stop_pct"],
+        sells.append(Trade("sell", pos["ticker"], crypto.symbol_of(pos["ticker"]), value, pos["stop_pct"],
                            pos["score"], [reason], value / pos["cost_eur"] - 1))
 
 
@@ -376,7 +391,8 @@ def _order_buy(conn, code: str, s, source: str, kind: str, today: dt.date,
     if size < model_score.MIN_ORDER_EUR:
         _skip(conn, code, s, source, today, "мало")
         return None
-    result = paper.place_buy(conn, code, s.ticker, source, _reason(s), today, size, min_fraction=0.5,
+    result = paper.place_buy(conn, code, s.ticker, source, _reason(s), today, size,
+                             min_fraction=MIN_FILL_FRACTION,
                              insiders=insiders, stop_pct=s.stop_pct, score=s.total)
     return paper.pending_orders(conn, code)[-1]["amount_eur"] if result == "pending" else None
 
@@ -385,10 +401,13 @@ def _pending_buys(conn, code: str) -> list[dict]:
     return [o for o in paper.pending_orders(conn, code) if o["side"] == "buy"]
 
 
+def _recently_sold(conn, code: str, today: dt.date, days: int) -> set[str]:
+    cutoff = (today - dt.timedelta(days=days)).isoformat()
+    return {p["ticker"] for p in paper.closed_positions(conn, code) if p["closed_date"] >= cutoff}
+
+
 def _buy_stocks(conn, scored, today, sector_of, buys: list[Trade]) -> None:
-    cutoff = (today - dt.timedelta(days=REBUY_COOLDOWN_DAYS)).isoformat()
-    recently_sold = {p["ticker"] for p in paper.closed_positions(conn, STOCK_BOOK)
-                     if p["closed_date"] >= cutoff}
+    recently_sold = _recently_sold(conn, STOCK_BOOK, today, REBUY_COOLDOWN_DAYS)
     for s in scored:
         if s.kind != "stock" or s.decision != model_score.BUY:
             continue
@@ -421,11 +440,15 @@ def _sector_full(sector_of, s, holdings: list[dict]) -> bool:
 
 
 def _buy_coins(conn, scored, today, buys: list[Trade]) -> None:
+    recently_sold = _recently_sold(conn, CRYPTO_BOOK, today, COIN_REBUY_COOLDOWN_DAYS)
     for s in scored:
         if s.kind != "crypto" or s.decision != model_score.BUY:
             continue
         held = paper.open_positions(conn, CRYPTO_BOOK) + _pending_buys(conn, CRYPTO_BOOK)
         if s.ticker in {p["ticker"] for p in held}:
+            continue
+        if s.ticker in recently_sold:
+            _skip(conn, CRYPTO_BOOK, s, "CRYPTO", today, "недавно продан")
             continue
         amount = _order_buy(conn, CRYPTO_BOOK, s, "CRYPTO", "crypto", today)
         if amount is not None:

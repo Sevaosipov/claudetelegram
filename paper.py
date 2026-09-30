@@ -31,6 +31,7 @@ FEE_FOREIGN = 0.0025            # Trading 212's 0.15% currency fee plus ~0.10% s
 FEE_EUR = 0.0010
 FEE_COIN = 0.0050
 ORDER_MAX_BUSINESS_DAYS = 5
+SKIP_DEDUPE_DAYS = 14           # the same skip (book, ticker, why) is recorded once in this many days
 PRICE_DAYS = 420                # room for a 200-day average and a 182-day hold
 CRYPTO_COINS = ("BTC", "ETH")
 CRYPTO_HOLD_DAYS = 90
@@ -258,6 +259,11 @@ def _record(conn, code: str, ticker: str, source: str | None, side: str, reason:
             position_id: int | None = None, note: str | None = None, insiders=(),
             target: float | None = None, stop_pct: float | None = None,
             score: float | None = None) -> None:
+    if status == "skipped" and conn.execute(
+            "SELECT 1 FROM paper_orders WHERE book = ? AND ticker = ? AND note IS ? "
+            "AND status = 'skipped' AND created >= ?",
+            (code, ticker, note, (today - dt.timedelta(days=SKIP_DEDUPE_DAYS)).isoformat())).fetchone():
+        return      # a signal that stays fresh would otherwise repeat its skip every day
     conn.execute(
         "INSERT INTO paper_orders (book, ticker, source, side, amount_eur, position_id, reason, "
         "created, status, note, insiders, target, stop_pct, score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
