@@ -22,8 +22,9 @@
 # analyst.py builds the claude command (analyst.claude_command: the absolute ~/.local/bin/claude,
 # not relying on launchd's PATH; --restricted, so the Claude settings files are ignored;
 # --tools Bash, so no file tools; only the TradingView MCP server; --permission-mode dontAsk; the
-# shell allowed only `analyst.py context|portfolio|news` plus nine read-and-navigate TradingView
-# tools) and hands it an environment without any key (analyst.claude_env). This script's own
+# shell allowed only `<project>/.venv/bin/python <project>/analyst.py context|portfolio|news`, by
+# absolute path, plus nine read-and-navigate TradingView tools), runs it in a fresh empty temporary
+# folder outside the project, and hands it an environment without any key (analyst.claude_env). This script's own
 # process keeps the keys: analyst.py loads .env itself to send the answers. It also holds a lock on
 # data/analyst.lock so the launchd job, the bot's own run and the terminal never answer the same
 # rows twice or drive the chart at once, stops a Claude run that takes longer than 15 minutes, and

@@ -88,13 +88,22 @@ def _chunk_lines(text: str, size: int) -> list[str]:
 
 
 def send_text(text: str) -> bool:
+    """Send `text` (in chunks of MAX_LEN); True only when every chunk went through."""
+    accepted, total = send_text_parts(text)
+    return bool(total) and accepted == total
+
+
+def send_text_parts(text: str) -> tuple[int, int]:
+    """send_text, telling how it went: (chunks Telegram accepted, chunks sent). (0, 0) without
+    the credentials. A caller can tell "nothing went out" from "part of it went out"."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("[telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set, skipping notification")
-        return False
-    ok = True
-    for chunk in _chunk(text, MAX_LEN):
+        return 0, 0
+    chunks = _chunk(text, MAX_LEN)
+    accepted = 0
+    for chunk in chunks:
         try:
             resp = requests.post(
                 API_URL.format(token=token),
@@ -107,10 +116,10 @@ def send_text(text: str) -> bool:
                 timeout=15,
             )
             resp.raise_for_status()
+            accepted += 1
         except requests.RequestException as e:
             print(f"[telegram] send failed: {_redact(str(e), token)}")
-            ok = False
-    return ok
+    return accepted, len(chunks)
 
 
 def format_sec_line(p, avg_return_pct: float | None) -> str:

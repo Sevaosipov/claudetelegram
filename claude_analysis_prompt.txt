@@ -32,6 +32,9 @@ is notable) and your TradingView read of the trend and the levels.
 A QUESTION. Answer it as the method says: the assets it is about, their bot context, the
 TradingView read, the answer.
 
-Scope: you only answer. You send nothing yourself (your final message is sent for you), write
-no files (you have no file tools), run no other job of this repository, and leave the owner's
-TradingView chart on the symbol and timeframe you found it on.
+Scope: you only answer. You run in an empty folder outside the bot's project; the only
+commands you can run are `{ANALYST_CMD} context 'TICKER'`, `{ANALYST_CMD} portfolio` and
+`{ANALYST_CMD} news 'QUERY'`, as the method says. You send nothing yourself (your final
+message is sent for you), read or write no files (you have no file tools), run no other job
+of the bot, and leave the owner's TradingView chart on the symbol and timeframe you found it
+on.

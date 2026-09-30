@@ -943,6 +943,23 @@ def test_a_signal_that_cannot_reach_the_watchlist_is_scored_without_any_fetch(co
         s = stocks[ticker]
         assert (s.total, s.decision, s.momentum, s.news) == (total, "skip", 0, 0)
         assert s.stop_pct is None and s.last_close is None
+        assert s.reasons[-1] == "импульс и новости не считались: до наблюдения не дотянуть"
+    assert "не считались" not in " ".join(stocks["EDG"].reasons)
+
+
+def test_without_pruning_even_a_weak_signal_gets_its_prices_and_news(conn):
+    """The analyst asks about one ticker: momentum and news are worth fetching then."""
+    fetched, asked = [], []
+
+    def fetch(symbol, days=None):
+        fetched.append(symbol)
+        return _stock_bars()
+
+    low = _stake("LOW", form="SCHEDULE 13G", percent=9.0)
+    scored = model.score_today(conn, TODAY, fetch=fetch, news_fn=lambda t, s: asked.append(t) or [],
+                               trend_fn=lambda c, s: None, signals=[low], t212=T212, prune=False)
+    [s] = [s for s in scored if s.ticker == "LOW"]
+    assert "LOW" in fetched and "не считались" not in " ".join(s.reasons)
 
 
 def test_the_pruning_line_is_the_watch_bar_less_the_momentum_and_news_caps(conn):

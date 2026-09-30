@@ -58,6 +58,7 @@ PASSIVE_BIG_PERCENT = 10.0    # ... and a 13G from this one; both below model_sc
 # news is not worth a price or a news fetch.
 PRUNE_HEADROOM = model_score.MOMENTUM_CAP + model_score.NEWS_MAX
 SCORED_KEY = "model_scored_{day}"   # kv_cache: the day's scores, for the menu and the analyst
+PRUNED_REASON = "импульс и новости не считались: до наблюдения не дотянуть"
 MIN_FILL_FRACTION = 0.5       # a buy with less cash than its size goes ahead if the cash is this much of it
 FALLBACK_STOP = {"stock": 0.15, "crypto": 0.25}    # a position with no stop and too little history
 FINDER_CLUSTER_KWARGS = {"min_value": 50_000, "solo_threshold": 250_000}
@@ -216,7 +217,7 @@ def _context(conn, candidates: list, today: dt.date) -> tuple[set[str], set[str]
     return activist, passive, politicians
 
 
-def _score_stocks(conn, candidates, prices, today, news_fn, t212) -> list:
+def _score_stocks(conn, candidates, prices, today, news_fn, t212, prune: bool = True) -> list:
     activist, passive, politicians = _context(conn, candidates, today)
     best: dict[str, model_score.StockScore] = {}
     for sig in candidates:
@@ -226,7 +227,9 @@ def _score_stocks(conn, candidates, prices, today, news_fn, t212) -> list:
                  "politicians": sig.ticker in politicians,
                  "t212": None if t212 is None else t212.can_buy(sig.ticker, sig.source)}
         score = model_score.score_stock(sig, [], None, **flags)     # insiders and triggers only
-        if score.insiders + score.triggers + PRUNE_HEADROOM >= model_score.STOCK_WATCH:
+        if prune and score.insiders + score.triggers + PRUNE_HEADROOM < model_score.STOCK_WATCH:
+            score.reasons.append(PRUNED_REASON)   # its «импульс 0 · новости 0» is not a reading
+        else:
             listed = paper.listing(sig.ticker, sig.source)
             closes = [c for _d, c in prices.bars(listed[0])] if listed else []
             score = model_score.score_stock(sig, closes, None, **flags)
@@ -293,10 +296,12 @@ def cached_scores(conn, today: dt.date | None = None) -> list | None:
 
 
 def score_today(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_fn=None,
-                signals=None, t212=None, prices=None) -> list:
+                signals=None, t212=None, prices=None, prune: bool = True) -> list:
     """Every fresh stock signal and both coins, scored, highest first. Places nothing.
     `signals` are already-enriched candidates (else the finders run); `t212` is an object
-    with can_buy(ticker, source) (else the cached instrument list, if any)."""
+    with can_buy(ticker, source) (else the cached instrument list, if any). `prune=False`
+    fetches prices and news even for a stock that can't reach the watchlist (the analyst's
+    single-ticker look)."""
     today = today or dt.date.today()
     prices = prices or paper.Prices(fetch, today)
     news_fn = _memoised(news_fn or default_news)
@@ -304,7 +309,7 @@ def score_today(conn, today: dt.date | None = None, *, fetch=None, news_fn=None,
     if t212 is None:
         t212 = _default_t212(conn)
     candidates = signals if signals is not None else candidate_signals(conn, today)
-    scored = (_score_stocks(conn, candidates, prices, today, news_fn, t212)
+    scored = (_score_stocks(conn, candidates, prices, today, news_fn, t212, prune)
               + _score_coins(conn, candidates, prices, today, news_fn, trend_fn))
     return sorted(scored, key=lambda s: s.total, reverse=True)
 

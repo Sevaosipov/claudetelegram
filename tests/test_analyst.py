@@ -24,6 +24,7 @@ import research
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REAL_LOAD_ENV = analyst.load_env        # the autouse fixture below replaces the module's own
+REAL_ENV_PATH = analyst._env_path       # ... and points this at a file that doesn't exist
 S, C = model.STOCK_BOOK, model.CRYPTO_BOOK
 
 
@@ -57,6 +58,8 @@ def _hermetic(monkeypatch, tmp_path):
     has no prices and no headlines unless the test says otherwise."""
     monkeypatch.setattr(analyst, "LOCK_FILE", tmp_path / "analyst.lock")
     monkeypatch.setattr(analyst, "load_env", lambda *a, **k: [])
+    monkeypatch.setattr(analyst, "_env_path", lambda: tmp_path / "absent.env")
+    monkeypatch.setattr(analyst, "_LOADED_ENV", set())
     monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
     monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
 
@@ -85,6 +88,7 @@ def _stub_scoring(monkeypatch, scores, seen=None):
 
     def score(conn, today=None, *, signals=None, **kw):
         seen["signals"] = signals
+        seen["prune"] = kw.get("prune", True)
         return scores
 
     monkeypatch.setattr(model, "candidate_signals", candidates)
@@ -124,12 +128,19 @@ def test_claude_command_is_exactly_the_restricted_headless_run(monkeypatch, tmp_
         "--allowedTools", *analyst.ALLOWED_TOOLS]
 
 
+def test_the_analyst_command_is_absolute():
+    """Claude runs in an empty folder outside the project, so its three commands name the
+    project's python and analyst.py by their absolute paths."""
+    assert analyst.BASE_DIR.is_absolute() and analyst.BASE_DIR == ROOT
+    assert analyst.ANALYST_CMD == f"{ROOT}/.venv/bin/python {ROOT}/analyst.py"
+
+
 def test_the_allow_list_is_three_read_commands_and_the_nine_tradingview_tools():
+    cmd = analyst.ANALYST_CMD
     assert analyst.ALLOWED_TOOLS == (
-        "Bash(.venv/bin/python analyst.py context:*)",
-        "Bash(.venv/bin/python analyst.py portfolio)",
-        "Bash(.venv/bin/python analyst.py news:*)",
+        f"Bash({cmd} context:*)", f"Bash({cmd} portfolio)", f"Bash({cmd} news:*)",
         *(f"mcp__tradingview__{t}" for t in analyst.TV_TOOLS))
+    assert not any("Bash(.venv" in t for t in analyst.ALLOWED_TOOLS)          # nothing relative
     cmd = analyst.claude_command("x")
     assert cmd[cmd.index("--allowedTools") + 1:] == list(analyst.ALLOWED_TOOLS)   # the variadic flag is last
 
@@ -144,7 +155,7 @@ def test_claude_gets_no_edit_mode_no_file_tools_and_never_the_whole_shell():
     assert not {"Write", "Read", "Edit", "MultiEdit", "NotebookEdit", "WebFetch"} & set(cmd)
     assert cmd.count("Bash") == 1 and cmd[cmd.index("--tools") + 1] == "Bash"    # the tool, not a rule
     assert "Bash" not in analyst.ALLOWED_TOOLS
-    assert all(t.startswith("Bash(.venv/bin/python analyst.py ") or t.startswith("mcp__tradingview__")
+    assert all(t.startswith(f"Bash({analyst.ANALYST_CMD} ") or t.startswith("mcp__tradingview__")
                for t in analyst.ALLOWED_TOOLS)
 
 
@@ -170,6 +181,8 @@ def test_the_tradingview_server_path_defaults_to_the_tools_folder():
     assert path == str(pathlib.Path.home() / "Tools" / "tradingview-mcp") and path in config
     path, config = imported(TV_MCP_PATH="/opt/tv-mcp")
     assert path == "/opt/tv-mcp" and '"args": ["/opt/tv-mcp"]' in config
+    path, _config = imported(TV_MCP_PATH="")                          # set but empty: the default
+    assert path == str(pathlib.Path.home() / "Tools" / "tradingview-mcp")
 
 
 def test_the_tradingview_allow_list_is_the_nine_read_and_navigate_tools():
@@ -187,6 +200,29 @@ def test_claude_env_drops_every_key_and_marks_the_child():
         "PERPLEXITY_API_KEY": "x", "my_token": "lower"})
     assert set(env) == {"PATH", "HOME", "LANG", "SEC_USER_AGENT", "DISCLOSURE_ANALYST_CHILD"}
     assert env["DISCLOSURE_ANALYST_CHILD"] == "1" and env["HOME"] == "/h"
+
+
+def test_claude_env_drops_every_name_the_env_file_defines_or_load_env_set(monkeypatch, tmp_path):
+    """The three commands load .env themselves, so nothing from it -- key or not -- needs to
+    be in Claude's environment."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("PLAIN_SETTING=x\nALREADY_SET=y\n", encoding="utf-8")
+    monkeypatch.setattr(analyst, "_env_path", lambda: env_file)
+    fake_environ = {"PATH": "/usr/bin", "ALREADY_SET": "from-the-shell", "OTHER": "kept"}
+    monkeypatch.setattr(analyst.os, "environ", fake_environ)
+    assert REAL_LOAD_ENV() == ["PLAIN_SETTING"]                     # what it set, as before
+    env = analyst.claude_env()
+    assert "PLAIN_SETTING" not in env and "ALREADY_SET" not in env and env["OTHER"] == "kept"
+    env_file.write_text("", encoding="utf-8")                        # the file changed since
+    assert "PLAIN_SETTING" not in analyst.claude_env()               # loaded once: still dropped
+    assert "ALREADY_SET" in analyst.claude_env()
+
+
+def test_load_env_into_a_dict_of_its_own_is_not_recorded(tmp_path):
+    env_file = tmp_path / "env"
+    env_file.write_text("ONLY_IN_A_DICT=1\n", encoding="utf-8")
+    REAL_LOAD_ENV(env_file, {})
+    assert "ONLY_IN_A_DICT" not in analyst._LOADED_ENV
 
 
 def test_claude_env_from_os_environ_has_no_telegram_keys(monkeypatch):
@@ -315,6 +351,11 @@ def test_the_new_columns_are_added_to_an_old_queue_table(tmp_path):
 
 
 # ------------------------------------------------------------------ the prompt
+def _rendered(name: str) -> str:
+    """A prompt file as build_prompt puts it in: the placeholder replaced."""
+    return _text(name).strip().replace("{ANALYST_CMD}", analyst.ANALYST_CMD)
+
+
 def _request(prompt: str) -> str:
     """What follows the embedded method: the row's own part of the prompt."""
     return prompt.split(analyst.METHOD_END, 1)[1]
@@ -322,12 +363,12 @@ def _request(prompt: str) -> str:
 
 def test_a_ticker_prompt_is_the_template_the_method_and_the_rows_data():
     prompt = analyst.build_prompt("telegram", ticker="$NVDA", ticker_context="МОДЕЛЬ: балл 64")
-    template, method = _text("claude_analysis_prompt.txt"), _text("analyst_method.txt")
-    assert prompt.startswith(template.strip())
-    assert method.strip() in prompt                               # the whole method, embedded
+    template, method = _rendered("claude_analysis_prompt.txt"), _rendered("analyst_method.txt")
+    assert prompt.startswith(template)
+    assert method in prompt                                       # the whole method, embedded
     data = prompt[prompt.index("АКТИВ: $NVDA"):]
     assert data == "АКТИВ: $NVDA\n=== ДАННЫЕ БОТА ===\nМОДЕЛЬ: балл 64\n=== КОНЕЦ ДАННЫХ ==="
-    assert prompt.index(template.strip()) < prompt.index(method.strip()) < prompt.index("АКТИВ: $NVDA")
+    assert prompt.index(template) < prompt.index(method) < prompt.index("АКТИВ: $NVDA")
     assert "ВОПРОС ВЛАДЕЛЬЦА" not in _request(prompt)
 
 
@@ -341,9 +382,18 @@ def test_a_question_prompt_sets_the_question_between_its_markers():
 
 def test_the_terminal_prompt_uses_the_terminal_template():
     prompt = analyst.build_prompt("terminal", question="?")
-    assert prompt.startswith(_text("claude_ask_prompt.txt").strip())
-    assert _text("claude_analysis_prompt.txt").strip() not in prompt
-    assert _text("analyst_method.txt").strip() in prompt
+    assert prompt.startswith(_rendered("claude_ask_prompt.txt"))
+    assert _rendered("claude_analysis_prompt.txt") not in prompt
+    assert _rendered("analyst_method.txt") in prompt
+
+
+@pytest.mark.parametrize("mode", ["telegram", "terminal"])
+def test_the_prompt_names_the_commands_by_their_absolute_paths(mode):
+    prompt = analyst.build_prompt(mode, question="?")
+    assert "{ANALYST_CMD}" not in prompt and "{" + "ANALYST" not in prompt
+    for form in ("context 'TICKER'", "portfolio", "news 'QUERY'"):
+        assert f"`{analyst.ANALYST_CMD} {form}`" in prompt, form
+    assert prompt.count(".venv/bin/python") == prompt.count(analyst.ANALYST_CMD)   # none relative
 
 
 def test_the_data_cannot_close_its_own_block():
@@ -405,6 +455,11 @@ def _sender(*results):
     return send
 
 
+def _outside_the_project(cwd) -> bool:
+    path = pathlib.Path(cwd)
+    return path.is_absolute() and not path.resolve().is_relative_to(ROOT.resolve())
+
+
 def _attempts(conn, qid):
     return conn.execute("SELECT attempts FROM claude_analysis_queue WHERE id = ?", (qid,)).fetchone()[0]
 
@@ -423,8 +478,9 @@ def test_a_ticker_row_runs_one_claude_on_its_own_prompt_and_the_answer_is_sent(c
     assert argv == analyst.claude_command(
         analyst.build_prompt("telegram", ticker="$NVDA", ticker_context="КОНТЕКСТ $NVDA"))
     assert row_context == ["$NVDA"]                             # computed here, before the run
-    assert kwargs == {"cwd": analyst.BASE_DIR, "env": analyst.claude_env(), "capture_output": True,
-                      "text": True, "errors": "replace", "timeout": 900}
+    assert _outside_the_project(kwargs.pop("cwd"))
+    assert kwargs == {"env": analyst.claude_env(), "capture_output": True, "text": True,
+                      "errors": "replace", "timeout": 900}
     assert send.sent == [ANSWER]                                # stripped, sent as it is
     assert db.analysis_processed(conn, qid) and _attempts(conn, qid) == 0
 
@@ -558,9 +614,96 @@ def test_process_queue_without_the_binary_returns_127_and_counts_nothing(conn, r
 
 def test_the_answer_goes_out_through_telegram_notify_by_default(conn, row_context, monkeypatch):
     seen = []
-    monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: seen.append(t) or True)
+    monkeypatch.setattr(analyst.telegram_notify, "send_text_parts", lambda t: seen.append(t) or (1, 1))
     db.enqueue_question(conn, "?")
     assert analyst.process_queue(conn, run=_runner()) == 0 and seen == [ANSWER]
+
+
+# -------------------------------------------------- where Claude runs: an empty folder of its own
+def test_every_claude_runs_in_a_fresh_empty_folder_outside_the_project(conn, row_context):
+    """Read-only shell commands inside the working directory may be allowed without a rule:
+    there is nothing there to read."""
+    db.enqueue_question(conn, "a")
+    db.enqueue_question(conn, "b")
+    seen = []
+
+    def run(argv, **kwargs):
+        cwd = pathlib.Path(kwargs["cwd"])
+        seen.append((cwd, cwd.is_dir(), sorted(cwd.iterdir())))
+        return _Proc(0, "ответ")
+
+    assert analyst.process_queue(conn, run=run, send=_sender()) == 0
+    assert analyst.ask("?", run=run) == 0
+    assert len(seen) == 3 and len({cwd for cwd, _d, _l in seen}) == 3      # one per run
+    for cwd, existed, listing in seen:
+        assert existed and listing == [] and _outside_the_project(cwd)
+        assert not cwd.exists()                                            # removed afterwards
+
+
+def test_the_empty_folder_goes_also_when_the_run_fails(conn, row_context):
+    db.enqueue_question(conn, "?")
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(pathlib.Path(kwargs["cwd"]))
+        raise subprocess.TimeoutExpired("claude", 900)
+
+    assert analyst.process_queue(conn, run=run, send=_sender()) == 124
+    assert seen and not seen[0].exists()
+
+
+def test_the_cli_works_from_any_directory(tmp_path):
+    """Claude runs the analyst from its empty folder: everything is found from BASE_DIR."""
+    done = subprocess.run([sys.executable, str(ROOT / "analyst.py"), "context", "rm -rf"],
+                          cwd=tmp_path, capture_output=True, text=True, timeout=120,
+                          env={k: v for k, v in os.environ.items() if k != "DISCLOSURE_ANALYST_CHILD"})
+    assert done.returncode == 2 and "не похоже на тикер" in done.stderr
+    assert list(tmp_path.iterdir()) == []                               # nothing written there
+
+
+# -------------------------------------------------- only a failed first chunk is sent again
+def test_a_partly_delivered_answer_is_not_sent_again(conn, row_context):
+    """Resending the whole answer as plain text would repeat the part that went out."""
+    qid = db.enqueue_question(conn, "?")
+    send = _sender((1, 3))
+    assert analyst.process_queue(conn, run=_runner(), send=send) == 0
+    assert send.sent == [ANSWER] and db.analysis_processed(conn, qid) and _attempts(conn, qid) == 0
+
+
+def test_an_answer_telegram_took_none_of_is_resent_as_plain_text(conn, row_context):
+    qid = db.enqueue_question(conn, "?")
+    send = _sender((0, 2), (2, 2))
+    assert analyst.process_queue(conn, run=_runner(_Proc(0, "<b>A</b> & B")), send=send) == 0
+    assert send.sent == ["<b>A</b> & B", "A &amp; B"] and db.analysis_processed(conn, qid)
+
+
+def test_nothing_delivered_twice_is_a_failed_attempt(conn, row_context):
+    qid = db.enqueue_question(conn, "?")
+    assert analyst.process_queue(conn, run=_runner(), send=_sender((0, 1), (0, 1))) == 1
+    assert _attempts(conn, qid) == 1 and not db.analysis_processed(conn, qid)
+
+
+# -------------------------------------------------- other ways a run fails
+def test_a_run_that_cannot_start_is_a_failed_attempt_and_the_pass_goes_on(conn, row_context):
+    first, second = db.enqueue_question(conn, "a"), db.enqueue_question(conn, "b")
+    run, send = _runner(PermissionError(13, "Permission denied"), _Proc(0, "ответ")), _sender()
+    assert analyst.process_queue(conn, run=run, send=send) == 1
+    assert _attempts(conn, first) == 1 and not db.analysis_processed(conn, first)
+    assert send.sent == ["ответ"] and db.analysis_processed(conn, second)
+
+
+@pytest.mark.parametrize("stdout", [
+    "Error: Invalid API key · Please run /login",
+    "Failed to authenticate. API Error: 401 OAuth token has expired",
+    "Claude AI usage limit reached|1759328400",
+    "5-hour session limit reached ∙ resets 3pm",
+    "\n  Error: something went wrong\n",
+])
+def test_a_cli_error_printed_with_exit_0_is_not_an_answer(conn, row_context, stdout):
+    qid = db.enqueue_question(conn, "?")
+    send = _sender()
+    assert analyst.process_queue(conn, run=_runner(_Proc(0, stdout)), send=send) == 1
+    assert send.sent == [] and _attempts(conn, qid) == 1
 
 
 # ------------------------------------------------------------------ ask
@@ -572,8 +715,9 @@ def test_ask_runs_the_terminal_prompt_and_prints_the_answer_without_bold_tags(ca
     assert "NVDA\n• растёт" in out and "Итоговый вердикт" in out
     [(argv, kwargs)] = run.calls
     assert argv == analyst.claude_command(analyst.build_prompt("terminal", question="что с NVDA?"))
-    assert kwargs == {"cwd": analyst.BASE_DIR, "env": analyst.claude_env(), "capture_output": True,
-                      "text": True, "errors": "replace", "timeout": 900}
+    assert _outside_the_project(kwargs.pop("cwd"))
+    assert kwargs == {"env": analyst.claude_env(), "capture_output": True, "text": True,
+                      "errors": "replace", "timeout": 900}
 
 
 def test_ask_returns_a_failing_returncode(capsys):
@@ -825,7 +969,7 @@ def test_cli_opens_the_bots_database(monkeypatch, conn):
     monkeypatch.setattr(analyst.db, "connect", lambda path: paths.append(path) or conn)
     monkeypatch.setattr(analyst, "process_queue", lambda c, **k: 0)
     analyst.main(["process-queue"])
-    assert paths == [analyst.BASE_DIR / "data" / "disclosures.db"]
+    assert paths == [analyst.BASE_DIR / "data" / "disclosures.db"] and paths[0].is_absolute()
 
 
 def test_analyst_stays_out_of_the_telegram_bot():
@@ -861,7 +1005,7 @@ def test_the_method_says_no_disclaimers_and_only_b_tags():
     assert "🎯 Итоговый вердикт:" in method
     assert "NO disclaimers" in method
     assert "matched <b>...</b> pairs" in method and 'bare "<" or ">"' in method
-    assert "`.venv/bin/python analyst.py context 'TICKER'`" in method
+    assert "`{ANALYST_CMD} context 'TICKER'`" in method
     assert "summary true" in method and "kill_existing false" in method
 
 
@@ -1120,6 +1264,7 @@ def test_load_env_prints_nothing_and_a_missing_file_is_fine(tmp_path, capsys):
 def test_load_env_defaults_to_the_repository_env_file_and_os_environ(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("ANALYST_TEST_KEY=1\n", encoding="utf-8")
     monkeypatch.setattr(analyst, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(analyst, "_env_path", REAL_ENV_PATH)
     fake_environ = {}
     monkeypatch.setattr(analyst.os, "environ", fake_environ)
     assert REAL_LOAD_ENV() == ["ANALYST_TEST_KEY"] and fake_environ == {"ANALYST_TEST_KEY": "1"}
@@ -1201,6 +1346,7 @@ def test_context_asks_for_the_signals_of_that_ticker_only(conn, dossier, monkeyp
     seen = _stub_scoring(monkeypatch, [_stock("NVDA", 61.0)])
     assert "МОДЕЛЬ: балл 61" in analyst.context(conn, "$NVDA")
     assert seen["tickers"] == {"NVDA"} and seen["signals"] == ["sig"]
+    assert seen["prune"] is False               # one ticker: its momentum and news are worth fetching
     analyst.context(conn, "BTC")
     assert seen["tickers"] == {"BTC", "CRYPTO:BTC"}
     analyst.context(conn, "eqnr.ol")

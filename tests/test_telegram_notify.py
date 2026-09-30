@@ -159,6 +159,34 @@ def test_send_text_uses_html_parse_mode(monkeypatch):
     assert captured["parse_mode"] == "HTML"
 
 
+def test_send_text_parts_counts_the_chunks_telegram_took(monkeypatch):
+    """(accepted, sent) -- so a caller can tell nothing went out from part of it went out;
+    send_text stays a plain bool: True only when every chunk went."""
+    class Resp:
+        def __init__(self, ok):
+            self.ok = ok
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise tn.requests.HTTPError("400 Client Error: Bad Request")
+
+    outcomes = []
+    monkeypatch.setattr(tn.requests, "post", lambda url, data, timeout: Resp(outcomes.pop(0)))
+    monkeypatch.setattr(tn, "_chunk", lambda text, size: ["one", "two", "three"])
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    outcomes[:] = [True, False, True]
+    assert tn.send_text_parts("x") == (2, 3)
+    outcomes[:] = [False, False, False]
+    assert tn.send_text_parts("x") == (0, 3)
+    outcomes[:] = [True, False, True]
+    assert tn.send_text("x") is False
+    outcomes[:] = [True, True, True]
+    assert tn.send_text("x") is True
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
+    assert tn.send_text_parts("x") == (0, 0) and tn.send_text("x") is False
+
+
 def test_send_text_still_skips_silently_without_credentials(monkeypatch, capsys):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)

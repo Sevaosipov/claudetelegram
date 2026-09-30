@@ -16,14 +16,18 @@ on its command line (spec 2026-09-30 section 7, as amended by the final-fix ruli
 `--restricted` (the user/project/local settings files are ignored -- the owner's default plan
 mode included), `--tools Bash` (no Read, Write, Glob, Grep or WebFetch, so .env can't be read),
 only the TradingView MCP server, `--permission-mode dontAsk` (whatever is not allowed is
-denied), and a shell allowed exactly three read commands, run from the repository:
-    python analyst.py context 'TICKER'     the model's score, the positions, the dossier
-    python analyst.py portfolio            the model summary, the watchlist, today's buys
-    python analyst.py news 'QUERY'         up to 10 Google News headlines with dates
-Its environment has no tokens, secrets, API keys or passwords (claude_env) and is marked
-DISCLOSURE_ANALYST_CHILD, so `ask` and `process-queue` refuse to start another Claude from
-inside it; the three commands load .env themselves. The question and the bot's data travel
-inside the prompt, between markers that say they are data.
+denied), and a shell allowed exactly three read commands, named by their absolute paths
+(ANALYST_CMD is `<BASE_DIR>/.venv/bin/python <BASE_DIR>/analyst.py`):
+    ANALYST_CMD context 'TICKER'     the model's score, the positions, the dossier
+    ANALYST_CMD portfolio            the model summary, the watchlist, today's buys
+    ANALYST_CMD news 'QUERY'         up to 10 Google News headlines with dates
+Each Claude runs in a fresh empty folder outside the project, removed after the run: the
+read-only shell commands Claude may run in its working directory without a rule find nothing
+there. Every subcommand finds what it needs from BASE_DIR, whatever the working directory.
+Claude's environment has nothing .env defines, no tokens, secrets, API keys or passwords
+(claude_env), and is marked DISCLOSURE_ANALYST_CHILD, so `ask` and `process-queue` refuse to
+start another Claude from inside it; the three commands load .env themselves. The question and
+the bot's data travel inside the prompt, between markers that say they are data.
 
 Two Claudes never drive the chart at once: `process-queue` and `ask` share one lock.
 This module never imports telegram_bot (the bot imports the analyst, not the other way round)
@@ -41,6 +45,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -58,9 +63,9 @@ import sources
 import telegram_notify
 from telegram_notify import money_eur, signed_pct
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent
 CLAUDE_BIN = Path.home() / ".local" / "bin" / "claude"
-TV_MCP_PATH = os.environ.get("TV_MCP_PATH", str(Path.home() / "Tools" / "tradingview-mcp"))
+TV_MCP_PATH = os.environ.get("TV_MCP_PATH") or str(Path.home() / "Tools" / "tradingview-mcp")
 # The only MCP server the headless Claude gets (with --strict-mcp-config).
 MCP_CONFIG_JSON = json.dumps({"mcpServers": {"tradingview": {"command": "node", "args": [TV_MCP_PATH]}}})
 
@@ -70,15 +75,21 @@ MCP_CONFIG_JSON = json.dumps({"mcpServers": {"tradingview": {"command": "node", 
 # the user's private scripts) -- see analyst_method.txt.
 TV_TOOLS = ("tv_health_check", "tv_launch", "chart_get_state", "chart_set_symbol",
             "chart_set_timeframe", "quote_get", "data_get_ohlcv", "symbol_info", "symbol_search")
-ANALYST_COMMAND = ".venv/bin/python analyst.py"
-BASH_RULES = (f"Bash({ANALYST_COMMAND} context:*)", f"Bash({ANALYST_COMMAND} portfolio)",
-              f"Bash({ANALYST_COMMAND} news:*)")
+# Absolute: Claude runs in an empty folder outside the project (see _run_claude).
+ANALYST_CMD = f"{BASE_DIR}/.venv/bin/python {BASE_DIR}/analyst.py"
+ANALYST_CMD_PLACEHOLDER = "{ANALYST_CMD}"          # in the prompt files; build_prompt fills it in
+BASH_RULES = (f"Bash({ANALYST_CMD} context:*)", f"Bash({ANALYST_CMD} portfolio)",
+              f"Bash({ANALYST_CMD} news:*)")
 ALLOWED_TOOLS = BASH_RULES + tuple(f"mcp__tradingview__{t}" for t in TV_TOOLS)
 # launchd's PATH lacks these; the TradingView MCP server is started with `node` from one of them.
 EXTRA_PATH = ("/usr/local/bin", "/opt/homebrew/bin")
 CHILD_ENV = "DISCLOSURE_ANALYST_CHILD"
 _DROPPED_ENV = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 _SECRET_ENV = re.compile(r"TOKEN|SECRET|API_KEY|PASSWORD", re.I)
+_LOADED_ENV: set[str] = set()   # what load_env set in os.environ: never handed to Claude
+# What Claude CLI prints on stdout, exit 0, when it could not answer at all.
+_CLI_ERROR_START = ("Error:", "Failed to authenticate")
+_CLI_ERROR_PHRASES = ("usage limit", "session limit")
 TICKER_RE = re.compile(r"^\$?[A-Z0-9][A-Z0-9.\-]{0,14}$")
 
 ANALYSIS_PROMPT = "claude_analysis_prompt.txt"      # the Telegram template
@@ -124,11 +135,13 @@ def claude_command(prompt: str) -> list[str]:
 
 
 def claude_env(base: dict | None = None) -> dict:
-    """A copy of the environment (or of `base`) for Claude: without the Telegram keys and any
-    variable whose name says token, secret, API key or password; EXTRA_PATH in front of PATH
-    (each entry only when it is not already there); CHILD_ENV set."""
+    """A copy of the environment (or of `base`) for Claude: without the Telegram keys, anything
+    .env defines or load_env set from it, and any variable whose name says token, secret, API
+    key or password; EXTRA_PATH in front of PATH (each entry only when it is not already
+    there); CHILD_ENV set."""
+    dropped = set(_DROPPED_ENV) | _LOADED_ENV | env_file_names()
     env = {k: v for k, v in (os.environ if base is None else base).items()
-           if k not in _DROPPED_ENV and not _SECRET_ENV.search(k)}
+           if k not in dropped and not _SECRET_ENV.search(k)}
     parts = [p for p in env.get("PATH", "").split(":") if p]
     env["PATH"] = ":".join([p for p in EXTRA_PATH if p not in parts] + parts)
     env[CHILD_ENV] = "1"
@@ -160,8 +173,9 @@ def build_prompt(mode: str, *, question: str | None = None, ticker_context: str 
         request = [QUESTION_START, _data(question), QUESTION_END]
     else:
         request = [f"АКТИВ: {ticker}", DATA_START, _data(ticker_context or ""), DATA_END]
-    return "\n\n".join([template.strip(), "\n".join([METHOD_START, method.strip(), METHOD_END]),
-                        "\n".join(request)])
+    own = "\n\n".join([template.strip(), "\n".join([METHOD_START, method.strip(), METHOD_END])])
+    # the placeholder is filled in the files' own text only, never in the question or the data
+    return own.replace(ANALYST_CMD_PLACEHOLDER, ANALYST_CMD) + "\n\n" + "\n".join(request)
 
 
 def strip_bold(text: str | None) -> str:
@@ -229,9 +243,18 @@ def _run_group(argv, *, timeout=None, capture_output=False, text=False, check=Fa
 
 
 def _run_claude(run, prompt: str):
-    """One headless Claude on `prompt`, its output captured. Raises what `run` raises."""
-    return run(claude_command(prompt), cwd=BASE_DIR, env=claude_env(), capture_output=True,
-               text=True, errors="replace", timeout=CLAUDE_TIMEOUT_SECONDS)
+    """One headless Claude on `prompt`, its output captured, in a fresh empty folder outside
+    the project that is removed afterwards: the read-only shell commands Claude may run in its
+    working directory without a rule find nothing there. Raises what `run` raises."""
+    with tempfile.TemporaryDirectory(prefix="disclosure-analyst-") as workdir:
+        return run(claude_command(prompt), cwd=workdir, env=claude_env(), capture_output=True,
+                   text=True, errors="replace", timeout=CLAUDE_TIMEOUT_SECONDS)
+
+
+def _cli_error(answer: str) -> bool:
+    """Claude CLI's own failure, printed with exit 0 in place of an answer."""
+    return (answer.startswith(_CLI_ERROR_START)
+            or any(p in answer.lower() for p in _CLI_ERROR_PHRASES))
 
 
 @contextlib.contextmanager
@@ -279,15 +302,30 @@ def _plain(answer: str) -> str:
     return telegram_notify._esc(strip_bold(answer))
 
 
+def _sent(result) -> tuple[bool, bool]:
+    """(all of it went out, some of it went out) from what `send` returned: a bool, or
+    telegram_notify.send_text_parts' (chunks accepted, chunks sent)."""
+    if isinstance(result, tuple):
+        accepted, total = result
+        return bool(total) and accepted == total, accepted > 0
+    return bool(result), bool(result)
+
+
 def _deliver(answer: str, send) -> bool:
-    """Send the answer; when Telegram refuses it (an HTML error, mostly), send it once more as
-    plain text. True when one of them went through."""
+    """Send the answer. When Telegram took none of it (an HTML error, mostly), send it once
+    more as plain text; when it took part of it, not: that would repeat the part that went
+    out, so the answer counts as delivered. True when it (or part of it) went out."""
     for text in (answer, _plain(answer)):
         try:
-            if send(text):
-                return True
+            full, some = _sent(send(text))
         except Exception as e:
             print(f"[analyst] отправка не удалась: {type(e).__name__}", file=sys.stderr)
+            continue
+        if full:
+            return True
+        if some:
+            print("[analyst] ответ ушёл не целиком; повторно не отправляется", file=sys.stderr)
+            return True
     return False
 
 
@@ -310,12 +348,13 @@ def _row_failed(conn, queue_id: int, what: str, send) -> bool:
 def process_queue(conn, *, run=None, send=None) -> int:
     """Answer the Telegram queue, one headless Claude per row (at most MAX_ROWS a pass, oldest
     first), under the queue lock. `run` is the runner (default _run_group), `send` the Telegram
-    send (default telegram_notify.send_text).
+    send (default telegram_notify.send_text_parts; a plain bool is understood too).
 
     Returns 0 when every row this pass tried was answered or given up (also when nothing is
     queued -- no Claude run then -- or another run keeps the lock past LOCK_WAIT_SECONDS); 1
     when one of them is still pending; 124 when a run passed CLAUDE_TIMEOUT_SECONDS (the pass
-    stops there); 127 without the claude binary and 2 without a prompt file (rows untouched)."""
+    stops there); 127 without the claude binary and 2 without a prompt file (rows untouched).
+    Claude that can't be started otherwise (an OSError) is a failed attempt on the row."""
     if not db.pending_analysis(conn):
         return 0
     try:
@@ -324,7 +363,7 @@ def process_queue(conn, *, run=None, send=None) -> int:
     except OSError as e:
         return _prompt_unreadable(e)
     run = run or _run_group
-    send = send or telegram_notify.send_text
+    send = send or telegram_notify.send_text_parts
     with _queue_lock() as locked:
         if not locked:
             print("очередь занята другим прогоном")
@@ -344,7 +383,16 @@ def process_queue(conn, *, run=None, send=None) -> int:
                       f"(строка {queue_id}); остальные строки ждут следующего прогона")
                 _row_failed(conn, queue_id, what, send)
                 return TIMEOUT_EXIT
+            except OSError as e:
+                print(f"[analyst] строка {queue_id}: claude не запустился: {type(e).__name__}",
+                      file=sys.stderr)
+                pending = _row_failed(conn, queue_id, what, send) or pending
+                continue
             answer = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+            if answer and _cli_error(answer):
+                print(f"[analyst] строка {queue_id}: вместо ответа ошибка claude: {answer[:200]}",
+                      file=sys.stderr)
+                answer = ""
             if answer and _deliver(answer, send):
                 db.mark_analysis_processed(conn, queue_id)
                 print(f"[analyst] строка {queue_id}: ответ отправлен")
@@ -379,23 +427,26 @@ def ask(question: str, *, run=None) -> int:
         except subprocess.TimeoutExpired:
             print(f"claude не уложился в {CLAUDE_TIMEOUT_SECONDS} с и остановлен")
             return TIMEOUT_EXIT
+        except OSError as e:
+            print(f"claude не запустился: {type(e).__name__}")
+            return 126
     print(strip_bold(proc.stdout).strip())
     if proc.returncode and getattr(proc, "stderr", None):
         print(proc.stderr.strip(), file=sys.stderr)
     return proc.returncode
 
 
-def load_env(path: Path | None = None, environ: dict | None = None) -> list[str]:
-    """Load KEY=VALUE lines of `path` (default BASE_DIR/.env) into `environ` (default
-    os.environ), like the `set -a; source .env` the prompts used to run first: an optional
-    `export `, matching quotes stripped, comments and blank lines skipped. A variable that is
-    already set is left alone. Prints nothing; returns the names it set."""
-    env = os.environ if environ is None else environ
+def _env_path() -> Path:
+    return BASE_DIR / ".env"
+
+
+def _env_lines(path: Path | None = None):
+    """(key, raw value) of each KEY=VALUE line of `path` (default BASE_DIR/.env): an optional
+    `export `, comments and blank lines skipped. Nothing when the file can't be read."""
     try:
-        text = (path or BASE_DIR / ".env").read_text(encoding="utf-8")
+        text = (path or _env_path()).read_text(encoding="utf-8")
     except OSError:
-        return []
-    loaded: list[str] = []
+        return
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -403,13 +454,33 @@ def load_env(path: Path | None = None, environ: dict | None = None) -> list[str]
         if line.startswith("export ") or line.startswith("export\t"):
             line = line[len("export"):].lstrip()
         key, eq, value = line.partition("=")
-        key, value = key.strip(), value.strip()
-        if not eq or not _ENV_KEY.fullmatch(key) or (key in env and key not in loaded):
+        key = key.strip()
+        if eq and _ENV_KEY.fullmatch(key):
+            yield key, value.strip()
+
+
+def env_file_names(path: Path | None = None) -> set[str]:
+    """The names .env defines (its values are not read into anything)."""
+    return {key for key, _value in _env_lines(path)}
+
+
+def load_env(path: Path | None = None, environ: dict | None = None) -> list[str]:
+    """Load KEY=VALUE lines of `path` (default BASE_DIR/.env) into `environ` (default
+    os.environ), like the `set -a; source .env` the prompts used to run first: an optional
+    `export `, matching quotes stripped, comments and blank lines skipped. A variable that is
+    already set is left alone. Prints nothing; returns the names it set (into os.environ, they
+    are also remembered: claude_env never passes them on)."""
+    env = os.environ if environ is None else environ
+    loaded: list[str] = []
+    for key, value in _env_lines(path):
+        if key in env and key not in loaded:
             continue
         quoted = _ENV_QUOTED.match(value)
         env[key] = quoted.group(2) if quoted else re.split(r"\s+#", value, maxsplit=1)[0].strip()
         if key not in loaded:
             loaded.append(key)
+    if environ is None:
+        _LOADED_ENV.update(loaded)
     return loaded
 
 
@@ -569,7 +640,7 @@ def _score_today(conn, ticker: str | None = None) -> tuple[list | None, str | No
             return model.score_today(conn), None
         today = dt.date.today()
         signals = model.candidate_signals(conn, today, tickers=_Spellings(ticker).names)
-        return model.score_today(conn, today, signals=signals), None
+        return model.score_today(conn, today, signals=signals, prune=False), None
     except Exception as e:
         return None, type(e).__name__
 
