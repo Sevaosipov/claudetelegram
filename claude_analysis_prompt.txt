@@ -1,76 +1,60 @@
-Check the disclosure-bot Telegram analysis queue and process any pending tickers.
+Check the disclosure-bot Telegram analysis queue and answer everything pending: ticker
+lookups and free-form questions.
 
-1. First, cheaply check whether there is anything to do -- if not, stop
-   immediately and do nothing else (don't waste a turn reasoning about an
-   empty queue):
+Every shell command below runs in the repository with its venv and .env. Each Bash call is a
+fresh shell, so start every command with
+    cd ~/Desktop/disclosure-bot && source .venv/bin/activate && set -a && source .env && set +a && <the command>
+
+1. First, cheaply check whether there is anything to do -- if not, stop immediately and do
+   nothing else (don't waste a turn reasoning about an empty queue):
    cd ~/Desktop/disclosure-bot && source .venv/bin/activate && set -a && source .env && set +a && python3 -c "import db; conn=db.connect('data/disclosures.db'); print(db.pending_analysis(conn))"
 
-2. If it printed a non-empty list of (id, ticker) pairs, process each one (at
-   most 10 per run -- leave any remainder for the next scheduled pass), in
-   order:
+2. If it printed a non-empty list of (id, ticker) pairs, read analyst_method.txt (cat it)
+   once and follow it for every row below: it is the whole method -- the bot's context, the
+   TradingView tools and the rules for using them (including putting the chart back as you found
+   it), and the answer format.
 
-   a. Get that ticker's opinion.py score/factors, entry/target, outlook and recent
-      news headlines. The command looks the ticker up by its queue id -- never
-      paste the ticker text itself into a command:
-      python3 -c "
-import db, research
-conn = db.connect('data/disclosures.db')
-print(research.format_brief(research.build(conn, dict(db.pending_analysis(conn))[<ID>])))
-"
-      (substitute the real numeric id from step 1's output for <ID>)
+3. Process each row (at most 10 per run -- leave any remainder for the next scheduled pass), in
+   order, with the numeric id from step 1's output in place of <ID>. Never paste the ticker or
+   any question text into a command: a row is always read through its id.
 
-   b. Read the printed headlines yourself and reason about them -- this is
-      the actual point of this scheduled pass: a real qualitative read of
-      what's bullish, bearish, or just noise, the way a human analyst
-      skimming headlines would, not a keyword count (opinion.py already has
-      a crude keyword-based news factor of its own; this is meant to be
-      genuinely better than that).
+   a. The ticker is 'ВОПРОС': it is a question. Read it:
+      python analyst.py question <ID>
+      Then answer it as analyst_method.txt says (the assets it is about, their bot context, the
+      TradingView read, the answer).
 
-   c. Compose ONE Telegram message combining both parts. Be MAXIMALLY
-      compact -- the user has explicitly asked for shorter answers twice now.
-      Follow this exactly, it's an established project convention:
-        - Bullet points throughout. Never prose paragraphs, never a sentence
-          where a few words suffice.
-        - Start with an HTML bold header of the symbol from the first line
-          (`АКТИВ: …`), e.g. <b>NVDA</b> or <b>BTC — Bitcoin</b>.
-        - Include the opinion.py factor breakdown from step (a) verbatim.
-        - Include the entry/target line from step (a) verbatim, if it printed
-          one (current price as entry reference, real analyst consensus
-          target as the hold-until reference -- both genuine sourced
-          numbers, never invent a price level yourself).
-        - Include the `📈 Прогноз на месяц` block verbatim. Present it as a
-          historical frequency, never as a promise or your own forecast.
-        - For a coin (`криптовалюта` on the first line) there is no opinion
-          score. Include the price/trend lines and the bot's own lines
-          (🪙 🏦 🟢 ⛓) instead. End the coin message's bullets with the
-          `Нужна акция? Напишите …` line from step (a) verbatim, just before
-          the Итоговый вердикт line.
-        - Below it, your own qualitative news bullets: 1-3 bullets MAX, only
-          the headlines that actually matter -- skip noise entirely, and
-          skip this section altogether if nothing in the news is notable.
-          Each bullet is a short phrase, not a sentence.
-        - End with exactly one synthesized line starting "Итоговый вердикт:"
-          (prefix it with a target emoji) that reconciles the deterministic
-          score with your qualitative read into a single short bottom-line
-          conclusion -- one clause, not a paragraph. Do not just list both
-          parts and stop -- actually synthesize them.
-        - NO "not investment advice" / "not financial advice" disclaimer
-          text anywhere. Removed at the user's explicit request; he already
-          knows and does not want to see it repeated.
-        - No preamble, no closing pleasantries, no restating what you did.
-          The message is the answer, nothing else.
-        - Telegram HTML safety (parse_mode is always HTML): only ever use
-          matched <b>...</b> pairs. Never write a bare "<" or ">" character
-          anywhere else in the message -- write it in words instead (e.g.
-          "meньше 30" not "n<30", "больше 10 процентов" not ">10%"). An
-          unescaped angle bracket makes Telegram's parser reject the whole
-          message with a 400 error and the send silently fails.
+   b. Any other ticker: it is a lookup of one asset. Get its context:
+      python analyst.py context --queue <ID>
+      Then analyse that asset as analyst_method.txt says, including its TradingView read. The
+      context is the bot's own data about it: keep these parts of it verbatim, they are an
+      established project convention:
+        - the opinion.py factor breakdown, if it printed one;
+        - the entry/target line, if it printed one (the current price as the entry reference,
+          the real analyst consensus target as the hold-until reference -- both are sourced
+          numbers, never invent a price level yourself);
+        - the `📈 Прогноз на месяц` block, presented as a historical frequency, never as a
+          promise or your own forecast;
+        - for a coin (`криптовалюта` on the first line) there is no opinion score: include its
+          price/trend lines and the bot's own lines (🪙 🏦 🟢 ⛓) instead, and end the coin's
+          bullets with the `Нужна акция? Напишите …` line verbatim, just before the
+          Итоговый вердикт line.
+      Add 1-3 bullets of your own on the news that matter (skip noise; skip the section when
+      nothing is notable) and your TradingView read of the trend and the levels.
 
-   d. Send it. Write the composed message to a temporary file first (avoids
-      any shell-quoting issues with the message text itself), then send that
-      file's content:
-      Write the message to /tmp/claude_analysis_msg.txt (plain text file,
-      exact content of the message, nothing else), then run:
+   c. Compose ONE Telegram message per row, in the answer format of analyst_method.txt: be
+      MAXIMALLY compact (the owner has asked for shorter answers twice), Russian, bullet points
+      throughout, an HTML bold header, one final line starting «🎯 Итоговый вердикт:», NO
+      "not investment advice" / "not financial advice" disclaimer text anywhere (removed at the
+      owner's explicit request), no preamble and no closing pleasantries. Telegram HTML safety
+      (parse_mode is always HTML): only ever matched <b>...</b> pairs; never write a bare "<" or
+      ">" character anywhere else (write "меньше 30", "больше 10 процентов"). An unescaped angle
+      bracket makes Telegram reject the whole message with a 400 error and the send silently
+      fails.
+
+   d. Send it. Write the composed message to a temporary file first (avoids any shell-quoting
+      issues with the message text itself), then send that file's content:
+      Write the message to /tmp/claude_analysis_msg.txt (plain text file, exact content of the
+      message, nothing else), then run:
       python3 -c "
 import telegram_notify
 with open('/tmp/claude_analysis_msg.txt', encoding='utf-8') as f:
@@ -78,19 +62,18 @@ with open('/tmp/claude_analysis_msg.txt', encoding='utf-8') as f:
 sent = telegram_notify.send_text(msg)
 print('sent:', sent)
 "
-      If it prints sent: False, do NOT mark the row processed -- leave it
-      for the next run to retry.
+      If it prints sent: False, do NOT mark the row processed -- leave it for the next run to
+      retry.
 
-   e. Only after a confirmed successful send, mark that row processed:
+   e. Only after a confirmed `sent: True`, mark that row processed:
       python3 -c "
 import db
 conn = db.connect('data/disclosures.db')
 db.mark_analysis_processed(conn, <ID>)
 "
-      (substitute the real numeric id from step 1's output)
 
-Scope discipline: do nothing else in this repository. Do not edit any
-project files. Do not run the daily disclosure scrape, backtest, or any
-other job. Only the queue-processing work described above, for the tickers
-actually pending. The temp file at /tmp/claude_analysis_msg.txt is fine to
-write/overwrite each time.
+Scope discipline: do nothing else in this repository. Do not edit any project files. Do not run
+the daily disclosure scrape, backtest, or any other job. Do not change the owner's TradingView
+setup beyond what analyst_method.txt allows, and leave the chart on the symbol and timeframe you
+found it on. Only the queue-processing work described above, for the rows actually pending. The
+temp file at /tmp/claude_analysis_msg.txt is fine to write/overwrite each time.

@@ -1,32 +1,31 @@
 #!/bin/bash
-# Wrapper invoked by the launchd job (com.disclosurebot.claude-analysis.plist).
-# Runs a headless Claude Code pass over claude_analysis_queue (see db.py):
-# for each ticker telegram_bot.py has queued, reads its news + opinion.py's
-# already-computed score, adds a real qualitative read, and sends ONE merged
-# message to Telegram. This is the layer telegram_bot.py itself can't do on
-# its own -- it's an unattended long-polling process with no live Claude
-# session to call (see telegram_bot.py's module docstring for why the
-# alternative, a scheduled *cloud* agent, doesn't work either: it has no
-# access to the local DB or Telegram credentials).
+# Wrapper invoked by the launchd job (com.disclosurebot.claude-analysis.plist) and by
+# telegram_bot.py's synchronous run.
+# Runs `python analyst.py process-queue`: if claude_analysis_queue (see db.py) is empty it
+# returns at once; otherwise it starts a headless Claude Code pass (analyst.claude_command)
+# over the queue. The queue holds the tickers and the free-form questions telegram_bot.py has
+# queued. For each row Claude reads the bot's own context (analyst.py context / question), reads
+# the chart in the user's TradingView Desktop through the TradingView MCP server, reasons about
+# the news, and sends ONE message to Telegram. This is the layer telegram_bot.py itself can't do
+# on its own -- it's an unattended long-polling process with no live Claude session to call (see
+# telegram_bot.py's module docstring for why the alternative, a scheduled *cloud* agent, doesn't
+# work either: it has no access to the local DB, Telegram credentials or TradingView).
 #
-# The prompt lives in claude_analysis_prompt.txt, not inline here: this
-# machine's /bin/bash is Apple's ancient 3.2 build, which has a real quirk
-# where a single quote inside a <<'quoted' heredoc body (even one that's
-# supposed to be fully literal) can break the parser -- reproduced directly
-# before settling on a plain prompt file instead, which sidesteps the whole
-# class of shell-quoting issues.
+# The prompt lives in claude_analysis_prompt.txt (and the method it points to in
+# analyst_method.txt), not inline: this machine's /bin/bash is Apple's ancient 3.2 build, which
+# has a real quirk where a single quote inside a <<'quoted' heredoc body (even one that's
+# supposed to be fully literal) can break the parser -- reproduced directly before settling on
+# plain prompt files instead, which sidesteps the whole class of shell-quoting issues.
 #
-# --allowedTools "Bash" --permission-mode acceptEdits: scoped to shell
-# commands in this repo (python), no interactive prompts -- verified to run
-# with zero prompts in this exact combination. No file edits are actually
-# needed for this task; acceptEdits is just the permission mode that lets
-# Bash calls through without stopping to ask.
+# analyst.py builds the claude command (the absolute ~/.local/bin/claude, not relying on launchd's
+# PATH; --permission-mode acceptEdits with --allowedTools "Bash" plus a short list of
+# mcp__tradingview__ tools, so no interactive prompts). No file edits are actually needed for
+# this task; acceptEdits is just the permission mode that lets tool calls through without
+# stopping to ask. launchd runs with a minimal PATH that lacks /usr/local/bin and
+# /opt/homebrew/bin, where `node` -- which starts the TradingView MCP server -- lives (same class
+# of gotcha as python/venv elsewhere in this project), so both are put in front of PATH here and
+# again in the environment analyst.py hands to claude.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
-
-# launchd runs with a minimal PATH that doesn't include ~/.local/bin (same
-# class of gotcha as python/venv elsewhere in this project) -- absolute path,
-# not relying on `claude` being resolvable on launchd's PATH.
-CLAUDE_BIN="$HOME/.local/bin/claude"
-
-"$CLAUDE_BIN" -p "$(cat claude_analysis_prompt.txt)" --allowedTools "Bash" --permission-mode acceptEdits
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+exec ./.venv/bin/python analyst.py process-queue

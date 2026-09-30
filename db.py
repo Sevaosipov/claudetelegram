@@ -213,6 +213,9 @@ CREATE INDEX IF NOT EXISTS signal_journal_ticker ON signal_journal(ticker, emitt
 -- own fast reply, so the news-reasoning layer follows a bit later rather than
 -- blocking the immediate answer -- there is no live-Claude hook inside the
 -- unattended bot process itself, see telegram_bot.py's module docstring.
+-- A row is a ticker lookup (kind 'ticker') or a free-form question for the
+-- analyst (kind 'question': ticker 'ВОПРОС', the text in `question`; added by
+-- _ADDED_COLUMNS, see analyst.py).
 CREATE TABLE IF NOT EXISTS claude_analysis_queue (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker       TEXT NOT NULL,
@@ -591,6 +594,9 @@ _ADDED_COLUMNS = [
     ("paper_positions", "score", "REAL"),
     # The trailing stop of a /bought position, fixed when it is recorded (positions.py).
     ("positions", "stop_pct", "REAL"),
+    # The analyst's queue also holds free-form questions (analyst.py): kind 'ticker' | 'question'.
+    ("claude_analysis_queue", "kind", "TEXT DEFAULT 'ticker'"),
+    ("claude_analysis_queue", "question", "TEXT"),
 ]
 
 
@@ -873,17 +879,39 @@ def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
 
 def enqueue_analysis(conn: sqlite3.Connection, ticker: str) -> None:
     """Queue `ticker` for the next scheduled headless-Claude pass. Deduped
-    against any already-pending (unprocessed) row for the same ticker, so
+    against any already-pending (unprocessed) ticker row for the same ticker, so
     asking about the same name several times before the schedule next fires
-    doesn't queue redundant work."""
+    doesn't queue redundant work. A question row never counts as a duplicate."""
     exists = conn.execute(
-        "SELECT 1 FROM claude_analysis_queue WHERE ticker = ? AND processed_at IS NULL",
+        "SELECT 1 FROM claude_analysis_queue WHERE ticker = ? AND processed_at IS NULL "
+        "AND COALESCE(kind, 'ticker') = 'ticker'",
         (ticker,),
     ).fetchone()
     if exists:
         return
     conn.execute("INSERT INTO claude_analysis_queue (ticker) VALUES (?)", (ticker,))
     conn.commit()
+
+
+QUESTION_TICKER = "ВОПРОС"      # what pending_analysis shows for a question row
+
+
+def enqueue_question(conn: sqlite3.Connection, text: str) -> int:
+    """Queue a free-form question for the analyst; returns the new row's id. Never
+    deduplicated: asking the same thing twice is two questions, each gets its answer."""
+    cur = conn.execute(
+        "INSERT INTO claude_analysis_queue (ticker, kind, question) VALUES (?, 'question', ?)",
+        (QUESTION_TICKER, text))
+    conn.commit()
+    return cur.lastrowid
+
+
+def queued_question(conn: sqlite3.Connection, queue_id: int) -> str | None:
+    """The text of a queued question, or None when the row is missing or is a ticker row."""
+    row = conn.execute(
+        "SELECT question FROM claude_analysis_queue WHERE id = ? AND kind = 'question'",
+        (queue_id,)).fetchone()
+    return row[0] if row else None
 
 
 def pending_analysis(conn: sqlite3.Connection) -> list[tuple[int, str]]:
