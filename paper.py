@@ -618,22 +618,24 @@ def run(conn, selection, today: dt.date | None = None, fetch=None, trend_fn=None
 
 # -------------------------------------------------------------------- CLI
 def main(argv: list[str] | None = None) -> int:
-    """python paper.py         -- every book against its benchmark
-       python paper.py R1-E2   -- one book's positions, trades and skips"""
+    """python paper.py           -- the model portfolio against the 70/30 mix
+       python paper.py MODEL-S   -- one book's positions, trades and skips (any code in paper_books)"""
     import argparse
     from pathlib import Path
 
     import paper_report
     ap = argparse.ArgumentParser(description="Бумажный портфель")
-    ap.add_argument("book", nargs="?", help="код книги, например R1-E2 или C-A")
+    ap.add_argument("book", nargs="?", help="код книги: MODEL-S, MODEL-C или архивной, например R1-E1")
     args = ap.parse_args(argv)
     conn = db.connect(Path(__file__).parent / "data" / "disclosures.db")
     if not args.book:
         print(paper_report.format_summary(conn, dt.date.today()))
         return 0
     code = args.book.upper()
-    if code not in BOOK_BY_CODE:
-        print(f"Нет такой книги: {args.book}. Есть: {', '.join(BOOK_BY_CODE)}")
+    known = [r[0] for r in conn.execute(
+        "SELECT code FROM paper_books ORDER BY code LIKE 'MODEL-%' DESC, rowid")]
+    if code not in known:
+        print(f"Нет такой книги: {args.book}. Есть: {', '.join(known) or 'пока ни одной'}")
         return 2
     print(paper_report.format_book(conn, code))
     return 0

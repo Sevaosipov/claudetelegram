@@ -381,8 +381,8 @@ def test_exit_signals_forwards_ignore_alert_state_to_every_finder(conn, monkeypa
 
 # --------------------------------------------------------- buy_side_signals
 #
-# The one shared finder list bot.run_cluster_pass, menu._find_signals and
-# calibrate_strategy._signals all call, so they can't drift out of sync again.
+# The one shared finder list bot.run_cluster_pass and calibrate_strategy._signals
+# both call, so they can't drift out of sync again.
 # Wiring is checked by recording which finder each source maps to and what it was
 # called with, rather than seeding real rows for nine different tables.
 

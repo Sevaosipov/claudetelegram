@@ -10,39 +10,32 @@ import datetime as dt
 from pathlib import Path
 
 import db
+import model
 import paper_report
 import positions
 import research
-import strategy
 import telegram_notify
 import termstyle
-import trading212
 
 # Absolute, like bot.py's -- a relative path silently opened (and CREATED) an empty
 # database whenever the menu was launched from anywhere but the project directory.
 DB_PATH = Path(__file__).parent / "data" / "disclosures.db"
 
 
-def _find_signals(conn) -> list:
-    """Buy-side signals only: strategy.buy_side_signals (the one shared finder list
-    also used by bot.run_cluster_pass and calibrate_strategy._signals), with
-    on-chain included so a snapshot shows up if the bot has ever been run with
-    --onchain. Exit signals are left out -- this is a list of things to consider
-    buying."""
-    return strategy.buy_side_signals(conn, ignore_alert_state=True, onchain=True)
-
-
 def show_signals(conn) -> None:
-    """The same selection the daily Telegram digest sends (strategy.py), computed
-    fresh and including signals already sent -- this is a browse, not a digest --
-    plus pending close alerts and the positions reported with /bought."""
+    """The model's score for every fresh signal and both coins, computed now (model.py) --
+    a browse, not a digest: signals already sent show up too -- then the pending close
+    alerts and the positions reported with /bought."""
     print()
-    print(termstyle.header("СИГНАЛЫ"))
-    signals = _find_signals(conn) + strategy.exit_signals(conn, ignore_alert_state=True)
-    selection = strategy.select(conn, signals, trading212.availability(conn))
+    print("Считаю оценки — новости и цены, может занять минуту...")
+    try:
+        print(telegram_notify.format_scored(model.score_today(conn)))
+    except Exception as e:  # a failed source must not end the menu
+        print(f"Ошибка: {type(e).__name__}: {e}")
     closes = positions.check_exits(conn)
-    print(telegram_notify.format_tiered_digest(selection, closes, html=False, include_cautions=True,
-                                               include_high_risk=True))
+    if closes:
+        print()
+        print("\n".join(telegram_notify.format_close_alert(a, html=False) for a in closes))
     print()
     print(telegram_notify.format_positions(positions.open_positions(conn), positions.last_close))
 
@@ -63,11 +56,10 @@ def show_research(conn) -> None:
 
 
 def show_paper(conn) -> None:
-    """The paper portfolio: every virtual book against its benchmark. Details of one
-    book: python paper.py R1-E2."""
+    """The model portfolio against the 70/30 mix. Details of one book: python paper.py MODEL-S."""
     print()
     print(paper_report.format_summary(conn, dt.date.today()))
-    print("\nПодробно по книге: python paper.py R1-E2 (или любой другой код)")
+    print("\nПодробно: python paper.py MODEL-S (или MODEL-C, R1-E1 …)")
 
 
 def main() -> None:
@@ -77,7 +69,7 @@ def main() -> None:
         print(termstyle.header("disclosure-bot"))
         print("1) Сигналы")
         print("2) Досье по тикеру или монете")
-        print("3) Бумажный портфель")
+        print("3) Модельный портфель")
         print("0) Выход")
         choice = input("Выбор: ").strip()
 
