@@ -387,6 +387,66 @@ def test_news_sec_lawsuit_is_a_coin_red_flag_not_a_negative():
     assert red is None and part.points == -10      # plain «lawsuit»
 
 
+@pytest.mark.parametrize("phrase", list(ms.COIN_RED_FLAGS))
+def test_news_every_coin_red_flag_phrase_blocks_coins_only(phrase):
+    title = f"Acme {phrase.upper()} news"
+    assert ms.news_part(_titles(title), coin=True)[1] == title
+    assert ms.news_part(_titles(title), coin=False)[1] is None
+
+
+@pytest.mark.parametrize("title", [
+    "ETHGlobal hackathon winners announced",
+    "Shackleton fund buys ether",
+    "Whack-a-mole regulation continues",
+    "Exploitation of workers claims dismissed",
+])
+def test_news_coin_red_flags_need_a_word_boundary(title):
+    assert ms.news_part(_titles(title), coin=True) == (ms.Part(0, []), None)
+
+
+@pytest.mark.parametrize("title", [
+    "Exchange hacked for $200M", "DeFi exploit drains pool", "Bridge exploits continue",
+    "Hackers drain wallet", "Hack of the exchange", "Funds stolen from exchange",
+    "Protocol exploited overnight", "Exploiting a bug drained the pool",
+])
+def test_news_coin_red_flags_match_their_inflections(title):
+    assert ms.news_part(_titles(title), coin=True)[1] == title
+
+
+def test_news_stock_phrases_need_a_leading_word_boundary():
+    # «asphalts» contains «halts»; «reprobe» contains «probe»; «subfraud» is nothing
+    assert ms.news_part(_titles("Asphalts prices rise", "Reprobe of the seabed")) == \
+        (ms.Part(0, []), None)
+    assert ms.news_part(_titles("Subfraud report")) == (ms.Part(0, []), None)
+
+
+@pytest.mark.parametrize("title,points,red", [
+    ("Fraudulent filings alleged", 0, True),          # red flag «fraud» + a suffix
+    ("Regulator probes the maker", -10, False),       # «probe» + a suffix
+    ("Analyst downgraded the stock", -10, False),
+    ("Chapter 11 filing expected", 0, True),
+    ("Lawsuits pile up", -10, False),
+    ("Upgraded to buy", 5, False),
+])
+def test_news_stock_phrases_match_their_suffixes(title, points, red):
+    part, flag = ms.news_part(_titles(title))
+    assert part.points == points
+    assert (flag == title) is red
+
+
+def test_news_initial_public_offering_is_not_a_share_offering_red_flag():
+    part, red = ms.news_part(_titles("Acme files for initial public offering"))
+    assert red is None and part.points == 0
+    part, red = ms.news_part(_titles("ACME PRICES INITIAL PUBLIC OFFERING"))
+    assert red is None
+
+
+def test_news_other_public_offerings_are_still_red_flags():
+    for title in ("Acme launches $50M public offering", "Follow-on public offering priced",
+                  "Acme prices secondary public offering"):
+        assert ms.news_part(_titles(title))[1] == title
+
+
 # ------------------------------------------------------------------ typical_move / stop
 def test_typical_move_of_alternating_closes():
     closes = [100.0, 101.0] * 10 + [100.0]           # 21 closes -> 20 changes
@@ -756,6 +816,12 @@ def test_position_size_tight_stock_stop_is_capped_at_ten_percent_of_model():
 def test_position_size_crypto_is_capped_by_the_sleeve():
     assert ms.position_size(100_000, 30_000, 0.15, "crypto") == pytest.approx(min(6666.6667, 10_500))
     assert ms.position_size(100_000, 30_000, 0.05, "crypto") == pytest.approx(10_500)
+
+
+def test_position_size_without_a_usable_stop_is_zero():
+    assert ms.position_size(100_000, 30_000, None, "stock") == 0.0
+    assert ms.position_size(100_000, 30_000, 0.0, "crypto") == 0.0
+    assert ms.position_size(100_000, 30_000, -0.1, "stock") == 0.0
 
 
 # ------------------------------------------------------------------ constants

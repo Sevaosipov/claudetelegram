@@ -15,6 +15,7 @@ end up in the Telegram message and the menu.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from cluster.roles import INSIDER_ROLES
@@ -47,8 +48,10 @@ _COUNT_POINTS = {1: 22, 2: 34, 3: 42, 4: 46}
 _POLITICIAN_SOURCES = ("HOUSE", "SENATE")
 _STAKE_SOURCE = "SEC13DG"
 
-# Phrases are matched as substrings of the lower-cased headline. A red flag blocks the
-# buy outright (and closes a position); the others only move the score.
+# The phrase tuples are the source of truth; _phrase_regex turns them into patterns.
+# A red flag blocks the buy outright (and closes a position); the others only move the
+# score. Matching is against the lower-cased headline, from a word boundary on, so
+# "asphalts" is not "halts" and "ETHGlobal hackathon" is not a hack.
 RED_FLAGS = ("fraud", "sec investigation", "subpoena", "going concern", "bankruptcy",
              "chapter 11", "restatement", "delisting", "delisted",
              "public offering", "secondary offering", "private placement", "at-the-market")
@@ -57,6 +60,34 @@ NEGATIVE = ("downgrade", "cuts guidance", "cuts forecast", "misses estimates", "
             "probe", "recall", "resigns", "halts", "short seller")
 POSITIVE = ("upgrade", "raises guidance", "raises forecast", "beats estimates", "buyback",
             "record revenue", "wins contract", "fda approval")
+
+# Most phrases are open-ended on the right, so "fraudulent", "probes" and "downgraded"
+# match. The short coin words are not: "hack" and "exploit" are also the start of
+# "hackathon" and "exploitation", so they may only continue with these inflections.
+# Known limitation: "miners exploit cheap power" still reads as an exploit.
+_CLOSED_INFLECTIONS = {"hack": "s|ed|er|ers|ing", "exploit": "s|ed|ing"}
+# "initial public offering" is a new listing, not this company diluting its holders.
+_NOT_PRECEDED_BY = {"public offering": "initial "}
+
+
+def _phrase_regex(phrase: str) -> str:
+    pattern = r"\b"
+    if phrase in _NOT_PRECEDED_BY:
+        pattern += f"(?<!{re.escape(_NOT_PRECEDED_BY[phrase])})"
+    pattern += re.escape(phrase)
+    if phrase in _CLOSED_INFLECTIONS:
+        pattern += f"(?:{_CLOSED_INFLECTIONS[phrase]})?" + r"\b"
+    return pattern
+
+
+def _compile(phrases: tuple[str, ...]) -> re.Pattern:
+    return re.compile("|".join(_phrase_regex(p) for p in phrases))
+
+
+_RED_RE = _compile(RED_FLAGS)
+_COIN_RED_RE = _compile(RED_FLAGS + COIN_RED_FLAGS)
+_NEGATIVE_RE = _compile(NEGATIVE)
+_POSITIVE_RE = _compile(POSITIVE)
 
 
 @dataclass
@@ -243,7 +274,7 @@ def news_part(headlines: list[dict] | None, *, coin: bool = False) -> tuple[Part
     A title counts once per list and a red-flag title is not also a negative one."""
     if not headlines:
         return Part(0, []), None
-    red_phrases = RED_FLAGS + (COIN_RED_FLAGS if coin else ())
+    red_re = _COIN_RED_RE if coin else _RED_RE
     red: str | None = None
     bad = good = 0
     for item in headlines:
@@ -251,12 +282,12 @@ def news_part(headlines: list[dict] | None, *, coin: bool = False) -> tuple[Part
         if not title:
             continue
         low = title.lower()
-        if any(p in low for p in red_phrases):
+        if red_re.search(low):
             red = red or title
             continue
-        if any(p in low for p in NEGATIVE):
+        if _NEGATIVE_RE.search(low):
             bad += 1
-        if any(p in low for p in POSITIVE):
+        if _POSITIVE_RE.search(low):
             good += 1
     points = max(NEWS_MIN, min(NEWS_MAX, bad * NEWS_NEGATIVE_POINTS + good * NEWS_POSITIVE_POINTS))
     lines = []
@@ -411,9 +442,13 @@ def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: s
 
 
 # ---------------------------------------------------------------- sizing
-def position_size(model_value: float, sleeve_value: float, stop: float, kind: str) -> float:
+def position_size(model_value: float, sleeve_value: float, stop: float | None,
+                  kind: str) -> float:
     """EUR to buy: what loses RISK_PER_TRADE of the model if the stop is hit, but no more
-    than the per-name cap (a share of the model for stocks, of the crypto sleeve for coins)."""
+    than the per-name cap (a share of the model for stocks, of the crypto sleeve for coins).
+    Without a usable stop there is nothing to size from: 0, which callers skip as «мало»."""
+    if stop is None or stop <= 0:
+        return 0.0
     risk = RISK_PER_TRADE * model_value / stop
     cap = STOCK_CAP * model_value if kind == "stock" else COIN_CAP * sleeve_value
     return min(risk, cap)
