@@ -1,21 +1,27 @@
-"""paper_report.py: what the paper portfolio shows -- statistics, the success line,
-the menu/CLI text and the monthly Telegram report."""
+"""paper_report.py: one book's detail, the monthly Telegram report and the paper.py CLI.
+The model summary and its statistics are in test_model_views.py."""
 from __future__ import annotations
 
 import datetime as dt
-import re
-
-import pytest
 
 import db
+import model
 import paper
 import paper_report
 
 TODAY = dt.date(2026, 10, 5)
+S, C = model.STOCK_BOOK, model.CRYPTO_BOOK
 
 
 def _start(conn, days_ago):
-    paper.create_books(conn, TODAY - dt.timedelta(days=days_ago))
+    model.create_books(conn, TODAY - dt.timedelta(days=days_ago))
+
+
+def _archive(conn, code="R1-E1", start="2026-08-01"):
+    """An old book, as an earlier database holds it."""
+    conn.execute("INSERT INTO paper_books (code, sleeve, start_date, start_eur, cash_eur, bench_symbol) "
+                 "VALUES (?,?,?,?,?,?)", (code, "stock", start, 80_000.0, 80_000.0, "SPY"))
+    conn.commit()
 
 
 def _equity(conn, code, rows):
@@ -38,155 +44,119 @@ def _closed_trades(conn, code, n):
     conn.commit()
 
 
-def test_running_before_day_182(conn):
-    _start(conn, 100)
-    _equity(conn, "R1-E1", [(100, 80_000, 80_000), (0, 88_000, 84_000)])
-    s = paper_report.stats(conn, paper.BOOK_BY_CODE["R1-E1"], TODAY)
-    assert (s["day"], s["status"]) == (100, "идёт")
-    assert s["ret"] == pytest.approx(0.10) and s["bench_ret"] == pytest.approx(0.05)
-
-
-def test_passing_needs_a_better_return_a_smaller_drop_and_20_trades(conn):
-    _start(conn, 190)
-    _equity(conn, "R1-E1", [(190, 80_000, 80_000), (100, 76_000, 64_000), (0, 90_000, 84_000)])
-    _closed_trades(conn, "R1-E1", 20)
-    assert paper_report.stats(conn, paper.BOOK_BY_CODE["R1-E1"], TODAY)["status"] == "пройдено"
-
-
-def test_a_stock_book_with_too_few_trades_waits_for_them(conn):
-    _start(conn, 190)
-    _equity(conn, "R1-E1", [(190, 80_000, 80_000), (100, 76_000, 64_000), (0, 90_000, 84_000)])
-    _closed_trades(conn, "R1-E1", 19)
-    assert paper_report.stats(conn, paper.BOOK_BY_CODE["R1-E1"], TODAY)["status"] == \
-        "идёт (сделок 19 из 20)"
-
-
-def test_a_crypto_book_needs_no_trade_minimum(conn):
-    _start(conn, 190)
-    _equity(conn, "C-A", [(190, 20_000, 20_000), (100, 19_000, 15_000), (0, 24_000, 22_000)])
-    assert paper_report.stats(conn, paper.BOOK_BY_CODE["C-A"], TODAY)["status"] == "пройдено"
-
-
-def test_a_deeper_drop_than_the_benchmark_does_not_pass(conn):
-    _start(conn, 190)
-    _equity(conn, "C-A", [(190, 20_000, 20_000), (100, 10_000, 18_000), (0, 24_000, 22_000)])
-    assert paper_report.stats(conn, paper.BOOK_BY_CODE["C-A"], TODAY)["status"] == "не пройдено"
-
-
-def test_the_shadow_is_always_a_shadow(conn):
-    _start(conn, 190)
-    assert paper_report.stats(conn, paper.BOOK_BY_CODE["R1-E1-AN"], TODAY)["status"] == "тень"
-
-
-def test_summary_lists_every_book_under_its_sleeve(conn):
-    _start(conn, 47)
-    _equity(conn, "R1-E1", [(47, 80_000, 80_000), (0, 84_320, 82_480)])
-    text = paper_report.format_summary(conn, TODAY)
-    assert "Бумажный портфель — день 47 из 182" in text
-    assert "АКЦИИ (S&P 500:" in text and "КРИПТО (BTC:" in text
-    assert "R1·E1 " in text and "+5.4%" in text and "(+2.3 п.п.)" in text
-    assert "R1·E1+аналитики" in text and "тень" in text and "C-B" in text
-
-
-def test_summary_before_the_first_run(conn):
-    assert "ещё не запущен" in paper_report.format_summary(conn, TODAY)
-
-
 def test_book_detail_lists_positions_trades_and_skips(conn):
     _start(conn, 30)
-    _closed_trades(conn, "R1-E2", 1)
-    paper.place_buy(conn, "R1-E2", "DE0007164600", "BAFIN", "Сильный: BAFIN, X", TODAY, 8_000.0,
+    _closed_trades(conn, S, 1)
+    paper.place_buy(conn, S, "DE0007164600", "BAFIN", "Сильный: BAFIN, X", TODAY, 8_000.0,
                     max_positions=10)
-    text = paper_report.format_book(conn, "R1-E2")
-    assert "R1·E2" in text and "T0" in text and "90 дн. в позиции" in text and "нет котировки" in text
+    text = paper_report.format_book(conn, S)
+    assert text.startswith("MODEL-S — открытые позиции:")
+    assert "T0" in text and "90 дн. в позиции" in text and "нет котировки" in text
 
 
-def test_book_detail_marks_the_shadow_and_shows_entries_and_results(conn):
+def test_book_detail_shows_entries_and_results(conn):
     _start(conn, 30)
     conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
         "net_eur, entry_close, entry_fx, reason, last_value) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("R1-E1-AN", "AAA", "SEC", "AAA", "USD", "2026-09-20", 8000, 7980, 123.45, 1.16, "Сильный", 8400))
-    _closed_trades(conn, "R1-E1-AN", 1)                             # 8000 -> 8100
-    text = paper_report.format_book(conn, "R1-E1-AN")
-    assert text.startswith("R1·E1+аналитики (тень) — открытые позиции:")
+        (S, "AAA", "SEC", "AAA", "USD", "2026-09-20", 8000, 7980, 123.45, 1.16, "Сильный", 8400))
+    _closed_trades(conn, S, 1)                                      # 8000 -> 8100
+    text = paper_report.format_book(conn, S)
     assert "вход 123.45" in text
     assert "+1.2% (+€100)" in text
-    assert "(тень)" not in paper_report.format_book(conn, "R1-E1")
 
 
-def test_summary_after_day_182_says_the_verdict_is_in(conn):
-    _start(conn, 190)
-    text = paper_report.format_summary(conn, TODAY)
-    assert "день 190 (итог — после 182 дней)" in text and "из 182" not in text
+def test_book_detail_works_for_an_archived_code(conn):
+    _start(conn, 30)
+    _archive(conn, "R1-E1")
+    _closed_trades(conn, "R1-E1", 1)
+    text = paper_report.format_book(conn, "R1-E1")
+    assert text.startswith("R1-E1 — открытые позиции:") and "T0" in text
+    assert "тень" not in text
 
 
-def test_monthly_html_summary_aligns_books_and_shows_the_benchmarks_month(conn):
-    paper.create_books(conn, dt.date(2026, 8, 15))
-    for day, value, bench in (("2026-08-31", 80_000, 80_000), ("2026-09-30", 82_000, 84_000)):
-        conn.execute("INSERT INTO paper_equity (book, date, value, cash, bench) VALUES (?,?,?,?,?)",
-                     ("R1-E1", day, value, 0.0, bench))
-    conn.commit()
-    text = paper_report.format_summary(conn, TODAY, monthly=True, html=True)
-    assert "<b>АКЦИИ (S&amp;P 500: +5.0%, худшая просадка +0.0%, за месяц +5.0%)</b>" in text
-    assert "за месяц —)</b>" in text                                   # КРИПТО: no benchmark yet
-    assert text.count("<pre>") == 3 and text.count("</pre>") == 3
-    assert "<pre>R1·E1 " in text and re.search(r"R1·E1 .* за месяц +\+2\.5%", text)
+def test_book_detail_of_an_empty_book(conn):
+    _start(conn, 30)
+    text = paper_report.format_book(conn, C)
+    assert text.startswith("MODEL-C — открытые позиции:") and text.count("  нет") == 2
 
 
 def test_monthly_report_goes_once_a_month_and_not_in_the_start_month(conn):
     sent = []
-    paper.create_books(conn, dt.date(2026, 9, 28))
-    _equity(conn, "R1-E1", [(7, 80_000, 80_000)])
+    model.create_books(conn, dt.date(2026, 9, 28))
+    _equity(conn, S, [(7, 70_000, 70_000)])
+    _equity(conn, C, [(7, 30_000, 30_000)])
     assert paper_report.maybe_send_monthly_report(conn, dt.date(2026, 9, 30), sent.append) is False
     assert paper_report.maybe_send_monthly_report(conn, dt.date(2026, 10, 1),
                                                   lambda t: sent.append(t) or True) is True
     assert paper_report.maybe_send_monthly_report(conn, dt.date(2026, 10, 2),
                                                   lambda t: sent.append(t) or True) is False
-    assert len(sent) == 1 and "за месяц" in sent[0]
+    assert len(sent) == 1 and "Модельный портфель" in sent[0] and "за месяц" in sent[0]
+    assert "<b>Модельный портфель" in sent[0]                       # sent as Telegram HTML
 
 
-def test_cli_shows_a_book_and_rejects_an_unknown_one(conn, monkeypatch, capsys):
+def test_monthly_report_is_keyed_to_the_models_start_not_the_archives(conn):
+    sent = []
+    _archive(conn, "R1-E1", start="2026-08-01")                      # older than the model
+    model.create_books(conn, dt.date(2026, 10, 1))
+    assert paper_report.maybe_send_monthly_report(conn, dt.date(2026, 10, 3),
+                                                  lambda t: sent.append(t) or True) is False
+    assert sent == []
+
+
+def test_monthly_report_waits_for_the_model(conn):
+    _archive(conn, "R1-E1", start="2026-08-01")
+    assert paper_report.maybe_send_monthly_report(conn, TODAY, lambda t: True) is False
+
+
+def test_monthly_report_needs_the_models_statistics(conn):
+    """A stock book without its crypto book (a half-created model) has no statistics: nothing
+    is sent -- not the «ещё не запущен» line as a monthly report."""
+    sent = []
+    conn.execute("INSERT INTO paper_books (code, sleeve, start_date, start_eur, cash_eur, bench_symbol) "
+                 "VALUES (?,?,?,?,?,?)", (S, "stock", "2026-08-01", 70_000.0, 70_000.0, "SPY"))
+    conn.commit()
+    assert paper_report.model_stats(conn, TODAY) is None
+    assert paper_report.maybe_send_monthly_report(conn, TODAY, lambda t: sent.append(t) or True) is False
+    assert sent == []
+
+
+def test_a_failed_send_is_retried_the_next_run(conn):
+    _start(conn, 60)
+    assert paper_report.maybe_send_monthly_report(conn, TODAY, lambda t: False) is False
+    assert paper_report.maybe_send_monthly_report(conn, TODAY, lambda t: True) is True
+
+
+def test_cli_shows_a_model_book_and_an_archived_one(conn, monkeypatch, capsys):
+    _start(conn, 10)
+    _archive(conn, "R1-E1")
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    assert paper.main(["model-s"]) == 0 and "MODEL-S" in capsys.readouterr().out
+    assert paper.main(["R1-E1"]) == 0 and "R1-E1" in capsys.readouterr().out
+
+
+def test_cli_rejects_an_unknown_book_and_lists_the_ones_it_has(conn, monkeypatch, capsys):
+    _start(conn, 10)
+    _archive(conn, "R1-E1")
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    assert paper.main(["X-9"]) == 2
+    out = capsys.readouterr().out
+    assert "Нет такой книги" in out and "MODEL-S" in out and "MODEL-C" in out and "R1-E1" in out
+
+
+def test_cli_does_not_know_a_book_the_database_lacks(conn, monkeypatch, capsys):
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    assert paper.main(["MODEL-S"]) == 2 and "Нет такой книги" in capsys.readouterr().out
+
+
+def test_cli_prints_the_model_summary_without_a_code(conn, monkeypatch, capsys):
     _start(conn, 10)
     monkeypatch.setattr(db, "connect", lambda path: conn)
-    assert paper.main(["R1-E1"]) == 0 and "R1·E1" in capsys.readouterr().out
-    assert paper.main(["X-9"]) == 2 and "Нет такой книги" in capsys.readouterr().out
+    assert paper.main([]) == 0 and "Модельный портфель — день" in capsys.readouterr().out
 
 
-def test_cli_shows_a_high_risk_book(conn, monkeypatch, capsys):
-    _start(conn, 10)
-    monkeypatch.setattr(db, "connect", lambda path: conn)
-    assert paper.main(["H1"]) == 0 and "H1" in capsys.readouterr().out
-
-
-def test_menu_shows_the_paper_portfolio(conn, capsys):
-    import menu
-    _start(conn, 10)
-    menu.show_paper(conn)
-    assert "Бумажный портфель" in capsys.readouterr().out
-
-
-def test_small_books_wait_for_their_20_trades(conn):
-    _start(conn, 190)
-    _equity(conn, "H1", [(190, 20_000, 20_000), (0, 24_000, 21_000)])
-    _closed_trades(conn, "H1", 5)
-    assert paper_report.stats(conn, paper.BOOK_BY_CODE["H1"], TODAY)["status"] == "идёт (сделок 5 из 20)"
-
-
-def test_summary_has_a_high_risk_group_with_its_own_start(conn):
-    _start(conn, 40)
-    conn.execute("UPDATE paper_books SET start_date = ? WHERE sleeve = 'small'",
-                 ((TODAY - dt.timedelta(days=10)).isoformat(),))
-    conn.commit()
-    text = paper_report.format_summary(conn, TODAY)
-    started = (TODAY - dt.timedelta(days=10)).strftime("%d.%m.%Y")
-    assert "ВЫСОКИЙ РИСК (Russell 2000:" in text and f"с {started})" in text
-    assert "H1" in text and "H2" in text
-
-
-def test_summary_skips_books_the_database_does_not_have_yet(conn):
-    _start(conn, 40)
-    conn.execute("DELETE FROM paper_books WHERE sleeve = 'small'")
-    conn.commit()
-    text = paper_report.format_summary(conn, TODAY)
-    assert "ВЫСОКИЙ РИСК" not in text and "R1·E1" in text
+def test_report_no_longer_depends_on_the_old_book_list():
+    import inspect
+    source = inspect.getsource(paper_report)
+    for name in ("paper.Book", "paper.BOOKS", "BOOK_BY_CODE", "_GROUPS", "_BENCH_NAME"):
+        assert name not in source

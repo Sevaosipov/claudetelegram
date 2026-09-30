@@ -1,5 +1,7 @@
 """Collect newly disclosed stock purchases from public filings, log every one of
-them, and push a Telegram alert only for *signals*.
+them, journal the *signals* they form, and run the model portfolio (model.py) on them.
+The one Telegram message a day says what the model bought and sold, plus the close
+alerts on your /bought positions and the groups that started selling.
 
 Sources:
     SEC Form 4        US insider purchases and sales (sec_edgar.py)
@@ -46,12 +48,11 @@ import cik_map
 import cluster
 import db
 import insider_score
-import paper
+import model
+import paper_report
 import positions
 import sec_edgar
 import strategy
-import tradingview
-import trading212
 import universe
 import telegram_notify
 from passes import (
@@ -133,7 +134,7 @@ def _which_sources(args) -> dict:
     """Which sources are enabled for this run, honoring the mutually-exclusive
     *_only flags (any one of them switches off all the others) and each source's
     individual --no-* skip flag. Shared by main()'s poll loop and
-    run_cluster_pass() (via strategy.buy_side_signals) so the two never drift
+    collect_new_signals() (via strategy.buy_side_signals) so the two never drift
     apart."""
     only_set = (args.sec_only or args.house_only or args.bafin_only or args.norway_only
                 or args.sweden_only or args.crypto_only)
@@ -159,18 +160,17 @@ def _which_sources(args) -> dict:
     }
 
 
-def run_cluster_pass(conn, args) -> strategy.Selection:
-    """Recomputes both signal types from everything currently in SQLite (not just
-    this run's new rows -- a cluster/exit accumulates across multiple daily runs),
-    keeping only the ones that grew past what was last alerted:
-      - cluster buy signals: a ticker bought by multiple distinct people at once
-      - exit signals: people who bought together later selling together
-    tiers the buy side into strategy.Selection.strong / .candidates, and keeps
-    exit signals in .exits, unfiltered (see strategy.select).
+def collect_new_signals(conn, args) -> tuple[list, list]:
+    """The finders' output, from everything currently in SQLite (not just this run's new
+    rows -- a cluster or exit accumulates across daily runs), keeping only what grew past
+    what was last alerted. Returns (buy side, exits):
+      - buy side: cluster, stake and crypto signals, bearish coin signals included
+      - exits: people who bought together later selling together (--no-exit-signals skips)
+    Nothing else is filtered: the model scores what matters (model.py) and the journal
+    keeps the rest for history. _journal logs each signal, once it is enriched.
     """
     sources = _which_sources(args)
-
-    signals = strategy.buy_side_signals(
+    buys = strategy.buy_side_signals(
         conn, sources=sources, onchain=sources["onchain"],
         cluster_kwargs={"min_value": args.min_cluster_value, "solo_threshold": args.solo_threshold},
         sec_kwargs={"include_derivatives": args.include_derivatives,
@@ -181,33 +181,8 @@ def run_cluster_pass(conn, args) -> strategy.Selection:
                      "activist_only": args.activist_only, "new_positions_only": args.new_positions_only,
                      "max_age_days": 30},
     )
-    if not args.no_exit_signals:
-        signals += strategy.exit_signals(conn, sources=sources)
-    # Tiers (strategy.py): buy side, disclosed in the last few days, on Trading 212,
-    # above the size floors -- enrich_signals runs inside select(), only on what
-    # survives the cheap filters. Exit signals pass straight through into .exits.
-    selection = strategy.select(conn, signals, trading212.availability(conn))
-
-    def keep(t):
-        s = t.signal
-        if args.min_score and getattr(s, "score", 0) < args.min_score:
-            return False
-        adv = getattr(s, "avg_daily_value", None)
-        return not (args.min_liquidity and adv is not None and adv < args.min_liquidity)
-    selection.strong = [t for t in selection.strong if keep(t)]
-    selection.candidates = [t for t in selection.candidates if keep(t)]
-
-    if not args.no_market_context:
-        # Last, so it runs only on what will actually be shown.
-        tradingview.annotate_signals([t.signal for t in selection.strong + selection.candidates])
-
-    for t in selection.strong + selection.candidates:
-        print(f"[{t.tier}] " + telegram_notify.format_any_signal(t.signal))
-    for t in selection.cautions:
-        print("[caution] " + telegram_notify.format_any_signal(t.signal))
-    for t in selection.high_risk:
-        print("[high_risk] " + telegram_notify.format_any_signal(t.signal))
-    return selection
+    exits = [] if args.no_exit_signals else strategy.exit_signals(conn, sources=sources)
+    return buys, exits
 
 
 def _signal_features(sig) -> dict:
@@ -255,11 +230,11 @@ def _commit_signals(conn, signals) -> None:
     """Record signals as alerted, so they don't re-fire until they actually grow --
     and journal them at the same moment.
 
-    Journalling belongs here rather than where signals are computed. A signal that
-    was computed but not sent (Telegram down, --no-telegram) still returns on the
-    next run, so recording it at computation time would enter the same signal into
-    the journal repeatedly and quietly inflate every backtest group. One row per
-    signal actually sent.
+    Journalling belongs here rather than where signals are computed: a signal that was
+    only computed still returns on the next run, so recording it at computation time would
+    enter the same signal into the journal repeatedly and quietly inflate every backtest
+    group. One row per signal, written when _journal commits it -- whether or not the
+    day's Telegram message goes out.
     """
     for s in signals:
         db.journal_signal(conn, _signal_features(s))
@@ -273,67 +248,78 @@ def _commit_signals(conn, signals) -> None:
             cluster.commit_alert(conn, s)
 
 
-def _record_cautions(conn, selection) -> None:
-    """Caution signals are never pushed -- the menu's Сигналы shows them -- but they
-    are journaled and marked alerted on the run that finds them: a coin position's
-    close alert reads them from the journal (positions.check_exits)."""
-    _commit_signals(conn, [t.signal for t in selection.cautions])
-
-
-def _record_high_risk(conn, selection) -> None:
-    """Small-company signals are never pushed while their paper books are on trial --
-    the menu's Сигналы shows them -- but they are journaled and marked alerted on the
-    run that finds them, so history can measure them and they don't repeat."""
-    _commit_signals(conn, [t.signal for t in selection.high_risk])
-
-
-_PAPER_SKIP_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only",
-                     "crypto_only", "min_score", "min_liquidity")
+_FILTER_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only",
+                 "crypto_only", "min_score", "min_liquidity")
 
 
 def _filtered_run(args) -> bool:
-    """True when a flag limits this run to some sources or scores, so it sees only
-    part of the day's signals -- shared by _run_paper (it then neither trades the
-    books nor starts their clock) and main()'s guard around _record_high_risk (it
-    then must not journal a high-risk signal before a later, full run can find it)."""
-    return any(getattr(args, name, False) for name in _PAPER_SKIP_FLAGS)
+    """True when a flag limits this run to some sources or scores, so it sees only part of
+    the day's signals. The model then neither trades nor starts its clock, and the monthly
+    report waits for a full run -- new signals are still journaled."""
+    return any(getattr(args, name, False) for name in _FILTER_FLAGS)
 
 
-def _run_paper(conn, selection, args) -> None:
-    """The paper portfolio's daily pass (paper.py) -- after the digest, whether or not
-    Telegram is on. It trades virtual books only. A crash is reported like a failed
-    source rather than taking the run down; on the first good pass of a month the
-    monthly report goes out (paper_report.py). A run filtered to some sources or
-    scores sees only part of the day's signals, so it neither trades the books nor
-    starts their clock."""
+def _run_model(conn, args) -> "model.DayReport | None":
+    """The model portfolio's daily pass (model.py) -- after the new signals are collected,
+    whether or not Telegram is on. It trades virtual books only. A crash is reported like
+    a failed source rather than taking the run down. None on a filtered run (which sees
+    only part of the day's signals, so must not trade or start the books' clock) and after
+    a crash."""
     if _filtered_run(args):
-        print("[paper] skipped: filtered run")
-        return
-    if _run_source("PAPER", paper.run, conn, selection) is None:
-        if not args.no_telegram:
-            telegram_notify.send_text("⚠️ disclosure-bot: бумажный портфель упал в этом прогоне. "
-                                      "Логи: data/launchd.err.log")
-        return
-    if not args.no_telegram:
-        import paper_report
-        _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, dt.date.today())
+        print("[model] skipped: filtered run")
+        return None
+    report = _run_source("MODEL", model.run, conn)
+    if report is None and not args.no_telegram:
+        telegram_notify.send_text("⚠️ disclosure-bot: модельный портфель упал в этом прогоне. "
+                                  "Логи: data/launchd.err.log")
+    return report
 
 
-def _send_digest(conn, selection, closes) -> bool:
-    """One Telegram message -- 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть, 🚨 Выходы -- and,
-    only if it went through, the bookkeeping: alert state and journal for the
-    signals (including exits), and the once-only mark for close alerts. A failed
-    send leaves both untouched so the next run retries. Nothing to say -> nothing
+def _journal_cautions(conn, signals: list) -> list:
+    """Journal today's bearish coin signals (tier `caution`) now, before the model runs, so a
+    caution found today can close a MODEL-C coin today (model reads it back through
+    positions._crypto_caution). Returns the other signals, for _journal after the model."""
+    cautions = [s for s in signals if strategy.is_caution(s)]
+    if cautions:
+        _journal(conn, cautions, None)
+    return [s for s in signals if not strategy.is_caution(s)]
+
+
+def _journal(conn, signals: list, report) -> None:
+    """Enrich the buy-side signals, set each one's journal tier, and commit them (alert
+    state and journal row) -- in this run, whatever happens to the Telegram message.
+
+    The tier is the model's decision for that ticker today (buy / watch / block / skip),
+    `caution` for a bearish coin signal (positions._crypto_caution reads it), or None when
+    the model did not score it (a filtered run, a crash, an unlisted name). Exit signals
+    are committed too, with no tier. Each signal is logged as it is committed, so the line
+    carries the market cap and score that enrichment found.
+    """
+    buys = [s for s in signals if not hasattr(s, "seller_count")]
+    if buys:
+        cluster.enrich_signals(conn, buys)
+    for sig in buys:
+        if strategy.is_caution(sig):
+            sig.tier = strategy.CAUTION
+        else:
+            sig.tier = report.decisions.get(sig.ticker) if report is not None else None
+    for sig in signals:
+        print(telegram_notify.format_any_signal(sig))
+    _commit_signals(conn, signals)
+
+
+def _send_day(conn, report, closes: list, exits: list) -> bool:
+    """One Telegram message (telegram_notify.format_model_day) when there is a model buy
+    or sale, a close alert or a group exit; the close alerts are marked alerted only if
+    it went through, so a failed send retries them next run. Nothing to say -> nothing
     sent, returns False."""
-    tiered = selection.strong + selection.candidates
-    if not tiered and not closes and not selection.exits:
+    text = telegram_notify.format_model_day(report, closes, exits)
+    if text is None:
         return False
-    if not telegram_notify.send_text(telegram_notify.format_tiered_digest(selection, closes)):
-        print(f"[telegram] send failed -- leaving {len(tiered)} signal(s), "
-              f"{len(selection.exits)} exit(s) and {len(closes)} close alert(s) for the "
-              f"next run", file=sys.stderr)
+    if not telegram_notify.send_text(text):
+        print(f"[telegram] send failed -- leaving {len(closes)} close alert(s) for the next run",
+              file=sys.stderr)
         return False
-    _commit_signals(conn, [t.signal for t in tiered] + selection.exits)
     positions.mark_alerted(conn, closes)
     return True
 
@@ -390,7 +376,7 @@ def run_healthcheck(conn, args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     """Split out of main() so tests (and anything else that wants a real, fully-
-    defaulted args object for run_cluster_pass) can do
+    defaulted args object for collect_new_signals) can do
     `bot.build_parser().parse_args([...])` instead of hand-maintaining a
     SimpleNamespace that has to be kept in sync with every flag added here."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -404,13 +390,13 @@ def build_parser() -> argparse.ArgumentParser:
                           "compares against each bracket's lower bound (conservative). Default $50,000; "
                           "pass 0 to disable")
     ap.add_argument("--min-cluster-value", type=float, default=cluster.MIN_CLUSTER_VALUE,
-                     help=f"minimum combined value across a cluster's buyers to alert on it, in EUR "
+                     help=f"minimum combined value across a cluster's buyers to make it a signal, in EUR "
                           f"(all sources are converted to EUR for signals -- see fx.py; House uses "
                           f"each buyer's disclosed range's lower bound; default "
                           f"€{cluster.MIN_CLUSTER_VALUE:,.0f})")
     ap.add_argument("--solo-threshold", type=float, default=cluster.SEC_SOLO_THRESHOLD,
                      help=f"a single buyer's own total in a ticker (within the cluster window) that's "
-                          f"enough to alert on its own, without a second distinct buyer -- we don't "
+                          f"enough to make a signal on its own, without a second distinct buyer -- we don't "
                           f"have shares-outstanding data to measure '%% of the company', so this is a "
                           f"flat money bar instead, in EUR (default €{cluster.SEC_SOLO_THRESHOLD:,.0f})")
     ap.add_argument("--sec-days", type=int, default=7,
@@ -439,17 +425,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "those are scheduled months ahead, so they carry no view on what the "
                           "insider thinks now. Form 4 always carried this flag; it was never read")
     ap.add_argument("--min-score", type=float, default=0,
-                     help="only alert on signals scoring at least this (see cluster.score_signal). "
-                          "The score ranks signals by how much attention they warrant -- it is not "
-                          "a prediction of return. Default 0 (no filter)")
+                     help="marks a manual, filtered run (as do the --*-only flags): new signals are "
+                          "still collected and journaled, but the model portfolio does not trade and "
+                          "the monthly report waits for a full run. Default 0 (a full run)")
     ap.add_argument("--min-liquidity", type=float, default=0,
-                     help="drop signals in names trading less than this much value per day, in EUR. "
-                          "Signals whose liquidity can't be resolved are kept, since unknown is not "
-                          "the same as low. Default 0 (no filter)")
+                     help="marks a manual, filtered run, like --min-score. Default 0 (a full run)")
     ap.add_argument("--no-market-context", action="store_true",
-                     help="skip attaching a TradingView technical-gauge line to surviving signals. "
-                          "On by default; runs only on whatever is left after --min-score/"
-                          "--min-liquidity, since it costs a live request per signal")
+                     help="no longer used: the daily run does not attach a TradingView technical-gauge "
+                          "line to signals. Accepted so existing command lines keep working")
     ap.add_argument("--insiders-only", action="store_true",
                      help="in SEC clusters, count only officers and directors -- drop filers who are "
                           "purely >10%% holders. An institution adding to a stake is a different event "
@@ -499,18 +482,18 @@ def build_parser() -> argparse.ArgumentParser:
                           "come from the same daily index, so adding one costs no extra index "
                           "requests. Default all four")
     ap.add_argument("--stake-min-percent", type=float, default=cluster.STAKE_MIN_PERCENT,
-                     help=f"minimum share of a company's class for a 13D/G stake to be worth "
-                          f"alerting on (default {cluster.STAKE_MIN_PERCENT}%%, the level at which "
+                     help=f"minimum share of a company's class for a 13D/G stake to be "
+                          f"a signal (default {cluster.STAKE_MIN_PERCENT}%%, the level at which "
                           f"filing becomes mandatory)")
     ap.add_argument("--stake-min-increase", type=float, default=cluster.STAKE_MIN_INCREASE_PP,
                      help=f"how many percentage points an already-alerted stake must grow before "
                           f"it's news again -- index funds file 13G/A amendments constantly over "
                           f"fractions of a point (default {cluster.STAKE_MIN_INCREASE_PP}pp)")
     ap.add_argument("--activist-only", action="store_true",
-                     help="only alert on Schedule 13D stakes (holders who may seek to influence "
+                     help="only Schedule 13D stakes (holders who may seek to influence "
                           "control), skipping passive 13G filers like index funds")
     ap.add_argument("--new-positions-only", action="store_true",
-                     help="only alert on a holder's first-ever stake filing on a ticker -- drops "
+                     help="only a holder's first-ever stake filing on a ticker -- drops "
                           "13D/G amendments entirely, however large the increase, since an "
                           "already-known holder growing their stake is not a new activist showing up")
     ap.add_argument("--crypto-only", action="store_true",
@@ -547,7 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-exit-signals", action="store_true",
                      help="don't compute exit signals (people who bought a ticker together later "
                           "selling it together -- see EXIT_* constants in cluster/common.py)")
-    ap.add_argument("--no-telegram", action="store_true", help="skip sending Telegram alerts")
+    ap.add_argument("--no-telegram", action="store_true", help="skip sending Telegram messages")
     return ap
 
 
@@ -648,29 +631,26 @@ def main():
         for x in stale_sources:
             print(f"[stale] {x}", file=sys.stderr)
 
-        selection = run_cluster_pass(conn, args)
-        _record_cautions(conn, selection)
-        # A filtered run (--sec-only, --min-score, ...) sees only part of the day's
-        # signals -- journalling here would mark a high-risk signal alerted before a
-        # later, full run ever sees it, and the paper books (which also skip a
-        # filtered run, see _run_paper) would never get to buy it.
-        if not _filtered_run(args):
-            _record_high_risk(conn, selection)
+        buys, exits = collect_new_signals(conn, args)
+        rest = _journal_cautions(conn, buys)          # a caution found today counts today
+        report = _run_model(conn, args)
+        _journal(conn, rest + exits, report)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))
         if not args.no_telegram:
-            _send_digest(conn, selection, closes)
-        _run_paper(conn, selection, args)
-        signal_count = len(selection.strong) + len(selection.candidates)
+            _send_day(conn, report, closes, exits)
+            if not _filtered_run(args):
+                _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, dt.date.today())
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from
         # "hasn't run in ten days".
         db.save_cached_value(conn, "last_successful_run", time.time())
 
-        print(f"--- poll finished, {total_new} new purchase(s), {signal_count} signal(s), "
-              f"{len(selection.high_risk)} high-risk, {len(closes)} close alert(s), "
+        print(f"--- poll finished, {total_new} new purchase(s), {len(buys) + len(exits)} new signal(s), "
+              f"{len(report.buys) if report else 0} model buy(s), "
+              f"{len(report.sells) if report else 0} model sale(s), {len(closes)} close alert(s), "
               f"took {time.time()-started:.1f}s ---")
 
         if args.once:

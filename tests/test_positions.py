@@ -7,19 +7,39 @@ import json
 import pytest
 
 import db
+import model
+import model_score
+import paper
 import positions
-from conftest import add_bafin_txn, add_form_144, add_sec_sale, add_sweden_txn
+from conftest import add_bafin_txn, add_form_144, add_sec_sale, add_stake, add_sweden_txn
 
 TODAY = dt.date(2026, 9, 23)
 
 
+@pytest.fixture(autouse=True)
+def _no_network_seams(monkeypatch):
+    """The two seams a position's exits reach the network through: with no history and no
+    headlines the exit rules that need them simply don't fire. Tests that care hand their own
+    closes_fn / news_fn, or override these."""
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
+
+
 def _strong_journal(conn, ticker, members, source="SEC"):
+    """A row as the tiered design wrote it (tier "strong"): /bought still reads those rows;
+    the model's own rows are covered in test_bot_model.py."""
     db.journal_signal(conn, {"source": source, "kind": "cluster", "ticker": ticker,
                              "tier": "strong", "members": json.dumps(members)})
 
 
-def _open(conn, ticker="AAA", price=100.0, days_ago=5):
-    return positions.open_position(conn, ticker, price, today=TODAY - dt.timedelta(days=days_ago))
+def _open(conn, ticker="AAA", price=100.0, days_ago=5, stop=None):
+    """Opens a position with no price history (so no stored stop); `stop` sets one directly."""
+    pos = positions.open_position(conn, ticker, price, today=TODAY - dt.timedelta(days=days_ago),
+                                  closes_fn=lambda t, s=None: [])
+    if stop is not None:
+        conn.execute("UPDATE positions SET stop_pct = ? WHERE id = ?", (stop, pos.id))
+        conn.commit()
+    return pos
 
 
 def _no_price(ticker, source=None):
@@ -74,25 +94,13 @@ def test_form_144_notice_counts_as_selling(conn):
     assert alert.trigger == "insider_sell" and "144" in alert.detail
 
 
-def test_time_limit_closes(conn):
-    _open(conn, days_ago=positions.EXIT_MAX_DAYS)
-    [alert] = positions.check_exits(conn, today=TODAY, price_fn=_no_price)
-    assert alert.trigger == "time"
-
-
-def test_stop_loss_closes(conn):
-    _open(conn, price=100.0)
-    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 84.9)
-    assert alert.trigger == "stop_loss" and alert.last_price == 84.9
-
-
 def test_small_drawdown_does_not_close(conn):
     _open(conn, price=100.0)
     assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 90.0) == []
 
 
 def test_each_position_alerts_once(conn):
-    _open(conn, days_ago=positions.EXIT_MAX_DAYS)
+    _open(conn, days_ago=model.MAX_HOLD_DAYS)
     alerts = positions.check_exits(conn, today=TODAY, price_fn=_no_price)
     positions.mark_alerted(conn, alerts, today=TODAY)
     assert positions.check_exits(conn, today=TODAY, price_fn=_no_price) == []
@@ -293,10 +301,443 @@ def test_no_price_trend_means_the_caution_waits(conn):
                                  trend_fn=_trend(None)) == []
 
 
-def test_coin_stop_loss_is_25_percent(conn):
+def test_a_coin_with_no_stop_and_no_history_falls_back_to_25_percent(conn):
     _open(conn, "CRYPTO:BTC", 100.0)
     assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 80.0,
                                  trend_fn=_trend(None)) == []
     [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 74.9,
                                     trend_fn=_trend(None))
-    assert alert.trigger == "stop_loss"
+    assert alert.trigger == "trailing_stop" and alert.detail == "−25% от максимума 100.00"
+
+
+# ------------------------------------------------- the model's exits on your positions
+def _days(start: dt.date, values):
+    """Closes on consecutive calendar days from `start` -- (iso date, close), oldest first."""
+    return [((start + dt.timedelta(days=i)).isoformat(), float(v)) for i, v in enumerate(values)]
+
+
+def _held_bars(before, after, days_ago=5):
+    """`before`: closes ending the day before the position opened; `after`: closes from the
+    opening day on (the position was opened `days_ago` days before TODAY)."""
+    opened = TODAY - dt.timedelta(days=days_ago)
+    return _days(opened - dt.timedelta(days=len(before)), before) + _days(opened, after)
+
+
+def _check(conn, price=None, bars=(), *, news=(), trend=None):
+    """check_exits with every seam stubbed: the current price, the history, the headlines."""
+    return positions.check_exits(
+        conn, today=TODAY, price_fn=lambda t, s=None: price, trend_fn=_trend(trend),
+        closes_fn=lambda t, s=None: list(bars), news_fn=lambda t, s=None: list(news))
+
+
+def _days_ago_for_bdays(n):
+    """How many calendar days ago a position was opened to have been held `n` business days."""
+    days = 0
+    while paper.business_days_between((TODAY - dt.timedelta(days=days)).isoformat(), TODAY) < n:
+        days += 1
+    return days
+
+
+_CHOPPY = [100.0, 106.0] * 20       # 6% swings: three typical moves is about 17.5%
+
+
+# ------------------------------------------------------------ the stop at open
+def test_open_position_stores_the_stop_its_price_history_gives(conn):
+    closes = _days(TODAY - dt.timedelta(days=60), [100.0] * 40)
+    seen = []
+    pos = positions.open_position(conn, "AAA", 100.0, today=TODAY,
+                                  closes_fn=lambda t, s=None: seen.append((t, s)) or closes)
+    assert pos.stop_pct == 0.10 and seen == [("AAA", None)]
+    assert positions.open_positions(conn)[0].stop_pct == 0.10          # stored, not just returned
+
+
+def test_the_stored_stop_scales_with_the_stocks_own_volatility(conn):
+    closes = _days(TODAY - dt.timedelta(days=60), _CHOPPY)
+    pos = positions.open_position(conn, "AAA", 100.0, today=TODAY, closes_fn=lambda t, s=None: closes)
+    expected = model_score.stop_distance(_CHOPPY, "stock")
+    assert expected > model_score.STOP_MIN["stock"]
+    assert pos.stop_pct == pytest.approx(expected)
+
+
+def test_a_coins_stop_is_sized_as_a_coin_and_priced_by_its_crypto_source(conn):
+    closes = _days(TODAY - dt.timedelta(days=60), [100.0] * 40)
+    seen = []
+    pos = positions.open_position(conn, "CRYPTO:BTC", 50_000.0, today=TODAY, source="CRYPTO",
+                                  closes_fn=lambda t, s=None: seen.append((t, s)) or closes)
+    assert pos.stop_pct == model_score.STOP_MIN["crypto"] and seen == [("CRYPTO:BTC", "CRYPTO")]
+
+
+def test_no_price_history_stores_no_stop(conn):
+    pos = positions.open_position(conn, "AAA", 100.0, today=TODAY, closes_fn=lambda t, s=None: [])
+    assert pos.stop_pct is None and positions.open_positions(conn)[0].stop_pct is None
+
+
+def test_the_default_history_is_the_yahoo_series_of_the_listing_the_position_is_on(conn, monkeypatch):
+    seen = []
+    flat = _days(TODAY - dt.timedelta(days=60), [100.0] * 40)
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: seen.append((symbol, days)) or flat)
+    pos = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY")
+    assert seen == [("NRC.OL", paper.PRICE_DAYS)] and pos.stop_pct == 0.10
+
+
+def test_the_default_history_is_empty_without_a_symbol_or_when_the_fetch_fails(monkeypatch):
+    calls = []
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: calls.append(symbol) or [("2026-09-01", 1.0)])
+    assert positions.daily_closes("DE0007164600", "BAFIN") == [] and calls == []      # an ISIN has none
+
+    def boom(symbol, days):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(paper, "_closes", boom)
+    assert positions.daily_closes("AAA", None) == []
+
+
+# ------------------------------------------------------------- the trailing stop
+def test_the_trailing_stop_fires_from_the_peak_not_the_entry(conn):
+    _open(conn, price=100.0, stop=0.10)
+    bars = _held_bars([200.0] * 3, [110.0, 130.0, 125.0])
+    [alert] = _check(conn, price=116.0, bars=bars)                 # 116 is above the entry: an entry-based stop is far
+    assert alert.trigger == "trailing_stop" and alert.last_price == 116.0
+    assert alert.detail == "−10% от максимума 130.00"
+
+
+def test_above_the_trailing_stop_nothing_fires(conn):
+    _open(conn, price=100.0, stop=0.10)
+    assert _check(conn, price=118.0, bars=_held_bars([], [110.0, 130.0, 125.0])) == []
+
+
+def test_the_peak_includes_the_entry_price(conn):
+    _open(conn, price=100.0, stop=0.10)
+    bars = _held_bars([], [95.0, 96.0])                            # every close since opening is under the entry
+    [alert] = _check(conn, price=89.0, bars=bars)
+    assert alert.trigger == "trailing_stop" and alert.detail == "−10% от максимума 100.00"
+    assert _check(conn, price=91.0, bars=bars) == []
+
+
+def test_a_close_from_before_the_opening_is_not_the_peak(conn):
+    _open(conn, price=100.0, stop=0.10)
+    assert _check(conn, price=95.0, bars=_held_bars([200.0] * 3, [100.0, 101.0])) == []
+
+
+def test_the_close_on_the_opening_day_counts_towards_the_peak(conn):
+    _open(conn, price=100.0, stop=0.10)
+    [alert] = _check(conn, price=130.0, bars=_held_bars([], [150.0, 100.0]))
+    assert alert.trigger == "trailing_stop" and alert.detail == "−10% от максимума 150.00"
+
+
+def test_a_position_without_a_stop_computes_it_from_the_closes_before_opening(conn):
+    _open(conn, price=100.0)                                       # no stored stop
+    stop = model_score.stop_distance(_CHOPPY, "stock")
+    assert 0.16 < stop < 0.19                                      # not the 10% floor, not the 15% fallback
+    bars = _held_bars(_CHOPPY, [100.0, 100.0])
+    assert _check(conn, price=83.0, bars=bars) == []               # 17% down: inside its own stop
+    [alert] = _check(conn, price=82.0, bars=bars)
+    assert alert.trigger == "trailing_stop" and alert.detail == f"−{stop * 100:.0f}% от максимума 100.00"
+
+
+def test_a_stock_with_too_little_history_to_size_a_stop_falls_back_to_15_percent(conn):
+    _open(conn, price=100.0)
+    bars = _held_bars([100.0] * 5, [100.0])
+    assert _check(conn, price=85.5, bars=bars) == []
+    [alert] = _check(conn, price=84.9, bars=bars)
+    assert alert.trigger == "trailing_stop" and alert.detail == "−15% от максимума 100.00"
+
+
+def test_a_bar_dated_today_is_still_in_progress_and_is_ignored(conn):
+    """A coin's (or a stock's) bar for the current day is not a close yet: a spike in it must
+    not set the peak, or a dip in it trip the stop."""
+    _open(conn, price=100.0, stop=0.10)
+    bars = _held_bars([], [100.0, 130.0]) + [(TODAY.isoformat(), 200.0)]
+    assert _check(conn, price=150.0, bars=bars) == []               # peak 130 -> stop 117; 200 would give 180
+    [alert] = _check(conn, price=116.0, bars=bars)
+    assert alert.detail == "−10% от максимума 130.00"
+
+
+def test_a_bar_dated_today_does_not_flip_a_coins_trend(conn):
+    _open(conn, "CRYPTO:BTC", 100.0, stop=0.25)
+    bars = _days(TODAY - dt.timedelta(days=130), _CLIMB) + [(TODAY.isoformat(), 50.0)]
+    assert _check(conn, price=_CLIMB[-1], bars=bars) == []
+
+
+def test_without_a_price_the_price_rules_wait(conn):
+    _open(conn, price=100.0, stop=0.10)
+    assert _check(conn, price=None, bars=_held_bars([], [100.0, 50.0])) == []
+
+
+# ---------------------------------------------------------------- dead money
+def test_dead_money_at_61_business_days_and_2_percent(conn):
+    _open(conn, price=100.0, days_ago=_days_ago_for_bdays(61), stop=0.10)
+    bars = _held_bars([], [100.0, 102.0], days_ago=_days_ago_for_bdays(61))
+    [alert] = _check(conn, price=102.0, bars=bars)
+    assert alert.trigger == "dead_money" and alert.detail == "60 торговых дней без роста"
+
+
+@pytest.mark.parametrize("bdays, fires", [(60, True), (59, False)])
+def test_dead_money_starts_at_60_business_days(conn, bdays, fires):
+    _open(conn, price=100.0, days_ago=_days_ago_for_bdays(bdays), stop=0.10)
+    alerts = _check(conn, price=102.0, bars=_held_bars([], [100.0, 102.0], days_ago=_days_ago_for_bdays(bdays)))
+    assert [a.trigger for a in alerts] == (["dead_money"] if fires else [])
+
+
+def test_no_dead_money_at_plus_6_percent(conn):
+    days = _days_ago_for_bdays(61)
+    _open(conn, price=100.0, days_ago=days, stop=0.10)
+    assert _check(conn, price=106.0, bars=_held_bars([], [100.0, 106.0], days_ago=days)) == []
+
+
+def test_a_coin_is_never_dead_money(conn):
+    days = _days_ago_for_bdays(61)
+    _open(conn, "CRYPTO:BTC", 100.0, days_ago=days, stop=0.15)
+    assert _check(conn, price=102.0, bars=_held_bars([], [100.0, 102.0], days_ago=days)) == []
+
+
+# ----------------------------------------------------------------------- time
+def test_a_year_in_the_position_closes_it(conn):
+    _open(conn, price=100.0, days_ago=model.MAX_HOLD_DAYS, stop=0.10)
+    bars = _held_bars([], [100.0, 120.0], days_ago=model.MAX_HOLD_DAYS)       # up 20%: not dead money
+    [alert] = _check(conn, price=120.0, bars=bars)
+    assert alert.trigger == "time" and alert.detail == f"{model.MAX_HOLD_DAYS} дн. в позиции"
+
+
+def test_a_day_short_of_the_year_does_not(conn):
+    days = model.MAX_HOLD_DAYS - 1
+    _open(conn, price=100.0, days_ago=days, stop=0.10)
+    assert _check(conn, price=120.0, bars=_held_bars([], [100.0, 120.0], days_ago=days)) == []
+
+
+def test_the_year_closes_a_position_even_with_no_price(conn):
+    _open(conn, days_ago=model.MAX_HOLD_DAYS)
+    [alert] = _check(conn, price=None)
+    assert alert.trigger == "time" and alert.last_price is None
+
+
+# ----------------------------------------------------------------------- news
+_RED = [{"title": "Acme accused of fraud by regulators", "published": "2026-09-22"}]
+
+
+def test_a_red_flag_headline_closes_the_position(conn):
+    _open(conn, price=100.0, stop=0.10)
+    [alert] = _check(conn, price=100.0, bars=_held_bars([], [100.0]), news=_RED)
+    assert alert.trigger == "news" and alert.detail == "новости: Acme accused of fraud by regulators"
+
+
+def test_ordinary_headlines_do_not_close_it(conn):
+    _open(conn, price=100.0, stop=0.10)
+    news = [{"title": "Acme raises guidance"}, {"title": "Acme misses estimates"}]
+    assert _check(conn, price=100.0, bars=_held_bars([], [100.0]), news=news) == []
+
+
+def test_the_news_are_fetched_for_the_position_and_only_when_nothing_else_fired(conn):
+    _open(conn, price=100.0, stop=0.10)
+    asked = []
+
+    def news_fn(ticker, source):
+        asked.append((ticker, source))
+        return []
+    positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 100.0, trend_fn=_trend(None),
+                          closes_fn=lambda t, s=None: _held_bars([], [100.0]), news_fn=news_fn)
+    assert asked == [("AAA", None)]
+
+    asked.clear()
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 80.0,
+                                    trend_fn=_trend(None), closes_fn=lambda t, s=None: _held_bars([], [100.0]),
+                                    news_fn=news_fn)
+    assert alert.trigger == "trailing_stop" and asked == []           # the stop decided: no fetch
+
+
+def test_the_default_news_are_the_models(conn, monkeypatch):
+    _open(conn, price=100.0, stop=0.10)
+    monkeypatch.setattr(model, "default_news", lambda ticker, source: _RED)
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 100.0,
+                                    trend_fn=_trend(None), closes_fn=lambda t, s=None: _held_bars([], [100.0]))
+    assert alert.trigger == "news"
+
+
+def test_a_coin_red_flag_counts_for_a_coin_only(conn):
+    hack = [{"title": "Bitcoin exchange hack drains funds", "published": "2026-09-22"}]
+    _open(conn, "CRYPTO:BTC", 100.0, stop=0.15)
+    [alert] = _check(conn, price=100.0, bars=_held_bars([], [100.0]), news=hack)
+    assert alert.trigger == "news" and "hack" in alert.detail
+    conn.execute("DELETE FROM positions")
+    _open(conn, "AAA", 100.0, stop=0.10)
+    assert _check(conn, price=100.0, bars=_held_bars([], [100.0]), news=hack) == []
+
+
+# ------------------------------------------------------------------ coin trend
+_SLIDE = [140.0 - 0.32 * i for i in range(130)]         # 140 down to 98.7 over 130 days
+_CLIMB = [100.0 + 0.32 * i for i in range(130)]
+
+
+def test_a_coin_below_its_100_day_average_and_down_over_20_days_closes(conn):
+    _open(conn, "CRYPTO:BTC", 100.0, stop=0.25)
+    bars = _days(TODAY - dt.timedelta(days=130), _SLIDE)
+    [alert] = _check(conn, price=_SLIDE[-1], bars=bars)
+    assert alert.trigger == "trend_down" and alert.detail == "ниже 100-дн. средней, 20 дн. в минусе"
+
+
+def test_a_coin_in_an_uptrend_stays(conn):
+    _open(conn, "CRYPTO:BTC", 100.0, stop=0.25)
+    assert _check(conn, price=_CLIMB[-1], bars=_days(TODAY - dt.timedelta(days=130), _CLIMB)) == []
+
+
+def test_a_coin_with_less_than_121_closes_has_no_trend_to_read(conn):
+    _open(conn, "CRYPTO:BTC", 100.0, stop=0.25)
+    assert _check(conn, price=_SLIDE[-1], bars=_days(TODAY - dt.timedelta(days=100), _SLIDE[:100])) == []
+
+
+def test_a_stocks_downtrend_is_not_an_exit(conn):
+    _open(conn, "AAA", 100.0, stop=0.10)
+    assert _check(conn, price=_SLIDE[-1], bars=_days(TODAY - dt.timedelta(days=130), _SLIDE)) == []
+
+
+# ------------------------------------------------------------------- precedence
+def test_an_insider_sale_comes_before_the_trailing_stop(conn):
+    _strong_journal(conn, "AAA", ["Boss Person"])
+    _open(conn, price=100.0, stop=0.10)
+    add_sec_sale(conn, "AAA", "PERSON BOSS", 500_000, date=(TODAY - dt.timedelta(days=1)).isoformat())
+    [alert] = _check(conn, price=50.0, bars=_held_bars([], [100.0]), news=_RED)
+    assert alert.trigger == "insider_sell"
+
+
+def test_a_confirmed_caution_comes_before_the_stop_and_the_trend(conn):
+    _open(conn, "CRYPTO:BTC", 100.0, stop=0.15)
+    _caution_journal(conn, days_ago=1)
+    [alert] = _check(conn, price=60.0, bars=_days(TODAY - dt.timedelta(days=130), _SLIDE),
+                     trend=_FALLING, news=_RED)
+    assert alert.trigger == "caution"
+
+
+def test_the_stop_comes_before_dead_money_time_and_news(conn):
+    days = model.MAX_HOLD_DAYS + 5
+    _open(conn, price=100.0, days_ago=days, stop=0.10)
+    [alert] = _check(conn, price=85.0, bars=_held_bars([], [100.0], days_ago=days), news=_RED)
+    assert alert.trigger == "trailing_stop"
+
+
+def test_dead_money_comes_before_time_and_news(conn):
+    days = model.MAX_HOLD_DAYS + 5
+    _open(conn, price=100.0, days_ago=days, stop=0.10)
+    [alert] = _check(conn, price=102.0, bars=_held_bars([], [100.0, 102.0], days_ago=days), news=_RED)
+    assert alert.trigger == "dead_money"
+
+
+def test_time_comes_before_news(conn):
+    days = model.MAX_HOLD_DAYS + 5
+    _open(conn, price=100.0, days_ago=days, stop=0.10)
+    [alert] = _check(conn, price=130.0, bars=_held_bars([], [100.0, 130.0], days_ago=days), news=_RED)
+    assert alert.trigger == "time"
+
+
+# ------------------------------------------------------------------ an activist's cut
+def _stake_journal(conn, ticker="AAA", person="Fund LP"):
+    """The journal row of a 13D/G stake the model scored (bot._signal_features' shape)."""
+    db.journal_signal(conn, {"source": "SEC13DG", "kind": "stake", "ticker": ticker, "tier": "buy",
+                             "members": json.dumps([person])})
+
+
+def _day(days_ago: int) -> str:
+    return (TODAY - dt.timedelta(days=days_ago)).isoformat()
+
+
+@pytest.mark.parametrize("before,after,fires", [
+    (9.0, 6.0, True), (9.0, 11.0, False), (9.0, 9.0, False), (9.0, None, False)])
+def test_an_activist_cutting_the_stake_you_bought_on_closes_it(conn, before, after, fires):
+    _stake_journal(conn)
+    pos = _open(conn, price=100.0, days_ago=10, stop=0.10)
+    assert (pos.source, pos.insiders) == ("SEC13DG", ["Fund LP"])
+    add_stake(conn, "AAA", "Fund LP", before, event_date=_day(30))
+    if after is not None:
+        add_stake(conn, "AAA", "Fund LP", after, event_date=_day(3))
+    add_stake(conn, "AAA", "Someone Else", 1.0, event_date=_day(2))           # another holder: ignored
+    alerts = _check(conn, price=100.0, bars=_held_bars([], [100.0], days_ago=10))
+    if not fires:
+        assert alerts == []
+        return
+    [alert] = alerts
+    assert (alert.trigger, alert.detail) == ("activist_cut", "доля 9,0% → 6,0%")
+    import telegram_notify
+    assert "активист сократил долю" in telegram_notify.format_close_alert(alert, html=False)
+
+
+def test_a_stake_cut_counts_only_for_a_position_bought_on_the_stake(conn):
+    _strong_journal(conn, "AAA", ["Fund LP"])                     # an SEC cluster, same name
+    _open(conn, price=100.0, days_ago=10, stop=0.10)
+    add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(30))
+    add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
+    assert _check(conn, price=100.0, bars=_held_bars([], [100.0], days_ago=10)) == []
+
+
+def test_the_stop_comes_before_the_activist_cut_and_the_cut_before_dead_money(conn):
+    days = _days_ago_for_bdays(61)
+    _stake_journal(conn)
+    _open(conn, price=100.0, days_ago=days, stop=0.10)
+    add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(days + 5))
+    add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
+    bars = _held_bars([], [100.0, 102.0], days_ago=days)
+    assert [a.trigger for a in _check(conn, price=85.0, bars=bars)] == ["trailing_stop"]
+    assert [a.trigger for a in _check(conn, price=102.0, bars=bars)] == ["activist_cut"]
+
+
+def test_the_model_and_the_positions_read_the_same_cut(conn):
+    """One rule, model._activist_cut, for a paper position and a /bought one."""
+    add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(30))
+    add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
+    assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(10)) == (9.0, 6.0)
+    assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(2)) is None       # nothing filed since
+    assert model._activist_cut(conn, "AAA", [], _day(10)) is None
+
+
+# ------------------------------------------------------ one set of exit constants, the model's
+def _paper_pos(days_ago, *, value=10_000.0):
+    return {"ticker": "AAA", "source": "SEC", "fill_date": _day(days_ago), "stop_pct": None,
+            "insiders": "[]", "last_value": value, "net_eur": 10_000.0}
+
+
+def test_the_position_exits_and_the_models_share_their_constants(conn, monkeypatch):
+    """Both read model's stop fallback, dead-money and year constants when they run: change
+    one and both move together."""
+    for name in ("FALLBACK_STOP", "DEAD_MONEY_BDAYS", "DEAD_MONEY_MIN_RETURN", "MAX_HOLD_DAYS"):
+        assert not hasattr(positions, name), name
+    flat = [(d, 100.0) for d, _c in _days(TODAY - dt.timedelta(days=40), [100.0] * 40)]
+
+    # the stop fallback: -20% with no stop and no history before the buy
+    _open(conn, "AAA", 100.0, days_ago=5)
+    fall = _held_bars([], [100.0, 80.0], days_ago=5)
+    assert [a.trigger for a in _check(conn, price=80.0, bars=fall)] == ["trailing_stop"]
+    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
+                                   TODAY, []) is not None
+    monkeypatch.setattr(model, "FALLBACK_STOP", {"stock": 0.40, "crypto": 0.50})
+    assert _check(conn, price=80.0, bars=fall) == []
+    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
+                                   TODAY, []) is None
+    positions.close_position(conn, "AAA")
+
+    # dead money and the year, moved to a few days
+    monkeypatch.setattr(model, "DEAD_MONEY_BDAYS", 3)
+    _open(conn, "BBB", 100.0, days_ago=7, stop=0.10)
+    [alert] = _check(conn, price=101.0, bars=_held_bars([], [100.0, 101.0], days_ago=7))
+    assert alert.trigger == "dead_money"
+    assert model.stock_exit_reason(conn, _paper_pos(7, value=10_100.0), flat, TODAY, []) == "стоит на месте"
+    positions.close_position(conn, "BBB")
+    monkeypatch.setattr(model, "DEAD_MONEY_BDAYS", 10_000)
+    monkeypatch.setattr(model, "MAX_HOLD_DAYS", 7)
+    _open(conn, "CCC", 100.0, days_ago=7, stop=0.10)
+    [alert] = _check(conn, price=130.0, bars=_held_bars([], [100.0, 130.0], days_ago=7))
+    assert alert.trigger == "time"
+    assert model.stock_exit_reason(conn, _paper_pos(7, value=13_000.0), flat, TODAY, []) == "год в позиции"
+
+
+def test_an_older_positions_table_gains_the_stop_column(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT NOT NULL, "
+                "source TEXT, opened_at TEXT NOT NULL, entry_price REAL NOT NULL, "
+                "insiders TEXT NOT NULL DEFAULT '[]', signal_id INTEGER, closed_at TEXT, "
+                "close_reason TEXT, close_alerted_at TEXT)")
+    old.execute("INSERT INTO positions (ticker, opened_at, entry_price) VALUES ('OLD', '2026-01-05', 10.0)")
+    old.commit()
+    old.close()
+    migrated = db.connect(str(path))
+    [pos] = positions.open_positions(migrated)
+    assert pos.ticker == "OLD" and pos.stop_pct is None
+    migrated.close()

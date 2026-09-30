@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 
 import requests
 
@@ -21,6 +22,15 @@ import datefmt
 
 API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_LEN = 3500  # stay under Telegram's 4096-char limit with room to spare
+_TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+
+
+def _redact(text: str, token: str | None) -> str:
+    """`text` without the bot token. requests puts the whole URL, token included, into its error
+    messages, and what send_text prints lands in logs and in a headless Claude's transcript."""
+    if token:
+        text = text.replace(token, "<token>")
+    return _TOKEN_IN_URL.sub("bot<token>", text)
 
 
 def _esc(text) -> str:
@@ -78,13 +88,22 @@ def _chunk_lines(text: str, size: int) -> list[str]:
 
 
 def send_text(text: str) -> bool:
+    """Send `text` (in chunks of MAX_LEN); True only when every chunk went through."""
+    accepted, total = send_text_parts(text)
+    return bool(total) and accepted == total
+
+
+def send_text_parts(text: str) -> tuple[int, int]:
+    """send_text, telling how it went: (chunks Telegram accepted, chunks sent). (0, 0) without
+    the credentials. A caller can tell "nothing went out" from "part of it went out"."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("[telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set, skipping notification")
-        return False
-    ok = True
-    for chunk in _chunk(text, MAX_LEN):
+        return 0, 0
+    chunks = _chunk(text, MAX_LEN)
+    accepted = 0
+    for chunk in chunks:
         try:
             resp = requests.post(
                 API_URL.format(token=token),
@@ -97,10 +116,10 @@ def send_text(text: str) -> bool:
                 timeout=15,
             )
             resp.raise_for_status()
+            accepted += 1
         except requests.RequestException as e:
-            print(f"[telegram] send failed: {e}")
-            ok = False
-    return ok
+            print(f"[telegram] send failed: {_redact(str(e), token)}")
+    return accepted, len(chunks)
 
 
 def format_sec_line(p, avg_return_pct: float | None) -> str:
@@ -394,9 +413,6 @@ def format_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этому тикеру: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     return "\n".join(lines)
 
 
@@ -451,9 +467,6 @@ def format_exit_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этому тикеру: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     return "\n".join(lines)
 
 
@@ -482,9 +495,6 @@ def format_stake_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этому тикеру: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     if html:
         lines.append(f'   <a href="{_esc(sig.url)}">источник</a>')
     else:
@@ -528,9 +538,6 @@ def format_crypto_signal(sig, *, html: bool = False) -> str:
     if corr:
         text = f"Другие источники по этой монете: {', '.join(corr)}"
         lines.append(f"   🔗 {_esc(text) if html else text}")
-    note = getattr(sig, "market_note", None)
-    if note:
-        lines.append(f"   {'<i>' + _esc(note) + '</i>' if html else note}")
     if sig.url:
         lines.append(f'   <a href="{_esc(sig.url)}">источник</a>' if html else f"   {sig.url}")
     return "\n".join(lines)
@@ -570,18 +577,9 @@ def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
 
 
 _CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution": "сигнал осторожности",
-                 "time": "срок вышел", "stop_loss": "стоп-лосс"}
-
-
-def _rule_lines(t, html: bool) -> list[str]:
-    lines = []
-    if t.met:
-        text = " · ".join(f"✓ {m}" for m in t.met)
-        lines.append(f"   {_esc(text) if html else text}")
-    if t.missed:
-        text = " · ".join(f"✗ {m}" for m in t.missed)
-        lines.append(f"   {_esc(text) if html else text}")
-    return lines
+                 "trailing_stop": "стоп от максимума", "activist_cut": "активист сократил долю",
+                 "dead_money": "стоит на месте",
+                 "time": "год в позиции", "trend_down": "тренд вниз", "news": "плохие новости"}
 
 
 def format_close_alert(alert, *, html: bool = True) -> str:
@@ -596,46 +594,6 @@ def format_close_alert(alert, *, html: bool = True) -> str:
     return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
 
 
-def format_tiered_digest(selection, closes: list, *, html: bool = True,
-                         include_cautions: bool = False, include_high_risk: bool = False) -> str:
-    """One message: 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть, 🚨 Выходы -- the daily
-    Telegram digest and the menu's "Сигналы" view (html=False) both render this.
-    Only the menu passes include_cautions: caution signals are never pushed.
-    Only the menu passes include_high_risk: small-company signals are not pushed
-    while their books are on trial."""
-    parts = []
-    if not selection.t212_checked:
-        parts.append("⚠️ Trading 212 не проверялся (нет ключа в .env) — показаны все акции.")
-    if selection.strong:
-        parts.append(_b(f"🔥 Сильные ({len(selection.strong)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in selection.strong]
-    if selection.candidates:
-        parts.append(_b(f"👀 Кандидаты ({len(selection.candidates)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in selection.candidates]
-    high_risk = getattr(selection, "high_risk", []) if include_high_risk else []
-    if high_risk:
-        parts.append(_b(f"🎲 Высокий риск ({len(high_risk)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in high_risk]
-    if closes:
-        parts.append(_b(f"🚪 Закрыть ({len(closes)})", html))
-        parts += [format_close_alert(a, html=html) for a in closes]
-    if selection.exits:
-        parts.append(_b(f"🚨 Выходы ({len(selection.exits)})", html))
-        parts += [format_any_signal(s, html=html) for s in selection.exits]
-    cautions = getattr(selection, "cautions", []) if include_cautions else []
-    if cautions:
-        parts.append(_b(f"⚠️ Осторожно ({len(cautions)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in cautions]
-    if not (selection.strong or selection.candidates or high_risk or closes
-            or selection.exits or cautions):
-        parts.append("За последние 3 дня сигналов нет.")
-    return "\n\n".join(parts)
-
-
 def format_positions(positions: list, price_fn) -> str:
     if not positions:
         return "Открытых позиций нет. /bought TICKER [цена] — добавить."
@@ -647,4 +605,131 @@ def format_positions(positions: list, price_fn) -> str:
         days = (today - dt.date.fromisoformat(p.opened_at)).days
         lines.append(f"• {p.ticker}: вход {p.entry_price:,.2f}, сейчас "
                      f"{f'{price:,.2f}' if price else '—'} ({change}), {days} дн.")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ the model portfolio
+_MODEL_START_EUR = 100_000.0     # model.STOCK_START_EUR + model.CRYPTO_START_EUR (not imported: model is heavy)
+_MAX_REASONS = 3
+_MAX_OTHER_STOCKS = 15
+
+
+def money_eur(x: float) -> str:
+    """«€9 800»: a space between thousands, a real minus sign."""
+    n = round(abs(x))
+    return f"{'−' if x < 0 and n else ''}€{n:,}".replace(",", " ")
+
+
+def signed_pct(x: float | None) -> str:
+    """A fraction as «+1,2%» (comma decimal, real minus sign); «—» for None."""
+    if x is None:
+        return "—"
+    v = round(x * 100, 1) or 0.0            # a -0.0 would read «−0,0%»
+    return f"{v:+.1f}%".replace(".", ",").replace("-", "−")
+
+
+def share_pct(x: float) -> str:
+    """A fraction as «9,8%»."""
+    return f"{x * 100:.1f}%".replace(".", ",")
+
+
+def _e(text, html: bool) -> str:
+    return _esc(text) if html else str(text)
+
+
+def format_trade(t, *, html: bool = True, portfolio: float = _MODEL_START_EUR) -> str:
+    """One buy or sale of the model's day (model.Trade); `portfolio` is what a buy's share
+    is measured against."""
+    if t.side == "sell":
+        reason = t.reasons[0] if t.reasons else "продажа"
+        result = f" (результат {signed_pct(t.result)})" if t.result is not None else ""
+        return f"• {_e(t.ticker, html)} — {_e(reason, html)}{result}"
+    head = f"• {_e(t.ticker, html)} — {_e(t.company, html)}"
+    if t.amount_eur is not None:
+        head += f": {money_eur(t.amount_eur)}"
+        if portfolio:
+            head += f" ({share_pct(t.amount_eur / portfolio)} портфеля)"
+    if t.stop_pct is not None:
+        head += f", стоп −{t.stop_pct * 100:.0f}% от максимума"
+    if t.score is not None:
+        head += f", балл {t.score:.0f}"
+    if t.t212 is False:
+        head += " · нет на T212"
+    return "\n".join([head] + [f"   {_e(r, html)}" for r in t.reasons[:_MAX_REASONS]])
+
+
+def format_model_day(report, closes: list, exits: list, *, html: bool = True,
+                     today: dt.date | None = None) -> str | None:
+    """The daily Telegram message: what the model buys and sells, the alerts on the
+    /bought positions, the group exits, and where the portfolio stands. None when there is
+    nothing to say. `report` is model.DayReport (None when the model did not run)."""
+    buys = list(report.buys) if report is not None else []
+    sells = list(report.sells) if report is not None else []
+    if not (buys or sells or closes or exits):
+        return None
+    today = today or dt.date.today()
+    value = report.value if report is not None else None
+    parts = [_b(f"📊 Модельный портфель — {today:%d.%m}", html)]
+    if buys:
+        share_of = value or _MODEL_START_EUR
+        parts.append("\n".join(
+            [_b("🟢 Купить (исполнение по закрытию следующего дня)", html)]
+            + [format_trade(t, html=html, portfolio=share_of) for t in buys]))
+    if sells:
+        parts.append("\n".join([_b("🔴 Продать", html)] + [format_trade(t, html=html) for t in sells]))
+    if closes:
+        parts.append("\n".join([_b("🚪 Ваши позиции", html)]
+                               + [format_close_alert(a, html=html) for a in closes]))
+    if exits:
+        signals = [format_any_signal(s, html=html) for s in exits]
+        signals[0] = f"{_b('🚨 Продают те, кто покупал', html)}\n{signals[0]}"    # header stays with the first
+        parts.append("\n\n".join(signals))
+    if value is not None:
+        line = f"Портфель: {money_eur(value)} ({signed_pct(value / _MODEL_START_EUR - 1)})"
+        if report.bench is not None:
+            line += f", смесь 70/30: {signed_pct(report.bench / _MODEL_START_EUR - 1)}"
+        parts.append(line)
+    return "\n\n".join(parts)
+
+
+_DECISION_ICON = {"buy": "🟢", "watch": "👀", "block": "⛔", "skip": "·"}
+
+
+def _pts(x: float) -> str:
+    return str(round(x)).replace("-", "−")
+
+
+def _score_line(s, html: bool) -> str:
+    icon = _DECISION_ICON.get(s.decision, "·")
+    if s.kind == "crypto":
+        parts = f"тренд {_pts(s.trend)} · потоки {_pts(s.flows)} · новости {_pts(s.news)}"
+        why = s.block
+    else:
+        parts = (f"инсайдеры {_pts(s.insiders)} · поводы {_pts(s.triggers)} · "
+                 f"импульс {_pts(s.momentum)} · новости {_pts(s.news)}")
+        why = s.block or s.untradeable
+    line = f"{icon} {_e(s.ticker, html)} {_pts(s.total)}: {parts}"
+    if why:
+        line += f" — {_e(why, html)}"
+    if getattr(s, "t212", None) is False:
+        line += " · нет на T212"
+    return line
+
+
+def format_scored(scored: list, *, html: bool = False) -> str:
+    """The model's scores, one line each (the menu's «Сигналы»): the buys, the watched and the
+    blocked first, the stocks that scored below the watch line after «Прочие». The bars
+    named are model_score's own."""
+    import model_score      # light (pure functions); imported here like model elsewhere in this file
+    if not scored:
+        return "Свежих сигналов за 14 дней нет."
+    buy, watch = model_score.STOCK_BUY, model_score.STOCK_WATCH
+    others = [s for s in scored if s.kind == "stock" and s.decision == "skip"]
+    main = [s for s in scored if s.kind != "stock" or s.decision != "skip"]
+    lines = [_b(f"СИГНАЛЫ — оценка модели (покупка от {buy:.0f}, наблюдение {watch:.0f}–{buy - 1:.0f})",
+                html)]
+    lines += [_score_line(s, html) for s in main]
+    if others:
+        lines.append(f"Прочие (балл ниже {watch:.0f}):")
+        lines += [_score_line(s, html) for s in others[:_MAX_OTHER_STOCKS]]
     return "\n".join(lines)

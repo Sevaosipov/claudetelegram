@@ -1,341 +1,42 @@
-"""strategy.py: which signals are Сильный, which Кандидат, which don't make it.
-Offline: enrich_signals is replaced by `sized`, price trends by a stub."""
+"""strategy.py: the finder list (buy_side_signals, exit_signals) and the predicate that says
+a finder's signal is a caution. What to do with a signal is model_score.py's and
+model.py's business, tested there. Offline: the finders are replaced by recorders."""
 from __future__ import annotations
 
-import datetime as dt
-import types
-
-import pytest
+import inspect
 
 import cluster
-import crypto
 import strategy
-from conftest import add_house_txn, add_sec_purchase, add_stake
 
-TODAY = dt.date.today()
-RECENT = (TODAY - dt.timedelta(days=1)).isoformat()
-BIG, LIQUID = 5e9, 50e6
 
+# ------------------------------------------------------------ kinds of signal
+def _coin(bullish):
+    return cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "IBIT", bullish, None, 5e8,
+                                "2026-09-29", "2026-09-29", [], None, ["k"])
 
-class _T212:
-    def __init__(self, missing=()):
-        self.missing = set(missing)
 
-    def can_buy(self, ticker, source):
-        return ticker not in self.missing
+def _exit():
+    return cluster.ExitSignal(source="SEC", ticker="AAA", company="C", total_buyers=2,
+                              seller_count=2, lines=[], seller_names=["A", "B"])
 
 
-@pytest.fixture
-def sized(monkeypatch):
-    """Stand-in for enrich_signals: every stock gets the size set here, every signal
-    a score equal to its position (so ordering is deterministic)."""
-    state = {"cap": BIG, "adv": LIQUID}
+def test_a_bullish_coin_signal_and_a_cluster_are_never_caution():
+    cluster_sig = cluster.ClusterSignal(source="SEC", ticker="AAA", company="C", buyer_count=2,
+                                        total_value=1e6, members=[], window_start="", window_end="")
+    for sig in (_coin(True), cluster_sig):
+        assert not strategy.is_caution(sig)
 
-    def fake(conn, signals):
-        for i, s in enumerate(signals):
-            if not getattr(s, "crypto_kind", None):
-                s.market_cap_eur, s.avg_daily_value = state["cap"], state["adv"]
-            s.score = 100.0 - i
-        return signals
-    monkeypatch.setattr(cluster, "enrich_signals", fake)
-    return state
 
+def test_a_bearish_coin_signal_is_a_caution():
+    assert strategy.is_caution(_coin(False))
 
-def _buy(conn, ticker, owner, usd=116_000, **kw):
-    add_sec_purchase(conn, ticker, owner, usd, RECENT, filed_date=RECENT, **kw)
 
+def test_an_exit_signal_is_not_a_caution():
+    assert not strategy.is_caution(_exit())
 
-def _select(conn, t212=None):
-    return strategy.select(conn, cluster.find_sec_clusters(conn) + cluster.find_house_clusters(conn)
-                           + cluster.find_stake_signals(conn), t212 or _T212())
 
-
-def _tiers(sel):
-    return ({t.signal.ticker for t in sel.strong}, {t.signal.ticker for t in sel.candidates})
-
-
-# ---------------------------------------------------------------- stock rules
-def test_rule_a_three_insiders_is_strong(conn, sized):
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    strong, _ = _tiers(_select(conn))
-    assert strong == {"AAA"}
-
-
-def test_rule_b_two_insiders_with_a_250k_ceo_is_strong(conn, sized):
-    # $350,000 -> ~€301,700 at the offline fallback FX rate, above TOP_EXEC_MIN_EUR.
-    _buy(conn, "AAA", "Boss", usd=350_000, officer=1, director=0, title="Chief Executive Officer")
-    _buy(conn, "AAA", "Board")
-    [t] = _select(conn).strong
-    assert any("CEO" in m for m in t.met)
-
-
-def test_rule_b_ceo_below_top_exec_min_is_only_a_candidate(conn, sized):
-    """Two insiders including a CEO used to be enough for rule (b) regardless of
-    how much the CEO actually bought -- the user asked for a real conviction
-    purchase (>= TOP_EXEC_MIN_EUR), not just the CEO's presence in the cluster.
-    The ✗ line must say so specifically -- not the generic "no CEO/CFO/Chair in
-    the cluster" line, which would be false here: the CEO IS in the cluster,
-    just under the euro bar."""
-    _buy(conn, "AAA", "Boss", officer=1, director=0, title="Chief Executive Officer")  # ~€100k
-    _buy(conn, "AAA", "Board")
-    sel = _select(conn)
-    assert _tiers(sel) == (set(), {"AAA"})
-    assert sel.candidates[0].missed == ["CEO купил только на €100.0 тыс (< €250.0 тыс)"]
-
-
-def test_two_directors_without_a_top_exec_is_a_candidate(conn, sized):
-    _buy(conn, "AAA", "Board One")
-    _buy(conn, "AAA", "Board Two")
-    sel = _select(conn)
-    assert _tiers(sel) == (set(), {"AAA"})
-    assert sel.candidates[0].missed == [
-        "нет 3+ инсайдеров, CEO/CFO/Chair с покупкой от €250 тыс или крупной покупки CEO/CFO"]
-
-
-def test_rule_c_ceo_conviction_buy_is_strong(conn, sized):
-    _buy(conn, "AAA", "Boss", usd=700_000, officer=1, director=0,
-         title="Chief Executive Officer", shares=100, shares_owned_after=500)
-    assert _tiers(_select(conn))[0] == {"AAA"}
-
-
-def test_small_ceo_buy_is_only_a_candidate(conn, sized):
-    """The lone CEO here clears TOP_EXEC_MIN_EUR (~€603.4k), so the ✗ line must
-    NOT claim they "only bought" too little -- that would be false. They fail
-    on insider COUNT (rule b) and on the increase_pct bar (rule c), not on
-    money, so the ✗ line has to name the actual gap, not the money one."""
-    _buy(conn, "AAA", "Boss", usd=700_000, officer=1, director=0,
-         title="Chief Executive Officer", shares=100, shares_owned_after=100_000)   # +0.1%
-    sel = _select(conn)
-    assert _tiers(sel) == (set(), {"AAA"})
-    assert sel.candidates[0].missed == [
-        "один покупатель из руководства: нужно 2+ (с CEO/CFO/Chair от €250 тыс) "
-        "или рост позиции CEO/CFO от 10%"]
-
-
-def test_lone_chair_with_a_large_buy_is_only_a_candidate(conn, sized):
-    """A lone Chair buying a large amount clears TOP_EXEC_MIN_EUR too, but is
-    never eligible for rule (c) at all (CEO/CFO only) and fails rule (b) on
-    insider count alone -- same generic "not enough people/not the right rule"
-    line as the lone-CEO case above, not the "bought only €X" one."""
-    _buy(conn, "AAA", "Boss", usd=700_000, officer=0, director=1, title="Chairman")
-    sel = _select(conn)
-    assert _tiers(sel) == (set(), {"AAA"})
-    assert sel.candidates[0].missed == [
-        "один покупатель из руководства: нужно 2+ (с CEO/CFO/Chair от €250 тыс) "
-        "или рост позиции CEO/CFO от 10%"]
-
-
-def test_holders_only_is_a_candidate(conn, sized):
-    for o in ("Fund A", "Fund B", "Fund C"):
-        _buy(conn, "AAA", o, usd=700_000, director=0, ten_pct=1)
-    assert _tiers(_select(conn)) == (set(), {"AAA"})
-
-
-def test_congress_is_candidate_only(conn, sized):
-    date = (TODAY - dt.timedelta(days=20)).strftime("%m/%d/%Y")
-    for m in ("One", "Two", "Three"):
-        add_house_txn(conn, "AAA", m, "$250,001 - $500,000", date=date)
-    assert _tiers(_select(conn)) == (set(), {"AAA"})
-
-
-def test_activist_stake_is_candidate_only(conn, sized):
-    add_stake(conn, "AAA", "Activist", 12.0)
-    assert _tiers(_select(conn)) == (set(), {"AAA"})
-
-
-# ---------------------------------------------------------------------- floors
-def test_below_the_size_floor_is_dropped(conn, sized):
-    sized["cap"] = 100e6
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    assert _tiers(_select(conn)) == (set(), set())
-
-
-def test_illiquid_is_dropped(conn, sized):
-    sized["adv"] = 200_000
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    assert _tiers(_select(conn)) == (set(), set())
-
-
-def test_unknown_size_caps_at_candidate(conn, sized):
-    sized["cap"] = None
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    [t] = _select(conn).candidates
-    assert "размер неизвестен" in t.missed
-
-
-def test_old_disclosure_is_dropped(conn, sized):
-    old = (TODAY - dt.timedelta(days=6)).isoformat()
-    for o in ("A", "B", "C"):
-        add_sec_purchase(conn, "AAA", o, 116_000, old, filed_date=old)
-    assert _tiers(_select(conn)) == (set(), set())
-
-
-def test_not_on_trading_212_is_dropped(conn, sized):
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    assert _tiers(_select(conn, _T212(missing={"AAA"}))) == (set(), set())
-
-
-def test_without_trading_212_nothing_is_filtered_and_it_says_so(conn, sized):
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    sel = strategy.select(conn, cluster.find_sec_clusters(conn), None)
-    assert not sel.t212_checked and _tiers(sel)[0] == {"AAA"}
-
-
-def test_candidates_are_capped(conn, sized):
-    for i in range(15):
-        _buy(conn, f"T{i:02d}", "Board One")
-        _buy(conn, f"T{i:02d}", "Board Two")
-    assert len(_select(conn).candidates) == strategy.MAX_CANDIDATES
-
-
-def _scored_enrich(monkeypatch, score):
-    """Like `sized`, but every signal gets the same fixed score instead of one
-    derived from list position -- for testing the CANDIDATE_MIN_SCORE cutoff
-    itself rather than the ordering `sized` is built for."""
-    def fake(conn, signals):
-        for s in signals:
-            if not getattr(s, "crypto_kind", None):
-                s.market_cap_eur, s.avg_daily_value = BIG, LIQUID
-            s.score = score
-        return signals
-    monkeypatch.setattr(cluster, "enrich_signals", fake)
-
-
-def test_stock_candidate_below_min_score_is_dropped(conn, monkeypatch):
-    _scored_enrich(monkeypatch, strategy.CANDIDATE_MIN_SCORE - 1)
-    _buy(conn, "AAA", "Board One")
-    _buy(conn, "AAA", "Board Two")
-    assert _tiers(_select(conn)) == (set(), set())
-
-
-def test_stock_candidate_at_min_score_is_kept(conn, monkeypatch):
-    _scored_enrich(monkeypatch, strategy.CANDIDATE_MIN_SCORE)
-    _buy(conn, "AAA", "Board One")
-    _buy(conn, "AAA", "Board Two")
-    assert _tiers(_select(conn)) == (set(), {"AAA"})
-
-
-def test_min_score_does_not_apply_to_strong_signals(conn, monkeypatch):
-    _scored_enrich(monkeypatch, 0.0)
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    assert _tiers(_select(conn)) == ({"AAA"}, set())
-
-
-def test_crypto_candidate_is_exempt_from_min_score(conn, monkeypatch):
-    _scored_enrich(monkeypatch, 0.0)
-    _trend(monkeypatch, None)   # "цена не проверена" -> candidate
-    [t] = strategy.select(conn, [_etf()], _T212()).candidates
-    assert t.signal.ticker == "CRYPTO:BTC"
-
-
-def test_selected_signals_carry_their_tier(conn, sized):
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    [t] = _select(conn).strong
-    assert t.signal.tier == strategy.STRONG
-
-
-# ---------------------------------------------------------------------- crypto
-def _etf(value_eur=5e8, bullish=True):
-    return cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF: IBIT", bullish,
-                                None, value_eur, RECENT, RECENT, [], None, ["k"])
-
-
-def _trend(monkeypatch, trend):
-    monkeypatch.setattr(crypto, "price_trend", lambda conn, sym: trend)
-
-
-def test_crypto_inflow_with_confirming_price_is_strong(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
-    assert len(strategy.select(conn, [_etf()], _T212()).strong) == 1
-
-
-def test_crypto_inflow_without_confirmation_is_a_candidate(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": -2.0, "above_ma20": False})
-    [t] = strategy.select(conn, [_etf()], _T212()).candidates
-    assert any("не подтверждает" in m for m in t.missed)
-
-
-def test_crypto_without_a_price_check_is_a_candidate(conn, sized, monkeypatch):
-    _trend(monkeypatch, None)
-    [t] = strategy.select(conn, [_etf()], _T212()).candidates
-    assert "цена не проверена" in t.missed
-
-
-def test_crypto_outflow_is_a_caution_not_a_buy(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": -3.0, "above_ma20": False})
-    sel = strategy.select(conn, [_etf(bullish=False)], _T212())
-    assert not sel.strong and not sel.candidates
-    [t] = sel.cautions
-    assert t.tier == strategy.CAUTION and t.signal.tier == strategy.CAUTION
-    assert any("цена подтверждает" in m for m in t.met)
-
-
-def test_exchange_inflow_is_a_caution(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": -3.0, "above_ma20": False})
-    inflow = cluster.CryptoSignal("CRYPTO_ONCHAIN", "exchange_flow", "CRYPTO:BTC", "кошельки бирж",
-                                  False, 3000, 2e8, RECENT, RECENT, [], None, ["k"])
-    sel = strategy.select(conn, [inflow], _T212())
-    assert not sel.strong and not sel.candidates
-    [t] = sel.cautions
-    assert t.signal is inflow and t.tier == strategy.CAUTION
-
-
-def test_caution_the_price_does_not_confirm_says_so(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": 2.0, "above_ma20": True})
-    [t] = strategy.select(conn, [_etf(bullish=False)], _T212()).cautions
-    assert not t.met and any("цена не подтверждает" in m for m in t.missed)
-
-
-def test_caution_without_a_price_says_so(conn, sized, monkeypatch):
-    _trend(monkeypatch, None)
-    [t] = strategy.select(conn, [_etf(bullish=False)], _T212()).cautions
-    assert t.missed == ["цена не проверена"]
-
-
-def test_old_caution_is_not_listed(conn, sized, monkeypatch):
-    _trend(monkeypatch, None)
-    old = cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "x", False, None, 5e8,
-                               "2026-01-01", "2026-01-01", [], None, ["k"])
-    assert strategy.select(conn, [old], _T212()).cautions == []
-
-
-def test_inflows_are_not_cautions(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
-    assert strategy.select(conn, [_etf()], _T212()).cautions == []
-
-
-def test_small_treasury_buy_is_not_listed(conn, sized, monkeypatch):
-    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
-    small = cluster.CryptoSignal("CRYPTO_TREASURY", "treasury", "CRYPTO:BTC", "Acme", True,
-                                 100, 8e6, RECENT, RECENT, [], None, ["k"])
-    sel = strategy.select(conn, [small], _T212())
-    assert not sel.strong and not sel.candidates
-
-
-def test_exit_signals_are_kept_separately_not_tiered(conn, sized):
-    exit_sig = cluster.ExitSignal(source="SEC", ticker="AAA", company="C", total_buyers=2,
-                                  seller_count=2, lines=[], seller_names=["A", "B"])
-    sel = strategy.select(conn, [exit_sig], _T212())
-    assert not sel.strong and not sel.candidates
-    assert sel.exits == [exit_sig]
-
-
-def test_exit_signals_bypass_recency_t212_and_size_filters(conn, sized):
-    """Unlike buy-side signals, exits carry no window_start/end recency, aren't
-    checked against Trading 212, and get no size floor -- they're already
-    deduplicated by the exit finders' own alert state (should_alert_exit)."""
-    old_exit = cluster.ExitSignal(source="SEC", ticker="ZZZZ", company="C", total_buyers=2,
-                                  seller_count=2, lines=[], seller_names=["A", "B"])
-    sel = strategy.select(conn, [old_exit], _T212(missing={"ZZZZ"}))
-    assert sel.exits == [old_exit]
+def test_the_journal_tier_for_a_caution_is_the_word_caution():
+    assert strategy.CAUTION == "caution"     # positions._crypto_caution reads this from the journal
 
 
 # --------------------------------------------------------------- exit_signals
@@ -381,8 +82,8 @@ def test_exit_signals_forwards_ignore_alert_state_to_every_finder(conn, monkeypa
 
 # --------------------------------------------------------- buy_side_signals
 #
-# The one shared finder list bot.run_cluster_pass, menu._find_signals and
-# calibrate_strategy._signals all call, so they can't drift out of sync again.
+# The one shared finder list bot.collect_new_signals and model.candidate_signals
+# both call, so they can't drift out of sync again.
 # Wiring is checked by recording which finder each source maps to and what it was
 # called with, rather than seeding real rows for nine different tables.
 
@@ -475,217 +176,20 @@ def test_buy_side_signals_forwards_ignore_alert_state_to_every_finder(conn, monk
     assert all(kw["ignore_alert_state"] is True for _, kw in calls)
 
 
-# ---------------------------------------------------------------- high risk
-def _hr(sel):
-    return {t.signal.ticker for t in sel.high_risk}
-
-
-def _select_all(conn, t212=None):
-    """Both finder passes, as the bot runs them."""
-    return strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}),
-                           t212 or _T212())
-
-
-def _small(sized, cap=100e6, adv=500_000):
-    sized["cap"], sized["adv"] = cap, adv
-
-
-def test_two_directors_buying_0_12_percent_of_a_small_company_is_high_risk(conn, sized):
-    _small(sized)
-    for o in ("A", "B"):
-        _buy(conn, "AAA", o, usd=69_600)            # €60k each: €120k = 0.12% of €100M
-    sel = _select_all(conn)
-    assert _hr(sel) == {"AAA"} and _tiers(sel) == (set(), set())
-    [t] = sel.high_risk
-    assert t.tier == strategy.HIGH_RISK and t.signal.tier == strategy.HIGH_RISK
-    assert "2 инсайдера(ов) купили вместе 0,12% компании" in t.met
-
-
-def test_below_0_1_percent_is_not_high_risk(conn, sized):
-    _small(sized)
-    for o in ("A", "B"):
-        _buy(conn, "AAA", o, usd=52_200)            # €45k each: €90k = 0.09%
-    assert _hr(_select_all(conn)) == set()
-
-
-def test_a_ceo_buying_alone_is_found_by_the_lower_threshold_pass(conn, sized):
-    _small(sized, cap=80e6)
-    _buy(conn, "BBB", "Pat Chief", usd=139_200, officer=1, director=0,
-         title="Chief Executive Officer")           # €120k = 0.15% of €80M, below the €500k solo bar
-    sel = _select_all(conn)
-    [t] = sel.high_risk
-    assert t.signal.ticker == "BBB" and "CEO купил 0,15% компании" in t.met
-
-
-def test_a_cfo_buying_alone_qualifies(conn, sized):
-    _small(sized)
-    _buy(conn, "BBB", "Pat Money", usd=139_200, officer=1, director=0,
-         title="Chief Financial Officer")            # €120k = 0.12% of €100M
-    sel = _select_all(conn)
-    [t] = sel.high_risk
-    assert t.signal.ticker == "BBB" and "CFO купил 0,12% компании" in t.met
-
-
-def test_a_lone_director_is_not_high_risk(conn, sized):
-    _small(sized, cap=80e6)
-    _buy(conn, "BBB", "Dee Rector", usd=139_200)
-    assert _hr(_select_all(conn)) == set()
-
-
-@pytest.mark.parametrize("cap,adv,expected", [
-    (49e6, 2e6, None), (50e6, 2e6, "high_risk"), (299e6, 2e6, "high_risk"),
-    (300e6, 2e6, "strong"), (100e6, 99_000, None),
-])
-def test_the_small_company_band(conn, sized, cap, adv, expected):
-    _small(sized, cap=cap, adv=adv)
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o, usd=348_000)           # €300k each, three directors
-    sel = _select_all(conn)
-    got = "high_risk" if _hr(sel) else "strong" if sel.strong else None
-    assert got == expected
-
-
-def test_an_unknown_size_is_not_high_risk(conn, sized):
-    sized["cap"] = None
-    for o in ("A", "B", "C"):
-        _buy(conn, "AAA", o)
-    assert _hr(_select_all(conn)) == set()
-
-
-def test_politicians_are_not_high_risk(conn, sized):
-    _small(sized)
-    for member in ("Member One", "Member Two"):
-        add_house_txn(conn, "AAA", member, "$250,001 - $500,000",
-                      date=(TODAY - dt.timedelta(days=3)).strftime("%m/%d/%Y"))
-    assert _hr(_select(conn)) == set()
-
-
-def test_a_coin_is_never_high_risk(conn, sized, monkeypatch):
-    """High-risk is a small-cap stock rule -- neither a congressional crypto buy
-    (a ClusterSignal with a CRYPTO: ticker) nor a CryptoSignal (ETF inflow,
-    treasury buy, on-chain flow) may ever land in .high_risk."""
-    _small(sized)
-    date = (TODAY - dt.timedelta(days=1)).strftime("%m/%d/%Y")
-    for m in ("One", "Two"):
-        add_house_txn(conn, "CRYPTO:BTC", m, "$250,001 - $500,000", date=date)
-    assert _hr(_select(conn)) == set()
-
-    _trend(monkeypatch, {"ret_7d": 4.0, "above_ma20": True})
-    assert strategy.select(conn, [_etf()], _T212()).high_risk == []
-
-
-def test_an_oslo_cluster_buying_0_1_percent_qualifies_under_rule_one(conn, sized):
-    """Oslo filings carry no insider rank -- find_norway_clusters tags every buyer
-    role "insider" (cluster.roles.Buyer), so rule (2) (a CEO/CFO/Chair among the
-    buyers) can never fire for a Norway cluster; only rule (1) (2+ insiders buying
-    a combined HIGH_RISK_MIN_PCT_OF_MCAP) can qualify it."""
-    _small(sized)
-    for i, person in enumerate(("A Person", "B Person")):
-        conn.execute(
-            "INSERT INTO norway_purchases (message_id, person, issuer_name, ticker, txn_type, "
-            "txn_date, shares, price, currency, value, source_url) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (900 + i, person, "Test ASA", "AAA", "P", RECENT, 1000, 100.0, "NOK", 644_400, "u"))
-    conn.commit()
-    [sig] = cluster.find_norway_clusters(conn)
-    assert [b.role for b in sig.buyers] == ["insider", "insider"]
-    sel = strategy.select(conn, [sig], _T212())
-    assert _hr(sel) == {"AAA"}
-    [t] = sel.high_risk
-    assert "2 инсайдера(ов) купили вместе 0,12% компании" in t.met
-
-
-def test_trading212_drops_a_qualifying_high_risk_signal(conn, sized):
-    _small(sized)
-    for o in ("A", "B"):
-        _buy(conn, "AAA", o, usd=69_600)            # €60k each: €120k = 0.12% of €100M
-    assert _hr(_select_all(conn, _T212(missing={"AAA"}))) == set()
-
-
-def test_high_risk_recency_is_measured_from_the_filing_not_the_trade(conn, sized):
-    """Traded about 8 days ago -- inside find_sec_clusters' 14-day window, so the
-    cluster is found at all -- but filed 5 days ago, outside the 3-day recency
-    select() applies. (The version of this test that traded 20 days ago put the
-    trade outside the cluster finder's own window, so no signal was ever produced
-    for it and the recency filter was never actually exercised.)"""
-    _small(sized)
-    traded = (TODAY - dt.timedelta(days=8)).isoformat()
-    filed = (TODAY - dt.timedelta(days=5)).isoformat()
-    for o in ("A", "B"):
-        add_sec_purchase(conn, "AAA", o, 69_600, traded, filed_date=filed)
-    assert _hr(_select_all(conn)) == set()
-
-
-def test_the_lower_threshold_pass_uses_its_own_bars(conn, monkeypatch):
+def test_buy_side_signals_runs_each_finder_once_with_no_second_pass(conn, monkeypatch):
     calls = _recording_finders(monkeypatch)
-    strategy.buy_side_signals(conn, sources={"sec": True, "norway": True}, ignore_alert_state=True)
-    sec = [kw for name, kw in calls if name == "find_sec_clusters"]
-    nor = [kw for name, kw in calls if name == "find_norway_clusters"]
-    assert len(sec) == 2 and len(nor) == 2
-    for kw in (sec[1], nor[1]):
-        assert kw["min_value"] == kw["solo_threshold"] == strategy.HIGH_RISK_FINDER_MIN_EUR
-        assert kw["ignore_alert_state"] is True
+    strategy.buy_side_signals(conn, onchain=True, ignore_alert_state=True)
+    names = [name for name, _ in calls]
+    assert sorted(names) == sorted(_FINDER_NAMES)
+    assert set(inspect.signature(strategy.buy_side_signals).parameters) == {
+        "conn", "ignore_alert_state", "sources", "onchain", "sec_kwargs", "sweden_kwargs",
+        "stake_kwargs", "cluster_kwargs"}
 
 
-def test_the_lower_threshold_pass_can_be_turned_off(conn, monkeypatch):
+def test_buy_side_signals_hands_the_finders_their_own_thresholds_untouched(conn, monkeypatch):
     calls = _recording_finders(monkeypatch)
-    strategy.buy_side_signals(conn, sources={"sec": True}, high_risk=False)
-    assert [name for name, _ in calls].count("find_sec_clusters") == 1
-
-
-def test_a_cluster_both_passes_find_is_kept_once_and_untagged(conn, monkeypatch):
-    def sec(conn, **kw):
-        if kw.get("solo_threshold") == strategy.HIGH_RISK_FINDER_MIN_EUR:
-            return [types.SimpleNamespace(source="SEC", ticker="AAA"),
-                    types.SimpleNamespace(source="SEC", ticker="BBB")]
-        return [types.SimpleNamespace(source="SEC", ticker="AAA")]
-    monkeypatch.setattr(cluster, "find_sec_clusters", sec)
-    monkeypatch.setattr(cluster, "find_stake_signals", lambda conn, **kw: [])
-    sigs = strategy.buy_side_signals(conn, sources={"sec": True})
-    assert [s.ticker for s in sigs] == ["AAA", "BBB"]
-    assert not getattr(sigs[0], "high_risk_only", False) and sigs[1].high_risk_only is True
-
-
-def test_a_lower_pass_signal_never_gets_a_main_tier(conn, sized):
-    sized["cap"], sized["adv"] = BIG, LIQUID
-    _buy(conn, "BIG", "Pat Chief", usd=139_200, officer=1, director=0,
-         title="Chief Executive Officer")           # €120k solo: only the lower pass finds it
-    sel = _select_all(conn)
-    assert _tiers(sel) == (set(), set()) and _hr(sel) == set()
-
-
-def test_a_high_risk_only_signal_does_not_corroborate_a_main_signal(conn, monkeypatch):
-    """enrich_signals runs find_corroboration across whatever batch it's handed --
-    if select() enriched the lower-threshold pass's sub-threshold clusters in the
-    same batch as the main signals, an unrelated main-pass HOUSE cluster on the
-    same ticker would wrongly get corroborated_by=["SEC"] from a cluster that
-    exists only to feed the high-risk rule. Uses the real cluster.enrich_signals
-    (not the `sized` stub) so find_corroboration actually runs; only the
-    network-reaching marketcap lookups are stubbed."""
-    import marketcap
-    monkeypatch.setattr(marketcap, "market_cap_eur", lambda conn, ticker, source=None: 5e9)
-    monkeypatch.setattr(marketcap, "facts", lambda conn, ticker, source=None:
-                        {"avg_daily_value": 5e7, "currency": "USD"})
-
-    date = (TODAY - dt.timedelta(days=1)).strftime("%m/%d/%Y")
-    for member in ("Member One", "Member Two"):
-        add_house_txn(conn, "XYZ", member, "$250,001 - $500,000", date=date)
-    [house_sig] = cluster.find_house_clusters(conn)
-
-    _buy(conn, "XYZ", "Solo Insider", usd=69_600)    # €60k: only clears the lower bar
-    [sec_sig] = cluster.find_sec_clusters(conn, min_value=50_000, solo_threshold=50_000)
-    sec_sig.high_risk_only = True
-
-    strategy.select(conn, [house_sig, sec_sig], _T212())
-    assert "SEC" not in house_sig.corroborated_by
-
-
-def test_high_risk_signals_are_journaled_once_and_not_again(conn, sized):
-    import bot
-    _small(sized, cap=80e6)
-    _buy(conn, "BBB", "Pat Chief", usd=139_200, officer=1, director=0,
-         title="Chief Executive Officer")
-    sel = strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}), None)
-    bot._record_high_risk(conn, sel)
-    assert conn.execute("SELECT ticker, tier FROM signal_journal").fetchall() == [("BBB", "high_risk")]
-    again = strategy.select(conn, strategy.buy_side_signals(conn, sources={"sec": True}), None)
-    assert again.high_risk == []
+    strategy.buy_side_signals(conn, sources={"sec": True, "norway": True},
+                              cluster_kwargs={"min_value": 50_000, "solo_threshold": 250_000})
+    for name, kw in calls:
+        if name in ("find_sec_clusters", "find_norway_clusters"):
+            assert kw["min_value"] == 50_000 and kw["solo_threshold"] == 250_000

@@ -1,18 +1,30 @@
-"""Long-polls Telegram for inbound messages and replies with ONE merged
-verdict per ticker: opinion.py's deterministic score, the real entry/target
-prices, and a genuine qualitative news read, all in a single message.
+"""Long-polls Telegram for inbound messages and answers them.
+
+A single ticker or coin (NVDA, BTC, EQNR.OL) gets ONE merged verdict: opinion.py's
+deterministic score, the real entry/target prices, and a genuine qualitative news and chart
+read, all in a single message.
 
 Used to reply immediately with just the deterministic part and let a
 scheduled pass send a qualitative follow-up later -- the user asked for one
 merged message instead, explicitly accepting the tradeoff (~30-90s wait
 instead of an instant reply). So a ticker lookup now enqueues
 (db.enqueue_analysis) and synchronously runs run_claude_analysis.sh right
-away rather than waiting for its next scheduled fire -- that script is the
-one thing that actually reads news and reasons (see its own header for why:
-no live-Claude hook exists inside this process). If that run fails or times
-out, falls back to sending the fast opinion.py-only reply so the user isn't
-left with total silence, and the queued row stays pending for the next
-scheduled or triggered run to retry.
+away rather than waiting for its next scheduled fire -- that script (analyst.py process-queue)
+is the one thing that actually reads news and the chart and reasons (see its own header for why:
+no live-Claude hook exists inside this process); analyst.py sends the answer itself. If that
+row is still unanswered when the run ends (it failed, timed out, or never reached the row),
+falls back to sending the fast opinion.py-only reply so the user isn't left with total
+silence, and the queued row stays pending for the next scheduled or triggered run to retry.
+
+Any other text -- several words, or one word that is not an asset -- and /ask TEXT is a
+question for the analyst: it is queued (db.enqueue_question, at most 2000 characters), the same
+run answers it, and the analyst sends the answer itself. If it is still unanswered after the
+run, the user is told the question stays queued. /portfolio sends the model portfolio's summary
+(paper_report.format_summary) at once, without Claude. A ticker lookup and a question share one
+runner, _run_analysis: a process group of its own, RUN_ANALYSIS_TIMEOUT seconds, SIGTERM first
+(analyst.py stops its Claude on it) and SIGKILL after a grace period; it succeeds when the row
+it was run for is marked processed, whatever the run's exit code (the pass also covers other
+rows). Only new messages are handled: an edited message is not a second request.
 
 /backtest TICKER answers a different question: how did this ticker trade
 after its OWN past SEC insider purchases (backtest.backtest_ticker(), a
@@ -46,9 +58,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -60,6 +74,7 @@ import assets
 import backtest
 import crypto
 import db
+import paper_report
 import positions
 import research
 import sources
@@ -68,7 +83,13 @@ import telegram_notify
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "disclosures.db"
 RUN_ANALYSIS_SCRIPT = BASE_DIR / "run_claude_analysis.sh"
-RUN_ANALYSIS_TIMEOUT = 300  # generous cap; a normal run takes well under this
+RUN_ANALYSIS_TIMEOUT = 420   # a chart read per asset takes minutes; a question can take 1-5
+RUN_ANALYSIS_KILL_GRACE = 15  # seconds between SIGTERM and SIGKILL to a timed-out run's group
+RUN_ANALYSIS_REAP_WAIT = 5    # seconds to wait for the pipes to close after the SIGKILL
+QUESTION_MAX_CHARS = 2000
+ASK_USAGE = "/ask ваш вопрос"
+THINKING = "Думаю над вопросом… (1–5 мин)"
+QUESTION_LATER = "Не успел ответить — вопрос в очереди, ответ придёт позже."
 
 API_URL = "https://api.telegram.org/bot{token}/{method}"
 LONG_POLL_SECONDS = 25
@@ -87,6 +108,9 @@ LOOKUP_HINT = ("Любой тикер или монета: NVDA, BTC, SOL, EQNR.
 
 HELP_TEXT = ("Пришлите тикер (например, AAPL) — через ~30-90 сек придёт один "
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
+             "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
+             "TradingView и данными бота.\n"
+             "/portfolio — модельный портфель.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
              "что-то значить на уровне одного тикера).\n"
@@ -179,7 +203,7 @@ def _handle_positions_command(conn, text: str) -> bool:
             return True
         if not market_price:
             note = (" (стоп-лосс не отслеживается для этого тикера — только "
-                    "инсайдерские продажи и 90-дн. срок)")
+                    "инсайдерские продажи, новости и срок в год)")
         price = user_price
     else:
         price = market_price
@@ -193,8 +217,12 @@ def _handle_positions_command(conn, text: str) -> bool:
         return True
     insiders = ", ".join(telegram_notify._esc(n) for n in pos.insiders)
     who = (f"слежу за продажами: {insiders}" if pos.insiders
-           else "сильного сигнала по нему не было — слежу только за сроком и стоп-лоссом")
-    telegram_notify.send_text(f"Записал {ticker} по {price:,.2f}; {who}{note}.")
+           else "сильного сигнала по нему не было — слежу за сроком и новостями")
+    # With no market price the stop can't be watched (the note says so): don't state one.
+    stop = "" if note else (f"стоп −{pos.stop_pct * 100:.0f}% от максимума; " if pos.stop_pct is not None
+                            else "стоп — по умолчанию; ")
+    shown = f"{price:,.2f}".replace(",", " ").replace(".", ",")
+    telegram_notify.send_text(f"Записал {ticker} по {shown}; {stop}{who}{note}.")
     return True
 
 
@@ -215,22 +243,90 @@ def _handle_backtest(conn, text: str) -> None:
                                    f"({type(e).__name__}). Попробуйте позже.")
 
 
-def _handle_message(conn, text: str) -> None:
-    text = (text or "").strip()
-    if _handle_positions_command(conn, text):
-        return
-    if text.lower().startswith("/backtest"):
-        _handle_backtest(conn, text)
-        return
-    if not text or text.startswith("/"):
-        telegram_notify.send_text(HELP_TEXT)
-        return
-    asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn),
-                           stocks=sources.stock_universe_symbols)
-    if asset is None:
-        telegram_notify.send_text(f"Не похоже на тикер: {telegram_notify._esc(text[:40])}. "
-                                  + LOOKUP_HINT)
-        return
+def _stop_group(proc: subprocess.Popen) -> None:
+    """A run that outlived its timeout: SIGTERM to its process group (analyst.py stops its own
+    Claude on it, which lives in a session of its own), SIGKILL to the group when it is still
+    there after RUN_ANALYSIS_KILL_GRACE seconds. Never blocks for good: a grandchild that
+    escaped the group may hold the pipes. A run that has already exited is not signalled: its
+    group id may belong to somebody else by now."""
+    steps = ((signal.SIGTERM, RUN_ANALYSIS_KILL_GRACE), (signal.SIGKILL, RUN_ANALYSIS_REAP_WAIT))
+    for sig, wait in steps:
+        if proc.returncode is not None:
+            return
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return                                  # the group is gone
+        try:
+            proc.communicate(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_analysis(conn, queue_id: int, label: str) -> bool:
+    """Runs run_claude_analysis.sh (the whole queue) and waits for it. True when queue row
+    `queue_id` -- the one this request queued -- has been answered (marked processed) by the
+    time it is over; False when it is still pending: the run failed, timed out or never got to
+    it. The caller then falls back or says the row stays queued. The exit code alone decides
+    nothing: 0 may mean the pass never reached the row, and a failure may be another row's."""
+    _run_script(label)
+    try:
+        answered = db.analysis_processed(conn, queue_id)
+    except Exception as e:
+        print(f"[telegram_bot] could not read queue row {queue_id}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return False
+    if not answered:
+        print(f"[telegram_bot] {label}: queue row {queue_id} still pending after the run",
+              file=sys.stderr)
+    return answered
+
+
+def _run_script(label: str) -> bool:
+    """One run of run_claude_analysis.sh in a process group of its own, waited for at most
+    RUN_ANALYSIS_TIMEOUT seconds. True when it exited 0 (logged either way)."""
+    proc = None
+    try:
+        proc = subprocess.Popen([str(RUN_ANALYSIS_SCRIPT)], cwd=str(BASE_DIR),
+                                start_new_session=True, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                errors="replace")
+        try:
+            _, err = proc.communicate(timeout=RUN_ANALYSIS_TIMEOUT)
+        except BaseException:                       # a timeout, or an interrupt: no Claude left running
+            if proc.returncode is None:
+                _stop_group(proc)
+            raise
+        if proc.returncode != 0:
+            raise RuntimeError(f"exit {proc.returncode}: {(err or '')[-2000:]}")
+        print(f"[telegram_bot] claude-analysis run finished for {label}")
+        return True
+    except Exception as e:
+        print(f"[telegram_bot] synchronous claude-analysis failed for {label}: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+    finally:
+        for pipe in (getattr(proc, "stdout", None), getattr(proc, "stderr", None)):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+
+
+def _handle_ask(conn, text: str) -> None:
+    """A question for the analyst: queued, answered by the same run that answers tickers. The
+    analyst sends the answer itself (and marks the row processed), so when the row is answered
+    this sends nothing more."""
+    qid = db.enqueue_question(conn, text[:QUESTION_MAX_CHARS])
+    print(f"[telegram_bot] queued question {qid}, running claude-analysis synchronously")
+    telegram_notify.send_text(THINKING)
+    if not _run_analysis(conn, qid, f"question {qid}"):
+        telegram_notify.send_text(QUESTION_LATER)
+
+
+def _handle_ticker(conn, asset) -> None:
     # Spec §1.6: an unrecognised symbol is not queued. A coin in the coin list is known
     # to exist; anything else (a stock, CRYPTO:FOO, FOO-USD) needs a price somewhere.
     listed_coin = asset.kind == "crypto" and asset.symbol in sources.cached_coin_symbols(conn)
@@ -239,31 +335,67 @@ def _handle_message(conn, text: str) -> None:
                                   "(или источники цен сейчас не отвечают). " + LOOKUP_HINT)
         return
     ticker = asset.key
-    db.enqueue_analysis(conn, ticker)
+    queue_id = db.enqueue_analysis(conn, ticker)
     print(f"[telegram_bot] queued {ticker}, running claude-analysis synchronously")
+    if _run_analysis(conn, queue_id, ticker):
+        return
+    # Fall back to the fast deterministic-only reply so the user isn't left with total
+    # silence -- the queued row stays pending (only marked processed on a confirmed send
+    # inside analyst.py), so the next scheduled or triggered run will still pick it up.
     try:
-        result = subprocess.run([str(RUN_ANALYSIS_SCRIPT)], cwd=str(BASE_DIR),
-                                 timeout=RUN_ANALYSIS_TIMEOUT,
-                                 capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"exit {result.returncode}: {result.stderr[-2000:]}")
-        print(f"[telegram_bot] claude-analysis run finished for {ticker}")
+        rep = research.build(conn, ticker)
+        telegram_notify.send_text(
+            telegram_notify.format_condensed(rep) +
+            "\n\n(Полный разбор не завершился в этот раз — попробуется снова.)")
+    except Exception as e2:
+        print(f"[telegram_bot] fallback reply also failed for {ticker}: "
+              f"{type(e2).__name__}: {e2}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось получить данные по {ticker}. Попробуйте позже.")
+
+
+def _handle_portfolio(conn) -> None:
+    try:
+        telegram_notify.send_text(paper_report.format_summary(conn, dt.date.today(), html=True))
     except Exception as e:
-        print(f"[telegram_bot] synchronous claude-analysis failed for {ticker}: "
-              f"{type(e).__name__}: {e}", file=sys.stderr)
-        # Fall back to the fast deterministic-only reply so the user isn't left
-        # with total silence -- the queued row stays pending either way (only
-        # marked processed on a confirmed send inside run_claude_analysis.sh),
-        # so the next scheduled or triggered run will still pick it up.
-        try:
-            rep = research.build(conn, ticker)
-            telegram_notify.send_text(
-                telegram_notify.format_condensed(rep) +
-                "\n\n(Полный разбор не завершился в этот раз — попробуется снова.)")
-        except Exception as e2:
-            print(f"[telegram_bot] fallback reply also failed for {ticker}: "
-                  f"{type(e2).__name__}: {e2}", file=sys.stderr)
-            telegram_notify.send_text(f"Не удалось получить данные по {ticker}. Попробуйте позже.")
+        print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось собрать сводку портфеля ({type(e).__name__}). "
+                                  "Попробуйте позже.")
+
+
+def _handle_message(conn, text: str) -> None:
+    """Routing: the positions commands, /backtest, /portfolio, /ask, any other /command (help);
+    then a single token that is an asset with a price -- the ticker analysis; anything else
+    -- a question for the analyst."""
+    text = (text or "").strip()
+    if _handle_positions_command(conn, text):
+        return
+    if text.lower().startswith("/backtest"):
+        _handle_backtest(conn, text)
+        return
+    if not text:
+        telegram_notify.send_text(HELP_TEXT)
+        return
+    if text.startswith("/"):
+        command = text.split()[0].lower().split("@")[0]
+        if command == "/portfolio":
+            _handle_portfolio(conn)
+        elif command == "/ask":
+            question = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+            if question:
+                _handle_ask(conn, question)
+            else:
+                telegram_notify.send_text(ASK_USAGE)
+        else:                                       # /start, /help, anything unknown
+            telegram_notify.send_text(HELP_TEXT)
+        return
+    asset = None
+    if len(text.split()) == 1:
+        asset = assets.resolve(text, coins=lambda: sources.cached_coin_symbols(conn),
+                               stocks=sources.stock_universe_symbols)
+    if asset is None:
+        _handle_ask(conn, text)
+        return
+    _handle_ticker(conn, asset)
 
 
 def _poll_once(conn, token: str, chat_id: str, session: requests.Session) -> None:
@@ -272,7 +404,7 @@ def _poll_once(conn, token: str, chat_id: str, session: requests.Session) -> Non
     updates = _get_updates(token, offset, session)
     for u in updates:
         db.save_cached_value(conn, STATE_OFFSET, float(u["update_id"] + 1))
-        msg = u.get("message") or u.get("edited_message")
+        msg = u.get("message")          # not an edited_message: an edit is not a new request
         if not msg:
             continue
         from_chat = str(msg.get("chat", {}).get("id", ""))

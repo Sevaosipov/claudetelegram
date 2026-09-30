@@ -326,7 +326,7 @@ def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
     previous ETF_HISTORY_DAYS (a day against days, a streak against 3-day totals),
     and at least the floor; with under ETF_MIN_HISTORY_DAYS of history the fixed
     day_flow_usd / streak_min_usd apply instead. An inflow is a buy signal, an
-    outflow a caution signal (strategy.select)."""
+    outflow a caution signal (journaled as `caution`, see bot._journal)."""
     today = today or dt.date.today()
     signals = []
     for coin, (source, days) in etf_flow_days(conn, today).items():

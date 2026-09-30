@@ -213,6 +213,10 @@ CREATE INDEX IF NOT EXISTS signal_journal_ticker ON signal_journal(ticker, emitt
 -- own fast reply, so the news-reasoning layer follows a bit later rather than
 -- blocking the immediate answer -- there is no live-Claude hook inside the
 -- unattended bot process itself, see telegram_bot.py's module docstring.
+-- A row is a ticker lookup (kind 'ticker') or a free-form question for the
+-- analyst (kind 'question': ticker 'ВОПРОС', the text in `question`); `attempts`
+-- counts the failed Claude runs on it (analyst.process_queue gives up at 3). The
+-- three are added by _ADDED_COLUMNS, see analyst.py.
 CREATE TABLE IF NOT EXISTS claude_analysis_queue (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker       TEXT NOT NULL,
@@ -584,6 +588,18 @@ _ADDED_COLUMNS = [
     ("outlook_table", "assets", "INTEGER"),
     ("outlook_table", "oos_folds", "INTEGER"),
     ("outlook_table", "oos_fold_wins", "INTEGER"),
+    # The model portfolio (model.py): the stop distance and score a buy was sized and ranked by.
+    ("paper_orders", "stop_pct", "REAL"),
+    ("paper_orders", "score", "REAL"),
+    ("paper_positions", "stop_pct", "REAL"),
+    ("paper_positions", "score", "REAL"),
+    # The trailing stop of a /bought position, fixed when it is recorded (positions.py).
+    ("positions", "stop_pct", "REAL"),
+    # The analyst's queue also holds free-form questions (analyst.py): kind 'ticker' | 'question'.
+    ("claude_analysis_queue", "kind", "TEXT DEFAULT 'ticker'"),
+    ("claude_analysis_queue", "question", "TEXT"),
+    # Failed Claude runs on a row; analyst.process_queue gives up at analyst.MAX_ATTEMPTS.
+    ("claude_analysis_queue", "attempts", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -728,6 +744,22 @@ def save_cached_value(conn: sqlite3.Connection, key: str, value: float) -> None:
     conn.commit()
 
 
+def save_cached_json(conn: sqlite3.Connection, key: str, obj) -> None:
+    """Keep `obj` (anything json can write) in kv_cache under `key`, as JSON text."""
+    save_cached_value(conn, key, json.dumps(obj, ensure_ascii=False))
+
+
+def get_cached_json(conn: sqlite3.Connection, key: str):
+    """What save_cached_json kept under `key`, or None (nothing kept, or not JSON)."""
+    row = conn.execute("SELECT value FROM kv_cache WHERE key = ?", (key,)).fetchone()
+    if not row or not isinstance(row[0], str):
+        return None
+    try:
+        return json.loads(row[0])
+    except ValueError:
+        return None
+
+
 def get_alert_state(conn: sqlite3.Connection, source: str, ticker: str) -> dict | None:
     """What was last alerted for this (source, ticker), or None if never alerted.
 
@@ -851,7 +883,8 @@ def mark_norway_id_seen(conn: sqlite3.Connection, message_id: int) -> None:
 
 
 def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
-    """Append one signal to signal_journal, exactly as it was sent."""
+    """Append one signal to signal_journal, exactly as it was when the daily run
+    committed it (bot._journal) -- with the model's decision in `tier`."""
     cols = ("source", "kind", "ticker", "company", "buyer_count", "total_value_eur",
             "holder_only", "has_officer", "position_increase_pct", "first_buy",
             "lag_days", "market_cap_eur", "value_pct_of_mcap", "percent_of_class",
@@ -863,26 +896,51 @@ def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
     conn.commit()
 
 
-def enqueue_analysis(conn: sqlite3.Connection, ticker: str) -> None:
-    """Queue `ticker` for the next scheduled headless-Claude pass. Deduped
-    against any already-pending (unprocessed) row for the same ticker, so
-    asking about the same name several times before the schedule next fires
-    doesn't queue redundant work."""
+def enqueue_analysis(conn: sqlite3.Connection, ticker: str) -> int:
+    """Queue `ticker` for the next scheduled headless-Claude pass; returns the pending
+    row's id. Deduped against any already-pending (unprocessed) ticker row for the same
+    ticker -- its id is returned then -- so asking about the same name several times
+    before the schedule next fires doesn't queue redundant work. A question row never
+    counts as a duplicate."""
     exists = conn.execute(
-        "SELECT 1 FROM claude_analysis_queue WHERE ticker = ? AND processed_at IS NULL",
+        "SELECT id FROM claude_analysis_queue WHERE ticker = ? AND processed_at IS NULL "
+        "AND COALESCE(kind, 'ticker') = 'ticker' ORDER BY id LIMIT 1",
         (ticker,),
     ).fetchone()
     if exists:
-        return
-    conn.execute("INSERT INTO claude_analysis_queue (ticker) VALUES (?)", (ticker,))
+        return exists[0]
+    cur = conn.execute("INSERT INTO claude_analysis_queue (ticker) VALUES (?)", (ticker,))
     conn.commit()
+    return cur.lastrowid
+
+
+QUESTION_TICKER = "ВОПРОС"      # what pending_analysis shows for a question row
+
+
+def enqueue_question(conn: sqlite3.Connection, text: str) -> int:
+    """Queue a free-form question for the analyst; returns the new row's id. Never
+    deduplicated: asking the same thing twice is two questions, each gets its answer."""
+    cur = conn.execute(
+        "INSERT INTO claude_analysis_queue (ticker, kind, question) VALUES (?, 'question', ?)",
+        (QUESTION_TICKER, text))
+    conn.commit()
+    return cur.lastrowid
+
+
+def queued_question(conn: sqlite3.Connection, queue_id: int) -> str | None:
+    """The text of a queued question, or None when the row is missing or is a ticker row."""
+    row = conn.execute(
+        "SELECT question FROM claude_analysis_queue WHERE id = ? AND kind = 'question'",
+        (queue_id,)).fetchone()
+    return row[0] if row else None
 
 
 def pending_analysis(conn: sqlite3.Connection) -> list[tuple[int, str]]:
-    """(id, ticker) pairs not yet processed, oldest first."""
+    """(id, ticker) pairs not yet processed, oldest first (rows queued in the same second in
+    the order they were queued)."""
     return conn.execute(
         "SELECT id, ticker FROM claude_analysis_queue WHERE processed_at IS NULL "
-        "ORDER BY requested_at"
+        "ORDER BY requested_at, id"
     ).fetchall()
 
 
@@ -892,6 +950,24 @@ def mark_analysis_processed(conn: sqlite3.Connection, queue_id: int) -> None:
         (queue_id,),
     )
     conn.commit()
+
+
+def analysis_processed(conn: sqlite3.Connection, queue_id: int) -> bool:
+    """Whether queue row `queue_id` has been answered (or given up on): telegram_bot
+    checks its own row after a run rather than trusting the run's exit code."""
+    row = conn.execute("SELECT processed_at FROM claude_analysis_queue WHERE id = ?",
+                       (queue_id,)).fetchone()
+    return bool(row and row[0])
+
+
+def record_analysis_attempt(conn: sqlite3.Connection, queue_id: int) -> int:
+    """One more failed Claude run on queue row `queue_id`; returns how many it has had."""
+    conn.execute("UPDATE claude_analysis_queue SET attempts = COALESCE(attempts, 0) + 1 "
+                 "WHERE id = ?", (queue_id,))
+    conn.commit()
+    row = conn.execute("SELECT attempts FROM claude_analysis_queue WHERE id = ?",
+                       (queue_id,)).fetchone()
+    return row[0] if row else 0
 
 
 def journal_opinion(conn: sqlite3.Connection, ticker: str, op: dict) -> None:

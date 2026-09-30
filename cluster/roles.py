@@ -1,11 +1,11 @@
-"""Normalised buyer roles, so the strategy can tell a CEO from a board member from a
-fund without re-parsing display strings.
+"""Normalised buyer roles, so the model's insider score can tell a CEO from a board member
+from a fund without re-parsing display strings.
 
 Every source writes roles its own way -- SEC free-text officer titles ("President &
 CEO", "See Remarks"), BaFin's German categories, Finansinspektionen's Swedish ones,
-Oslo none at all -- and the tier rules in strategy.py need one vocabulary:
+Oslo none at all -- and model_score.py needs one vocabulary:
 
-    ceo, cfo, chair            the top executives rule (b)/(c) look for
+    ceo, cfo, chair            the top executives the score weighs most
     officer, director          other people who run the company
     insider                    an insider of unstated rank (Oslo)
     holder                     a >10% holder with no other role (SEC)

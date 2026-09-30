@@ -5,11 +5,12 @@ Telegram) and are intentionally left as plain text -- untested here since
 they render no markup."""
 from __future__ import annotations
 
+import pytest
+
 import cluster
 from cluster import ClusterSignal, ExitSignal, StakeSignal
 
 import positions
-import strategy
 import telegram_notify
 import telegram_notify as tn
 
@@ -158,63 +159,53 @@ def test_send_text_uses_html_parse_mode(monkeypatch):
     assert captured["parse_mode"] == "HTML"
 
 
+def test_send_text_parts_counts_the_chunks_telegram_took(monkeypatch):
+    """(accepted, sent) -- so a caller can tell nothing went out from part of it went out;
+    send_text stays a plain bool: True only when every chunk went."""
+    class Resp:
+        def __init__(self, ok):
+            self.ok = ok
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise tn.requests.HTTPError("400 Client Error: Bad Request")
+
+    outcomes = []
+    monkeypatch.setattr(tn.requests, "post", lambda url, data, timeout: Resp(outcomes.pop(0)))
+    monkeypatch.setattr(tn, "_chunk", lambda text, size: ["one", "two", "three"])
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    outcomes[:] = [True, False, True]
+    assert tn.send_text_parts("x") == (2, 3)
+    outcomes[:] = [False, False, False]
+    assert tn.send_text_parts("x") == (0, 3)
+    outcomes[:] = [True, False, True]
+    assert tn.send_text("x") is False
+    outcomes[:] = [True, True, True]
+    assert tn.send_text("x") is True
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
+    assert tn.send_text_parts("x") == (0, 0) and tn.send_text("x") is False
+
+
 def test_send_text_still_skips_silently_without_credentials(monkeypatch, capsys):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     assert tn.send_text("hello") is False
 
 
-# ------------------------------------------------------------ market_note
-#
-# tradingview.annotate_signals() sets `.market_note` on a signal after the fact
-# (or leaves it unset/None on failure); the formatters must render it when
-# present and simply omit the line otherwise, in both html and plain mode.
-
-def test_format_signal_renders_a_market_note_in_html_as_italics():
-    sig = _cluster()
-    sig.market_note = "TradingView +0.60 (Strong Buy) — механический индикатор, не мнение бота"
-    text = tn.format_signal(sig, html=True)
-    assert "<i>TradingView +0.60 (Strong Buy)" in text
-    assert text.rstrip().endswith("не мнение бота</i>")
-
-
-def test_format_signal_renders_a_market_note_in_plain_mode_without_tags():
-    sig = _cluster()
-    sig.market_note = "TradingView +0.60 (Strong Buy) — механический индикатор, не мнение бота"
-    text = tn.format_signal(sig)
-    assert "<i>" not in text
-    assert "TradingView +0.60 (Strong Buy)" in text
-
-
-def test_format_signal_omits_the_note_line_when_absent():
-    text = tn.format_signal(_cluster(), html=True)
-    assert "TradingView" not in text
-
-
-def test_format_exit_signal_renders_a_market_note():
-    sig = _exit()
-    sig.market_note = "TradingView -0.30 (Sell) — механический индикатор, не мнение бота"
-    text = tn.format_exit_signal(sig, html=True)
-    assert "<i>TradingView -0.30 (Sell)" in text
-
-
-def test_format_stake_signal_renders_a_market_note_before_the_source_link():
-    sig = _stake()
-    sig.market_note = "TradingView +0.10 (Buy) — механический индикатор, не мнение бота"
-    text = tn.format_stake_signal(sig, html=True)
-    lines = text.splitlines()
-    note_idx = next(i for i, l in enumerate(lines) if "TradingView" in l)
-    link_idx = next(i for i, l in enumerate(lines) if "<a href" in l)
-    assert note_idx < link_idx
+# ------------------------------------------------------------ the model's start money
+def test_the_messages_start_money_is_the_models():
+    """telegram_notify keeps its own copy (model is heavy to import): the two must agree."""
+    import model
+    assert tn._MODEL_START_EUR == model.STOCK_START_EUR + model.CRYPTO_START_EUR
 
 
 # ------------------------------------------------------ corroborated_by
 #
 # cluster.find_corroboration() sets `.corroborated_by` on a signal after the
 # fact (empty list when nothing else has fired on that ticker); the formatters
-# must render it plainly -- not italicized, unlike market_note, since this is
-# the bot's own data rather than a third party's read -- and simply omit the
-# line when the list is empty.
+# must render it plainly -- it is the bot's own data rather than a third
+# party's read -- and simply omit the line when the list is empty.
 
 def test_format_signal_renders_corroborated_by():
     sig = _cluster()
@@ -321,29 +312,33 @@ def test_condensed_stock_reply_names_fallback_sources():
 
 # --------------------------------------------------------- caution signals
 #
-# format_tiered_digest's ⚠️ Осторожно section: shown only when the caller passes
-# include_cautions=True (the menu's Сигналы view), never in the daily Telegram
-# digest -- see bot._send_digest and the global constraint it's guarding.
+# A bearish coin signal is journaled as `caution` and reads as an outflow when shown (the
+# menu's Сигналы); it is never in the daily message, which takes the model's buys and
+# sales, close alerts and group exits only -- see bot._send_day.
 
-def _caution_selection():
-    sig = cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF США, фондов: 12",
-                               False, None, 9e8, "2026-09-24", "2026-09-26",
-                               ["3 дн. подряд оттока, всего $1,050 млн"], None, ["k"])
-    t = strategy.Tiered(sig, strategy.CAUTION,
-                        ["цена подтверждает: BTC -6.2% за 7 дн., ниже 20-дн. средней"], [])
-    return strategy.Selection(strong=[], candidates=[], t212_checked=True, exits=[], cautions=[t])
+def _caution_signal():
+    return cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF США, фондов: 12",
+                                False, None, 9e8, "2026-09-24", "2026-09-26",
+                                ["3 дн. подряд оттока, всего $1,050 млн"], None, ["k"])
 
 
-def test_cautions_are_listed_when_the_menu_asks():
-    text = telegram_notify.format_tiered_digest(_caution_selection(), [], html=False,
-                                                include_cautions=True)
-    assert "⚠️ Осторожно (1)" in text and "ОТТОК ИЗ СПОТ-ETF" in text and "цена подтверждает" in text
-    assert "сигналов нет" not in text
+def test_a_bearish_coin_signal_reads_as_an_outflow():
+    text = telegram_notify.format_any_signal(_caution_signal(), html=False)
+    assert "ОТТОК ИЗ СПОТ-ETF" in text and "3 дн. подряд оттока" in text
 
 
-def test_cautions_are_never_in_the_telegram_digest():
-    text = telegram_notify.format_tiered_digest(_caution_selection(), [])
-    assert "Осторожно" not in text and "ОТТОК" not in text
+def test_the_model_day_message_has_nothing_to_say_without_a_trade_a_close_or_an_exit():
+    assert telegram_notify.format_model_day(None, [], []) is None
+
+
+@pytest.mark.parametrize("trigger, reason", [
+    ("insider_sell", "инсайдеры продают"), ("caution", "сигнал осторожности"),
+    ("trailing_stop", "стоп от максимума"), ("dead_money", "стоит на месте"),
+    ("time", "год в позиции"), ("trend_down", "тренд вниз"), ("news", "плохие новости")])
+def test_every_close_trigger_has_its_own_reason(trigger, reason):
+    pos = positions.Position(1, "AAA", "SEC", "2026-09-01", 100.0, [], None, None, None, None)
+    text = telegram_notify.format_close_alert(positions.CloseAlert(pos, trigger, "detail", 90.0), html=False)
+    assert text.startswith(f"🚪 AAA — {reason}\n")
 
 
 def test_caution_close_alert_reads_as_such():
@@ -355,8 +350,62 @@ def test_caution_close_alert_reads_as_such():
     assert "CRYPTO:BTC — сигнал осторожности" in text and "отток из спот-ETF" in text
 
 
-def test_high_risk_signals_never_enter_the_telegram_digest():
-    sel = strategy.Selection(strong=[], candidates=[], t212_checked=True,
-                             high_risk=[strategy.Tiered(object(), strategy.HIGH_RISK, ["x"])])
-    text = telegram_notify.format_tiered_digest(sel, [])
-    assert "Высокий риск" not in text and "сигналов нет" in text
+# ---------------------------------------------------------------- send_text never shows the token
+TOKEN = "123456789:AAH-fake_TOKEN-value_xyz"
+
+
+def _send_with(monkeypatch, capsys, error):
+    """send_text with a fake token and a requests.post that fails with `error`; returns
+    (what it returned, everything it printed)."""
+    import requests
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+
+    def post(url, **kwargs):
+        assert TOKEN in url                     # the real call does carry it in the URL
+        raise error
+
+    monkeypatch.setattr(requests, "post", post)
+    result = telegram_notify.send_text("привет")
+    captured = capsys.readouterr()
+    return result, captured.out + captured.err
+
+
+def test_send_text_prints_no_token_when_the_connection_fails(monkeypatch, capsys):
+    import requests
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    error = requests.ConnectionError(
+        f"HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: "
+        f"/bot{TOKEN}/sendMessage (Caused by NameResolutionError)")
+    result, out = _send_with(monkeypatch, capsys, error)
+    assert result is False
+    assert TOKEN not in out and "AAH-fake" not in out and "123456789" not in out
+    assert "[telegram] send failed" in out and "bot<token>/sendMessage" in out
+    assert url not in out
+
+
+def test_send_text_prints_no_token_when_telegram_answers_with_an_error(monkeypatch, capsys):
+    import requests
+    error = requests.HTTPError(
+        f"400 Client Error: Bad Request for url: https://api.telegram.org/bot{TOKEN}/sendMessage")
+    result, out = _send_with(monkeypatch, capsys, error)
+    assert result is False
+    assert TOKEN not in out and "bot<token>/sendMessage" in out
+
+
+def test_send_text_redacts_a_token_the_url_pattern_would_not_know(monkeypatch, capsys):
+    import requests
+    odd = "not-a-usual-token"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", odd)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr(requests, "post", lambda url, **k: (_ for _ in ()).throw(
+        requests.ConnectionError(f"failed: {url}")))
+    assert telegram_notify.send_text("x") is False
+    out = capsys.readouterr().out
+    assert odd not in out and "<token>" in out
+
+
+def test_redact_leaves_other_text_alone():
+    assert telegram_notify._redact("timeout after 15 s", TOKEN) == "timeout after 15 s"
+    assert telegram_notify._redact("timeout", None) == "timeout"
+    assert telegram_notify._redact(f"a {TOKEN} b", TOKEN) == "a <token> b"

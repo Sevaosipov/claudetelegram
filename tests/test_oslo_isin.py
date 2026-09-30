@@ -4,20 +4,14 @@ by ISIN, never under their Oslo ticker. Offline -- Euronext responses are saved
 fixtures, captured from the live search."""
 from __future__ import annotations
 
-import datetime as dt
 import json
 
 import pytest
 import requests
 
-import cluster
 import norway
-import strategy
 import trading212
 from conftest import fixture_text
-
-TODAY = dt.date.today()
-RECENT = (TODAY - dt.timedelta(days=1)).isoformat()
 
 
 class _Session:
@@ -93,10 +87,9 @@ def test_oslo_ticker_without_an_isin_is_not_buyable():
     assert not _t212({"NO0003733800"}, lambda t: "").can_buy("XXX", "NORWAY")
 
 
-def test_oslo_ticker_that_could_not_be_checked_is_kept_and_remembered():
+def test_oslo_ticker_that_could_not_be_checked_is_kept():
     t212 = _t212(set(), lambda t: None)
-    assert t212.can_buy("ORK", "NORWAY")
-    assert "ORK" in t212.unchecked
+    assert t212.can_buy("ORK", "NORWAY")            # unknown is not "not sold"
 
 
 def test_availability_resolves_oslo_isins_through_the_cache(conn, monkeypatch, tmp_path):
@@ -107,20 +100,3 @@ def test_availability_resolves_oslo_isins_through_the_cache(conn, monkeypatch, t
          "currencyCode": "EUR"}])
     monkeypatch.setattr(norway, "isin_for_ticker", lambda ticker, session=None: "NO0003733800")
     assert trading212.availability(conn).can_buy("ORK", "NORWAY")
-
-
-def test_unchecked_oslo_signal_says_so(conn, monkeypatch):
-    def fake_enrich(conn, signals):
-        for s in signals:
-            s.score, s.market_cap_eur, s.avg_daily_value = 100.0, 5e9, 5e7
-        return signals
-    monkeypatch.setattr(cluster, "enrich_signals", fake_enrich)
-    for i, person in enumerate(("A Person", "B Person", "C Person")):
-        conn.execute(
-            "INSERT INTO norway_purchases (message_id, person, issuer_name, ticker, txn_type, "
-            "txn_date, shares, price, currency, value, source_url) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (500 + i, person, "Orkla ASA", "ORK", "P", RECENT, 1000, 100.0, "NOK", 2_000_000, "u"))
-    conn.commit()
-    sel = strategy.select(conn, cluster.find_norway_clusters(conn), _t212(set(), lambda t: None))
-    [t] = sel.strong + sel.candidates
-    assert "Trading 212 не проверен: не удалось узнать ISIN" in t.missed

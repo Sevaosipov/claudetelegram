@@ -172,9 +172,9 @@ ILLIQUID_BELOW_EUR = 250_000
 W_FULL_UNWIND = 20.0         # every buyer in the cluster has now sold, not just some
 # A crypto signal has no company to measure against, so what it scores on is having
 # cleared its finder's size bar at all, plus how far past EUR 1m the move was. A
-# manual-run --min-score 35 (the daily digest itself sorts by strategy.py's tiers,
-# not this score) passes ETF days and exchange flows at their thresholds and
-# treasury buys from roughly EUR 90m.
+# score of 35 (a bar nothing in the daily run applies: the model portfolio scores
+# signals by its own rules) is passed by ETF days and exchange flows at their
+# thresholds and by treasury buys from roughly EUR 90m.
 W_CRYPTO_BASE = 20.0
 W_CRYPTO_SIZE = 8.0          # per decade of EUR moved, from EUR 1m
 CAP_CRYPTO_SIZE = 30.0
@@ -236,6 +236,6 @@ class ClusterSignal:
     score: float = 0.0
     corroborated_by: list[str] = field(default_factory=list)
     # One entry per distinct buyer with a normalised role (cluster/roles.py), so the
-    # tier rules in strategy.py can ask "is the CEO in this" without parsing
+    # insider score in model_score.py can ask "is the CEO in this" without parsing
     # `members`' display strings.
     buyers: list = field(default_factory=list)

@@ -203,8 +203,8 @@ def collect_signals(conn, horizons=HORIZONS) -> list[dict]:
                   score, emitted_at
            FROM signal_journal WHERE ticker IS NOT NULL AND ticker != ''
              -- a caution shares source and kind with a buy; it'd mix directions here.
-             -- a high_risk row is a small company the bot never sends -- its track
-             -- record is the H1/H2 paper books, not this backtest.
+             -- high_risk is a retired tier (the 2026-09-28 small-company signals, which
+             -- the bot never sent), kept here only to exclude old journal rows.
              AND COALESCE(tier, '') NOT IN ('caution', 'high_risk')
            ORDER BY emitted_at"""
     ).fetchall()

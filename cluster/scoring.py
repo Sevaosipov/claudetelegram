@@ -105,12 +105,12 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
     signal_journal history. Sets `.corroborated_by` on every signal in place
     to the sorted list of those other sources ([] when there are none).
 
-    Not a claim the sources agree: any signal kind counts on either side, so a
-    buy-side cluster and an exit signal on the same ticker corroborate each
-    other just as two buy-side clusters would -- "another independent regime
-    had activity here", nothing about direction. Pure SQL + set logic, no
-    network, so it runs before the market-cap/liquidity loop in
-    enrich_signals() that does need the network.
+    Not a claim the sources agree: "another independent regime had activity
+    here". But the journal half leaves out what points the other way -- a
+    journaled caution (an outflow, a coin sale) and a group exit (people
+    selling out) are no evidence for a buy. Pure SQL + set logic, no network,
+    so it runs before the market-cap/liquidity loop in enrich_signals() that
+    does need the network.
 
     Asymmetric on purpose: the batch half sees every signal enrich_signals was
     handed, including ones bot.py's --min-score/--min-liquidity will later
@@ -136,11 +136,11 @@ def find_corroboration(conn, signals: list, window_days: int = CORROBORATION_WIN
 
     since = (dt.date.today() - dt.timedelta(days=window_days)).isoformat()
     placeholders = ",".join("?" * len(tickers))
-    # A journaled caution (an outflow, a sale) is no evidence for a buy.
+    # A journaled caution (an outflow, a sale) or group exit is no evidence for a buy.
     rows = conn.execute(
         f"SELECT DISTINCT ticker, source FROM signal_journal "
         f"WHERE ticker IN ({placeholders}) AND emitted_at >= ? "
-        f"AND COALESCE(tier, '') != 'caution'",
+        f"AND COALESCE(tier, '') != 'caution' AND COALESCE(kind, '') != 'exit'",
         (*tickers, since),
     ).fetchall()
     journal_sources: dict[str, set[str]] = {t: set() for t in tickers}

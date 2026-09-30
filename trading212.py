@@ -26,7 +26,7 @@ from __future__ import annotations
 import base64
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests
@@ -49,9 +49,6 @@ class Availability:
     nok_symbols: set[str]
     # Oslo ticker -> ISIN: the ISIN, "" for none, None when it couldn't be looked up.
     norway_isin: Callable[[str], str | None] | None = None
-    # Oslo tickers kept only because their ISIN couldn't be looked up -- strategy.py
-    # says so on the signal rather than presenting them as checked.
-    unchecked: set[str] = field(default_factory=set)
 
     def can_buy(self, ticker: str, source: str) -> bool:
         t = (ticker or "").strip().upper()
@@ -66,7 +63,6 @@ class Availability:
                 return t in self.nok_symbols
             isin = self.norway_isin(t)
             if isin is None:        # unknown is not "not sold"
-                self.unchecked.add(t)
                 return True
             return isin in self.isins or t in self.nok_symbols
         if source in US_SOURCES:
