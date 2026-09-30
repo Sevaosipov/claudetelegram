@@ -16,7 +16,6 @@ import crypto_etf
 import crypto_treasury as ct
 import db
 import house_ptr
-import strategy
 import telegram_notify
 import tradingview
 from conftest import add_house_txn, fixture_text
@@ -572,11 +571,6 @@ def test_dossier_flows_are_summed_across_farside_funds(conn):
     assert days[-1][1] == pytest.approx(25e6) and days[-1][2] == ["FBTC", "IBIT"]
 
 
-def test_calibration_hides_future_etf_flows():
-    import calibrate_strategy
-    assert calibrate_strategy._VISIBLE["crypto_etf_flows"] == "date <= '{d}'"
-
-
 # ------------------------------------------------------------- on-chain
 def _add_wallet(conn, address, balance, hours_ago, coin="BTC"):
     taken = (dt.datetime.now() - dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds")
@@ -618,8 +612,7 @@ def test_crypto_score_grows_with_size_and_is_capped(conn):
 
 @pytest.mark.parametrize("value_eur,passes", [(66e6, False), (94e6, True), (345e6, True)])
 def test_crypto_scores_against_the_daily_bar(value_eur, passes):
-    """A manual-run --min-score 35 (the daily digest sorts by strategy.py's tiers,
-    not this score): a EUR 94m treasury buy (Strive's 1,355 BTC) clears it,
+    """Against a score of 35: a EUR 94m treasury buy (Strive's 1,355 BTC) clears it,
     BitMine's EUR 66m week doesn't, a $400m ETF day does."""
     sig = cluster.CryptoSignal("CRYPTO_TREASURY", "treasury", "CRYPTO:BTC", "x", True, None,
                                value_eur, "", "", [], None, ["k"])
@@ -743,11 +736,11 @@ def test_rising_price_does_not_confirm_a_caution(conn, monkeypatch):
     assert not crypto.trend_confirms_down(None)
 
 
-def test_cautions_are_journaled_and_marked_even_though_never_sent(conn):
+def test_cautions_are_journaled_and_marked_even_though_never_sent(conn, monkeypatch):
+    monkeypatch.setattr(cluster, "enrich_signals", lambda conn, signals: signals)     # no network
     _add_treasury(conn, 200, side="S")
     [sig] = cluster.find_treasury_signals(conn, today=TODAY)
-    sig.tier = strategy.CAUTION
-    bot._record_cautions(conn, strategy.Selection([], [], True, cautions=[strategy.Tiered(sig, "caution")]))
+    bot._journal(conn, [sig], None)         # a bearish coin signal is `caution` whatever the model says
     assert conn.execute("SELECT tier, kind, ticker FROM signal_journal").fetchall() == [
         ("caution", "treasury", "CRYPTO:BTC")]
     assert cluster.find_treasury_signals(conn, today=TODAY) == []

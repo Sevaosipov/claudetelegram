@@ -217,7 +217,7 @@ def test_exit_signal_full_unwind_scores_above_a_partial_one():
 
 
 def test_enrich_signals_handles_a_mixed_batch_including_an_exit_signal(conn):
-    """The real crash: enrich_signals() runs over whatever run_cluster_pass
+    """The real crash: enrich_signals() once ran over whatever the daily run had
     assembled, cluster/stake/exit signals together, in one pass."""
     signals = cluster.enrich_signals(conn, [_signal(), _exit()])
     assert all(hasattr(s, "score") for s in signals)

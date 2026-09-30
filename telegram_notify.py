@@ -573,17 +573,6 @@ _CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution":
                  "time": "срок вышел", "stop_loss": "стоп-лосс"}
 
 
-def _rule_lines(t, html: bool) -> list[str]:
-    lines = []
-    if t.met:
-        text = " · ".join(f"✓ {m}" for m in t.met)
-        lines.append(f"   {_esc(text) if html else text}")
-    if t.missed:
-        text = " · ".join(f"✗ {m}" for m in t.missed)
-        lines.append(f"   {_esc(text) if html else text}")
-    return lines
-
-
 def format_close_alert(alert, *, html: bool = True) -> str:
     pos = alert.position
     reason = _CLOSE_REASON.get(alert.trigger, alert.trigger)
@@ -594,46 +583,6 @@ def format_close_alert(alert, *, html: bool = True) -> str:
     head = f"🚪 {pos.ticker} — {reason}"
     detail = f"{alert.detail}{price} · открыта {datefmt.fmt(pos.opened_at)}"
     return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
-
-
-def format_tiered_digest(selection, closes: list, *, html: bool = True,
-                         include_cautions: bool = False, include_high_risk: bool = False) -> str:
-    """One message: 🔥 Сильные, 👀 Кандидаты, 🚪 Закрыть, 🚨 Выходы -- the daily
-    Telegram digest and the menu's "Сигналы" view (html=False) both render this.
-    Only the menu passes include_cautions: caution signals are never pushed.
-    Only the menu passes include_high_risk: small-company signals are not pushed
-    while their books are on trial."""
-    parts = []
-    if not selection.t212_checked:
-        parts.append("⚠️ Trading 212 не проверялся (нет ключа в .env) — показаны все акции.")
-    if selection.strong:
-        parts.append(_b(f"🔥 Сильные ({len(selection.strong)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in selection.strong]
-    if selection.candidates:
-        parts.append(_b(f"👀 Кандидаты ({len(selection.candidates)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in selection.candidates]
-    high_risk = getattr(selection, "high_risk", []) if include_high_risk else []
-    if high_risk:
-        parts.append(_b(f"🎲 Высокий риск ({len(high_risk)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in high_risk]
-    if closes:
-        parts.append(_b(f"🚪 Закрыть ({len(closes)})", html))
-        parts += [format_close_alert(a, html=html) for a in closes]
-    if selection.exits:
-        parts.append(_b(f"🚨 Выходы ({len(selection.exits)})", html))
-        parts += [format_any_signal(s, html=html) for s in selection.exits]
-    cautions = getattr(selection, "cautions", []) if include_cautions else []
-    if cautions:
-        parts.append(_b(f"⚠️ Осторожно ({len(cautions)})", html))
-        parts += ["\n".join([format_any_signal(t.signal, html=html)] + _rule_lines(t, html))
-                  for t in cautions]
-    if not (selection.strong or selection.candidates or high_risk or closes
-            or selection.exits or cautions):
-        parts.append("За последние 3 дня сигналов нет.")
-    return "\n\n".join(parts)
 
 
 def format_positions(positions: list, price_fn) -> str:

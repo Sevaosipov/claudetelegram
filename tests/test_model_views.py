@@ -12,7 +12,6 @@ import model
 import model_score
 import paper_report
 import positions
-import strategy
 import telegram_notify as tn
 from model import DayReport, Trade
 
@@ -486,12 +485,9 @@ def test_html_summary_is_bold_headed_with_escaped_rows_in_pre(conn):
 
 
 # ---------------------------------------------------------------------- the menu
-def test_menu_signals_print_the_scored_list_and_no_longer_select(conn, capsys, monkeypatch):
+def test_menu_signals_print_the_scored_list(conn, capsys, monkeypatch):
     import menu
 
-    def boom(*a, **k):
-        raise AssertionError("strategy.select must not be called any more")
-    monkeypatch.setattr(strategy, "select", boom, raising=False)
     monkeypatch.setattr(model, "score_today", lambda c, *a, **k: [_stock("AAA", 64.0), _coin()])
     monkeypatch.setattr("positions.check_exits", lambda c, *a, **k: [_close("CCC")])
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 110.0)

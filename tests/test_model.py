@@ -221,7 +221,7 @@ def test_candidates_are_the_finders_signals_disclosed_in_the_last_14_days_enrich
     assert model.candidate_signals(conn, TODAY) == [edge, fresh]        # what enrich returned
     assert seen["enriched"] == [fresh, edge]
     assert seen["ignore_alert_state"] is True and seen["onchain"] is False
-    assert seen["high_risk"] is False
+    assert set(seen) == {"enriched", "ignore_alert_state", "onchain", "cluster_kwargs", "stake_kwargs"}
     assert seen["cluster_kwargs"] == {"min_value": 50_000, "solo_threshold": 250_000}
     assert seen["stake_kwargs"] == {"min_percent": 5.0, "activist_only": False,
                                     "new_positions_only": False, "max_age_days": 14}

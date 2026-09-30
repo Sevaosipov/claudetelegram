@@ -78,6 +78,9 @@ BENCHMARK = "SPY"
 # not a rule of thumb about statistics in general -- it is a floor beneath which the
 # median of a handful of volatile stocks is indistinguishable from noise.
 MIN_MEANINGFUL_N = 30
+# The 2026-09-28 design journaled small-company signals under a tier whose name starts
+# with this. The model portfolio replaced it, but old databases still hold those rows.
+_RETIRED_TIER_PREFIX = "high"
 
 
 def _series(ticker: str, start: str):
@@ -203,10 +206,12 @@ def collect_signals(conn, horizons=HORIZONS) -> list[dict]:
                   score, emitted_at
            FROM signal_journal WHERE ticker IS NOT NULL AND ticker != ''
              -- a caution shares source and kind with a buy; it'd mix directions here.
-             -- a high_risk row is a small company the bot never sends -- its track
-             -- record is the H1/H2 paper books, not this backtest.
-             AND COALESCE(tier, '') NOT IN ('caution', 'high_risk')
-           ORDER BY emitted_at"""
+             -- a row of the retired small-company tier is a company the bot never sent;
+             -- it would skew the evidence for the rest.
+             AND COALESCE(tier, '') != 'caution'
+             AND COALESCE(tier, '') NOT LIKE ?
+           ORDER BY emitted_at""",
+        (_RETIRED_TIER_PREFIX + "%",),
     ).fetchall()
     out = []
     for (source, kind, ticker, company, buyers, value, holder_only, first_buy,

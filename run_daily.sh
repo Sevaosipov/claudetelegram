@@ -48,8 +48,8 @@ trap notify_failure EXIT
 # bare 5% filing trigger. Tuned against the real backlog measured on 2026-09-12:
 # cut 604 stake signals to 219 and 46 insider/political cluster signals to 13.
 # Starting points, not a finding -- same caveat as score_signal's own weights.
-# (The daily digest itself no longer filters by --min-score: strategy.py's tiers
-# replaced it -- see bot.run_cluster_pass / strategy.select.)
+# (--min-score is no longer a filter of the daily run: the model portfolio scores
+# every signal itself -- see model.py.)
 #
 # --new-positions-only added 2026-09-14: most of that 219 turned out to be
 # 13D/A amendments (an already-known holder's stake shifting), not new

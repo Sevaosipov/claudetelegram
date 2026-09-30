@@ -166,14 +166,14 @@ def test_collect_signals_leaves_out_cautions(conn, monkeypatch):
     assert len(backtest.collect_signals(conn, (21,))) == 2
 
 
-def test_collect_signals_leaves_out_high_risk(conn, monkeypatch):
-    """A journaled high_risk row is a small company the bot never sends -- mixed
-    into "all signals", "by source", "by kind", "by buyers" and "by score" next
-    to strong/candidate rows on the same source and kind, it would skew the
-    evidence for the main strategy. Its own track record is the H1/H2 paper
-    books, not this backtest."""
+def test_collect_signals_leaves_out_the_retired_small_company_tier(conn, monkeypatch):
+    """A journaled row of the 2026-09-28 small-company tier is a company the bot never
+    sent -- mixed into "all signals", "by source", "by kind", "by buyers" and "by
+    score" next to the other rows on the same source and kind, it would skew the
+    evidence. Old databases still hold such rows."""
     import db
-    for tier in (None, "candidate", "high_risk"):
+    retired = backtest._RETIRED_TIER_PREFIX + "_risk"       # the name that design used
+    for tier in (None, "candidate", retired):
         db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "AAA", "tier": tier})
     monkeypatch.setattr(backtest, "forward_returns",
                         lambda t, s, h: {21: {"return": 4.0, "excess": 2.0}})

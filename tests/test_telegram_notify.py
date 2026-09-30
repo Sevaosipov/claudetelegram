@@ -9,7 +9,6 @@ import cluster
 from cluster import ClusterSignal, ExitSignal, StakeSignal
 
 import positions
-import strategy
 import telegram_notify
 import telegram_notify as tn
 
@@ -321,29 +320,23 @@ def test_condensed_stock_reply_names_fallback_sources():
 
 # --------------------------------------------------------- caution signals
 #
-# format_tiered_digest's ⚠️ Осторожно section: shown only when the caller passes
-# include_cautions=True (the menu's Сигналы view), never in the daily Telegram
-# digest -- see bot._send_digest and the global constraint it's guarding.
+# A bearish coin signal is journaled as `caution` and reads as an outflow when shown (the
+# menu's Сигналы); it is never in the daily message, which takes the model's buys and
+# sales, close alerts and group exits only -- see bot._send_day.
 
-def _caution_selection():
-    sig = cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF США, фондов: 12",
-                               False, None, 9e8, "2026-09-24", "2026-09-26",
-                               ["3 дн. подряд оттока, всего $1,050 млн"], None, ["k"])
-    t = strategy.Tiered(sig, strategy.CAUTION,
-                        ["цена подтверждает: BTC -6.2% за 7 дн., ниже 20-дн. средней"], [])
-    return strategy.Selection(strong=[], candidates=[], t212_checked=True, exits=[], cautions=[t])
+def _caution_signal():
+    return cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF США, фондов: 12",
+                                False, None, 9e8, "2026-09-24", "2026-09-26",
+                                ["3 дн. подряд оттока, всего $1,050 млн"], None, ["k"])
 
 
-def test_cautions_are_listed_when_the_menu_asks():
-    text = telegram_notify.format_tiered_digest(_caution_selection(), [], html=False,
-                                                include_cautions=True)
-    assert "⚠️ Осторожно (1)" in text and "ОТТОК ИЗ СПОТ-ETF" in text and "цена подтверждает" in text
-    assert "сигналов нет" not in text
+def test_a_bearish_coin_signal_reads_as_an_outflow():
+    text = telegram_notify.format_any_signal(_caution_signal(), html=False)
+    assert "ОТТОК ИЗ СПОТ-ETF" in text and "3 дн. подряд оттока" in text
 
 
-def test_cautions_are_never_in_the_telegram_digest():
-    text = telegram_notify.format_tiered_digest(_caution_selection(), [])
-    assert "Осторожно" not in text and "ОТТОК" not in text
+def test_the_model_day_message_has_nothing_to_say_without_a_trade_a_close_or_an_exit():
+    assert telegram_notify.format_model_day(None, [], []) is None
 
 
 def test_caution_close_alert_reads_as_such():
@@ -353,10 +346,3 @@ def test_caution_close_alert_reads_as_such():
                                  "подтверждает: -6.2% за 7 дн., ниже 20-дн. средней", 79_900.0)
     text = telegram_notify.format_close_alert(alert, html=False)
     assert "CRYPTO:BTC — сигнал осторожности" in text and "отток из спот-ETF" in text
-
-
-def test_high_risk_signals_never_enter_the_telegram_digest():
-    sel = strategy.Selection(strong=[], candidates=[], t212_checked=True,
-                             high_risk=[strategy.Tiered(object(), strategy.HIGH_RISK, ["x"])])
-    text = telegram_notify.format_tiered_digest(sel, [])
-    assert "Высокий риск" not in text and "сигналов нет" in text

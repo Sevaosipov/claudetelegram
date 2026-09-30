@@ -49,8 +49,8 @@ class Availability:
     nok_symbols: set[str]
     # Oslo ticker -> ISIN: the ISIN, "" for none, None when it couldn't be looked up.
     norway_isin: Callable[[str], str | None] | None = None
-    # Oslo tickers kept only because their ISIN couldn't be looked up -- strategy.py
-    # says so on the signal rather than presenting them as checked.
+    # Oslo tickers can_buy() answered True for only because their ISIN couldn't be looked
+    # up -- they are not checked, and a caller that cares can tell.
     unchecked: set[str] = field(default_factory=set)
 
     def can_buy(self, ticker: str, source: str) -> bool:

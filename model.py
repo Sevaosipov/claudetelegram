@@ -168,7 +168,7 @@ def candidate_signals(conn, today: dt.date) -> list:
     market cap and liquidity. A signal is scored again every day while it is fresh, so
     the alert state is ignored."""
     found = strategy.buy_side_signals(
-        conn, ignore_alert_state=True, onchain=False, high_risk=False,
+        conn, ignore_alert_state=True, onchain=False,
         cluster_kwargs=FINDER_CLUSTER_KWARGS, stake_kwargs=FINDER_STAKE_KWARGS)
     since = (today - dt.timedelta(days=MODEL_SIGNAL_DAYS)).isoformat()
     fresh = [s for s in found if (cluster.disclosed_on(conn, s) or "") >= since]

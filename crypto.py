@@ -129,8 +129,8 @@ def _daily_closes(symbol: str) -> list[float] | None:
 
 def price_trend(conn, symbol: str) -> dict | None:
     """The 7-day return (percent) and whether the last close is above the 20-day
-    average -- the check that turns a big crypto inflow into a "Сильный" signal (see
-    strategy.py). Cached for half a day; None when there's no price history."""
+    average -- what the model portfolio scores a coin's momentum on (model_score.py)
+    and what confirms a caution. Cached for half a day; None when there's no price history."""
     symbol = symbol.upper()
     k_ret, k_above = f"crypto_trend_ret7_{symbol}", f"crypto_trend_above20_{symbol}"
     ret = db.get_cached_value(conn, k_ret, TREND_TTL_SECONDS)
