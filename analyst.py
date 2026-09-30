@@ -3,17 +3,23 @@ bot's own data plus the user's TradingView Desktop (the TradingView MCP server).
 
 Two callers, one way of running Claude (`claude_command`):
   * the Telegram queue: run_claude_analysis.sh -> `python analyst.py process-queue` -> a headless
-    Claude with claude_analysis_prompt.txt answers every queued row and sends the messages itself;
+    Claude with claude_analysis_prompt.txt answers every queued row and sends the messages itself
+    (through `send`);
   * the terminal: `python analyst.py ask "вопрос"` -> claude_ask_prompt.txt; the answer is printed,
     nothing goes to Telegram.
 
-The rest of the commands print text for that Claude to read. They are how the prompts avoid ever
-putting user text into a shell command (spec 2026-09-30, section 7):
+Claude's shell is scoped to ONE command prefix (`.venv/bin/python analyst.py`, see ALLOWED_TOOLS),
+so a headless run steered by a hostile headline or question can do nothing else. Everything it
+needs is a subcommand here, run from the repository (its working directory); the subcommands load
+.env themselves. They also keep user text out of every shell command (spec 2026-09-30, section 7):
+    python analyst.py pending              the pending (id, ticker) rows, or «очередь пуста»
+    python analyst.py method               analyst_method.txt: how to answer
     python analyst.py question ID          the queued question's text
     python analyst.py context 'TICKER'     the model's score, the positions, the dossier
     python analyst.py context --queue ID   the same for a queued ticker row (the row's key as stored)
     python analyst.py portfolio            the model summary, the watchlist, today's buys
     python analyst.py news 'QUERY'         up to 10 Google News headlines with dates
+    python analyst.py send ID              sends data/analyst_msg.txt, then marks row ID processed
 
 This module never imports telegram_bot (the bot imports the analyst, not the other way round) and
 does nothing on import that needs the network.
@@ -21,14 +27,20 @@ does nothing on import that needs the network.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import assets
 import db
+import marketcap
 import model
 import model_score
 import paper
@@ -36,27 +48,42 @@ import paper_report
 import positions
 import research
 import sources
+import telegram_notify
 from telegram_notify import money_eur, signed_pct
 
 BASE_DIR = Path(__file__).parent
 CLAUDE_BIN = Path.home() / ".local" / "bin" / "claude"
 
-# The TradingView tools Claude may call: read the chart, move it to an asset and back, and look a
-# symbol up. Nothing that edits indicators, drawings, alerts, Pine scripts or layouts, and not
-# data_get_study_values (it dumps the user's private scripts) -- see analyst_method.txt.
+# What Claude may call. The shell only as `.venv/bin/python analyst.py ...` (Claude runs in
+# BASE_DIR); Write, to put a reply in data/analyst_msg.txt for `send`; and the TradingView
+# tools: read the chart, move it to an asset and back, look a symbol up. Nothing that edits
+# indicators, drawings, alerts, Pine scripts or layouts, and not data_get_study_values (it dumps
+# the user's private scripts) -- see analyst_method.txt.
 TV_TOOLS = ("tv_health_check", "tv_launch", "chart_get_state", "chart_set_symbol",
             "chart_set_timeframe", "quote_get", "data_get_ohlcv", "symbol_info", "symbol_search")
-ALLOWED_TOOLS = ("Bash",) + tuple(f"mcp__tradingview__{t}" for t in TV_TOOLS)
+BASH_TOOL = "Bash(.venv/bin/python analyst.py:*)"
+ALLOWED_TOOLS = (BASH_TOOL, "Write") + tuple(f"mcp__tradingview__{t}" for t in TV_TOOLS)
 # launchd's PATH lacks these; the TradingView MCP server is started with `node` from one of them.
 EXTRA_PATH = ("/usr/local/bin", "/opt/homebrew/bin")
 TICKER_RE = re.compile(r"^\$?[A-Z0-9][A-Z0-9.\-]{0,14}$")
 
 ANALYSIS_PROMPT = "claude_analysis_prompt.txt"
 ASK_PROMPT = "claude_ask_prompt.txt"
+METHOD_FILE = "analyst_method.txt"
+MESSAGE_FILE = Path("data") / "analyst_msg.txt"     # the reply Claude writes, `send` delivers
+LOCK_FILE = Path("data") / "analyst.lock"
+LOCK_WAIT_SECONDS = 600         # a second run waits this long for the first one to finish
+LOCK_POLL_SECONDS = 2
+CLAUDE_TIMEOUT_SECONDS = 900    # a headless run that takes longer is stopped
+TIMEOUT_EXIT = 124
+KILL_GRACE_SECONDS = 3          # between SIGTERM and SIGKILL to a timed-out run's process group
 WATCHLIST_MAX = 10
 NEWS_MAX = 10
 _DECISION = {model_score.BUY: "покупка", model_score.WATCH: "наблюдение",
              model_score.BLOCK: "блок", model_score.SKIP: "пропуск"}
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ENV_QUOTED = re.compile(r"""^(["'])(.*?)\1\s*(?:#.*)?$""")
+_TEXT_COMMANDS = ("ask", "news")     # their argument is free text, which may start with "-"
 
 
 # ---------------------------------------------------------------- running Claude
@@ -85,25 +112,104 @@ def _claude_missing(error: FileNotFoundError) -> int:
     return 127
 
 
+def _prompt_unreadable(name: str, error: OSError) -> int:
+    print(f"не удалось прочитать {name}: {error.strerror or error}")
+    return 2
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Stop `proc` and everything it started (the MCP server, node ...): SIGTERM to its process
+    group, then SIGKILL to whatever is still in it after a moment."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return                                  # the group is gone
+        try:
+            proc.wait(timeout=KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _run_group(argv, *, timeout=None, capture_output=False, text=False, check=False, **kwargs):
+    """subprocess.run in a session of its own, so that a timeout (or an interrupt) kills the
+    whole process group, not just the Claude at its head. Raises TimeoutExpired like run."""
+    kwargs.pop("start_new_session", None)
+    if capture_output:
+        kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
+    with subprocess.Popen(argv, start_new_session=True, text=text, **kwargs) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException:
+            _kill_group(proc)
+            raise
+    result = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    if check:
+        result.check_returncode()
+    return result
+
+
+@contextlib.contextmanager
+def _queue_lock():
+    """An exclusive lock on data/analyst.lock: the launchd job and the bot's own run must not
+    answer the same rows twice. Waits up to LOCK_WAIT_SECONDS for it; yields whether it got it."""
+    path = BASE_DIR / LOCK_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+") as f:
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(LOCK_POLL_SECONDS)
+        try:
+            yield True
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def process_queue(conn, *, run=None) -> int:
     """One headless Claude pass over the queue (claude_analysis_prompt.txt). 0 when nothing is
-    queued -- no Claude run then. Otherwise Claude's exit code."""
+    queued -- no Claude run then -- or when another run keeps the queue for more than
+    LOCK_WAIT_SECONDS. Otherwise Claude's exit code; 124 when it ran past CLAUDE_TIMEOUT_SECONDS
+    and was stopped (its rows stay queued), 127 without the claude binary, 2 without the prompt."""
     if not db.pending_analysis(conn):
         return 0
-    run = run or subprocess.run
     try:
-        proc = run(claude_command(_prompt(ANALYSIS_PROMPT)), cwd=BASE_DIR, env=claude_env(),
-                   check=False)
-    except FileNotFoundError as e:
-        return _claude_missing(e)
-    return proc.returncode
+        prompt = _prompt(ANALYSIS_PROMPT)
+    except OSError as e:
+        return _prompt_unreadable(ANALYSIS_PROMPT, e)
+    run = run or _run_group
+    with _queue_lock() as locked:
+        if not locked:
+            print("очередь занята другим прогоном")
+            return 0
+        if not db.pending_analysis(conn):       # the run we waited for answered everything
+            return 0
+        try:
+            proc = run(claude_command(prompt), cwd=BASE_DIR, env=claude_env(), check=False,
+                       timeout=CLAUDE_TIMEOUT_SECONDS, start_new_session=True)
+        except FileNotFoundError as e:
+            return _claude_missing(e)
+        except subprocess.TimeoutExpired:
+            print(f"claude не уложился в {CLAUDE_TIMEOUT_SECONDS} с и остановлен; "
+                  "строки остались в очереди")
+            return TIMEOUT_EXIT
+        return proc.returncode
 
 
 def ask(question: str, *, run=None) -> int:
     """Answer `question` from the terminal: Claude runs, the answer is printed (bold tags
     removed) and nothing is sent anywhere. Returns Claude's exit code."""
+    try:
+        prompt = _prompt(ASK_PROMPT) + "\n\nВОПРОС:\n" + question
+    except OSError as e:
+        return _prompt_unreadable(ASK_PROMPT, e)
     run = run or subprocess.run
-    prompt = _prompt(ASK_PROMPT) + "\n\nВОПРОС:\n" + question
     try:
         proc = run(claude_command(prompt), cwd=BASE_DIR, env=claude_env(),
                    capture_output=True, text=True)
@@ -113,6 +219,58 @@ def ask(question: str, *, run=None) -> int:
     if proc.returncode and getattr(proc, "stderr", None):
         print(proc.stderr.strip(), file=sys.stderr)
     return proc.returncode
+
+
+def load_env(path: Path | None = None, environ: dict | None = None) -> list[str]:
+    """Load KEY=VALUE lines of `path` (default BASE_DIR/.env) into `environ` (default
+    os.environ), like the `set -a; source .env` the prompts used to run first: an optional
+    `export `, matching quotes stripped, comments and blank lines skipped. A variable that is
+    already set is left alone. Prints nothing; returns the names it set."""
+    env = os.environ if environ is None else environ
+    try:
+        text = (path or BASE_DIR / ".env").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    loaded: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export ") or line.startswith("export\t"):
+            line = line[len("export"):].lstrip()
+        key, eq, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not eq or not _ENV_KEY.fullmatch(key) or (key in env and key not in loaded):
+            continue
+        quoted = _ENV_QUOTED.match(value)
+        env[key] = quoted.group(2) if quoted else re.split(r"\s+#", value, maxsplit=1)[0].strip()
+        if key not in loaded:
+            loaded.append(key)
+    return loaded
+
+
+def send_message(conn, queue_id: int, *, send=None) -> tuple[bool, str | None]:
+    """Send data/analyst_msg.txt to Telegram as the answer to queue row `queue_id`, and mark the
+    row processed only when the send is confirmed. Returns (sent, why not). The file is removed
+    after a confirmed send, so a row whose answer was never written cannot re-send the last one."""
+    if queue_id not in dict(db.pending_analysis(conn)):
+        return False, f"в очереди нет строки {queue_id}"
+    path = BASE_DIR / MESSAGE_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False, f"нет файла {MESSAGE_FILE.as_posix()}"
+    if not text.strip():
+        return False, f"файл {MESSAGE_FILE.as_posix()} пуст"
+    try:
+        sent = bool((send or telegram_notify.send_text)(text))
+    except Exception as e:
+        return False, f"ошибка отправки: {type(e).__name__}"
+    if not sent:
+        return False, "Telegram не принял сообщение"
+    db.mark_analysis_processed(conn, queue_id)
+    path.unlink(missing_ok=True)
+    return True, None
 
 
 # ---------------------------------------------------------------- tickers
@@ -152,10 +310,41 @@ def _score_of(scored: list, ticker: str):
 
 
 # ---------------------------------------------------------------- context
-def _model_lines(scored: list, ticker: str) -> list[str]:
+def _quiet_lines(conn, ticker: str) -> list[str]:
+    """For a stock the model has no fresh signal on: the two parts of the score that need no
+    signal -- momentum, from the listing's completed daily closes, and the last weeks' news."""
+    try:
+        asset = assets.resolve(ticker)
+        if asset is None or asset.kind != "stock" or asset.is_isin:
+            return []
+        if asset.exchange:      # EQNR.OL: the signal tables know it as EQNR with source NORWAY
+            source = next((s for s, v in marketcap.SOURCE_VENUE.items() if v == asset.exchange), None)
+            if source is None:
+                return []
+            name = asset.symbol[:-len(asset.exchange)]
+        else:
+            name, source = asset.symbol, positions.position_source(conn, asset.symbol)
+        listed = paper.listing(name, source)
+        closes = [c for _d, c in paper.Prices(None, dt.date.today()).bars(listed[0])] if listed else []
+        news_part, red = model_score.news_part(model.default_news(name, source))
+    except Exception as e:
+        return [f"  импульс и новости недоступны: {type(e).__name__}"]
+
+    def part(label: str, p: model_score.Part) -> str:
+        lines = [ln.removeprefix(f"{label}: ") for ln in p.lines]
+        return f"{label} {_pts(p.points)}" + (f" ({', '.join(lines)})" if lines else "")
+
+    momentum = (part("импульс", model_score.momentum_part(closes)) if closes
+                else "импульс: нет истории цен")
+    line = f"  {momentum} · {part('новости', news_part)}"
+    return [line + (f" · красный флаг: {red}" if red else "")]
+
+
+def _model_lines(conn, scored: list, ticker: str) -> list[str]:
     s = _score_of(scored, ticker)
     if s is None:
-        return [f"МОДЕЛЬ: свежего сигнала за {model.MODEL_SIGNAL_DAYS} дней нет"]
+        return ([f"МОДЕЛЬ: свежего сигнала за {model.MODEL_SIGNAL_DAYS} дней нет"]
+                + _quiet_lines(conn, ticker))
     lines = [f"МОДЕЛЬ: балл {_pts(s.total)} — {_DECISION.get(s.decision, s.decision)}"]
     if s.kind == "crypto":
         lines.append(f"  части: тренд {_pts(s.trend)} · потоки {_pts(s.flows)} · "
@@ -200,11 +389,16 @@ def _dossier(conn, ticker: str) -> str:
         return f"ДОСЬЕ: досье недоступно: {type(e).__name__}"
 
 
-def _score_today(conn) -> tuple[list | None, str | None]:
+def _score_today(conn, ticker: str | None = None) -> tuple[list | None, str | None]:
     """(the model's scores, None), or (None, the error's type name): scoring reaches for the
-    network and the finders, and what the analyst has besides it is still worth having."""
+    network and the finders, and what the analyst has besides it is still worth having. With a
+    `ticker`, only that name's signals are looked at and enriched (the coins are always scored)."""
     try:
-        return model.score_today(conn), None
+        if ticker is None:
+            return model.score_today(conn), None
+        today = dt.date.today()
+        signals = model.candidate_signals(conn, today, tickers=_spellings(ticker)[0])
+        return model.score_today(conn, today, signals=signals), None
     except Exception as e:
         return None, type(e).__name__
 
@@ -215,9 +409,9 @@ def context(conn, ticker: str, *, scored=None) -> str:
     `scored` is model.score_today's list (else it is computed)."""
     error = None
     if scored is None:
-        scored, error = _score_today(conn)
+        scored, error = _score_today(conn, ticker)
     model_lines = ([f"МОДЕЛЬ: не посчитана: {error}"] if scored is None
-                   else _model_lines(scored, ticker))
+                   else _model_lines(conn, scored, ticker))
     return "\n".join(model_lines + _position_lines(conn, ticker) + [_dossier(conn, ticker)])
 
 
@@ -318,38 +512,86 @@ def _question_command(args) -> int:
     return 0
 
 
+def _send_command(args) -> int:
+    sent, why = send_message(_open_db(), args.id)
+    print(f"sent: {sent}")
+    if why:
+        print(f"причина: {why}")
+    return 0 if sent else 1
+
+
+def _method_command(_args) -> int:
+    try:
+        print(_prompt(METHOD_FILE))
+    except OSError as e:
+        return _error(f"не удалось прочитать {METHOD_FILE}: {e.strerror or e}")
+    return 0
+
+
+def _pending_command(_args) -> int:
+    rows = db.pending_analysis(_open_db())
+    print(rows if rows else "очередь пуста")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="analyst.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
+    sub.add_parser("pending", help="the pending queue rows")
+    sub.add_parser("method", help="how to answer (analyst_method.txt)")
     q = sub.add_parser("question", help="text of a queued question")
     q.add_argument("id", type=int)
     c = sub.add_parser("context", help="the model's score, positions and the dossier")
     c.add_argument("ticker", nargs="?")
     c.add_argument("--queue", type=int, metavar="ID", help="take the ticker from a queue row")
     sub.add_parser("portfolio", help="model summary, watchlist, today's buys")
-    n = sub.add_parser("news", help="Google News headlines")
-    n.add_argument("query", nargs="+")
-    a = sub.add_parser("ask", help="ask the analyst from the terminal")
-    a.add_argument("text", nargs="+")
+    sub.add_parser("news", help="Google News headlines: news QUERY").add_argument("query", nargs="*")
+    sub.add_parser("ask", help="ask the analyst from the terminal: ask TEXT").add_argument(
+        "text", nargs="*")
+    sd = sub.add_parser("send", help="send data/analyst_msg.txt and mark a queue row processed")
+    sd.add_argument("id", type=int)
     sub.add_parser("process-queue", help="answer the Telegram queue with a headless Claude")
     return ap
 
 
+def _free_text(words: list[str]) -> str:
+    """The rest of the command line as one text; a leading `--` is dropped."""
+    return " ".join(words[1:] if words[:1] == ["--"] else words).strip()
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `ask` and `news` take free text, which argparse would read as options when it starts with "-".
+    if argv and argv[0] in _TEXT_COMMANDS and argv[1:2] not in (["-h"], ["--help"]):
+        text = _free_text(argv[1:])
+        if not text:
+            return _error(f"нужен текст: python analyst.py {argv[0]} ТЕКСТ")
+        if argv[0] == "news":
+            load_env()
+            print(news(text))
+            return 0
+        return ask(text)
     args = _parser().parse_args(argv)
+    if args.command in ("ask", "news"):     # only `--help` gets here, or no text at all
+        return _error(f"нужен текст: python analyst.py {args.command} ТЕКСТ")
+    if args.command != "process-queue":
+        # The commands Claude runs find their keys here, not in a shell it would have to source.
+        # process-queue starts Claude and must not hand it the keys in its environment.
+        load_env()
     if args.command == "context":
         return _context_command(args)
     if args.command == "question":
         return _question_command(args)
+    if args.command == "send":
+        return _send_command(args)
+    if args.command == "method":
+        return _method_command(args)
+    if args.command == "pending":
+        return _pending_command(args)
     if args.command == "portfolio":
         print(portfolio(_open_db()))
         return 0
-    if args.command == "news":
-        print(news(" ".join(args.query)))
-        return 0
-    if args.command == "ask":
-        return ask(" ".join(args.text))
     return process_queue(_open_db())
 
 

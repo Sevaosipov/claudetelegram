@@ -4,8 +4,12 @@ dossier and the news are stubbed, and scores are hand-built."""
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
+import os
 import pathlib
 import subprocess
+import sys
+import time
 
 import pytest
 
@@ -13,9 +17,11 @@ import analyst
 import db
 import model
 import model_score
+import paper
 import research
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+REAL_LOAD_ENV = analyst.load_env        # the autouse fixture below replaces the module's own
 S, C = model.STOCK_BOOK, model.CRYPTO_BOOK
 
 
@@ -42,6 +48,18 @@ class _Proc:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
+@pytest.fixture(autouse=True)
+def _hermetic(monkeypatch, tmp_path):
+    """No test touches the repository's data/ directory, its .env or the network: the lock and
+    the message file live in tmp_path, .env is not read, and a stock the model has no signal on
+    has no prices and no headlines unless the test says otherwise."""
+    monkeypatch.setattr(analyst, "LOCK_FILE", tmp_path / "analyst.lock")
+    monkeypatch.setattr(analyst, "MESSAGE_FILE", tmp_path / "analyst_msg.txt")
+    monkeypatch.setattr(analyst, "load_env", lambda *a, **k: [])
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
+
+
 @pytest.fixture
 def dossier(monkeypatch):
     """research.build/format_brief stubbed; returns the tickers build was asked for."""
@@ -54,6 +72,23 @@ def dossier(monkeypatch):
     monkeypatch.setattr(research, "build", build)
     monkeypatch.setattr(research, "format_brief", lambda rep: f"БРИФ {rep['ticker']}")
     return asked
+
+
+def _stub_scoring(monkeypatch, scores, seen=None):
+    """model.candidate_signals / score_today stubbed; `seen` collects what they were asked."""
+    seen = {} if seen is None else seen
+
+    def candidates(conn, today, *, tickers=None):
+        seen["tickers"] = tickers
+        return ["sig"]
+
+    def score(conn, today=None, *, signals=None, **kw):
+        seen["signals"] = signals
+        return scores
+
+    monkeypatch.setattr(model, "candidate_signals", candidates)
+    monkeypatch.setattr(model, "score_today", score)
+    return seen
 
 
 def _paper_position(conn, code, ticker, *, fill="2026-09-25", cost=8_000.0, last=8_400.0, stop=0.10):
@@ -83,8 +118,16 @@ def test_claude_command_has_the_flags_and_every_allowed_tool(monkeypatch, tmp_pa
     i = cmd.index("--allowedTools")
     assert cmd[i + 1:] == list(analyst.ALLOWED_TOOLS)
     assert cmd.count("--allowedTools") == 1
-    assert "Bash" in cmd and "mcp__tradingview__quote_get" in cmd
+    assert "Bash(.venv/bin/python analyst.py:*)" in cmd and "Write" in cmd
+    assert "Bash" not in cmd                                   # never the whole shell
+    assert cmd[-len(analyst.ALLOWED_TOOLS):] == list(analyst.ALLOWED_TOOLS)    # the last flag
+    assert "mcp__tradingview__quote_get" in cmd
     assert all(f"mcp__tradingview__{t}" in cmd for t in analyst.TV_TOOLS)
+
+
+def test_the_shell_is_scoped_to_the_analyst_command_prefix():
+    assert analyst.ALLOWED_TOOLS[:2] == ("Bash(.venv/bin/python analyst.py:*)", "Write")
+    assert analyst.ALLOWED_TOOLS[2:] == tuple(f"mcp__tradingview__{t}" for t in analyst.TV_TOOLS)
 
 
 def test_the_tradingview_allow_list_is_the_nine_read_and_navigate_tools():
@@ -214,6 +257,8 @@ def test_process_queue_with_a_row_runs_claude_once_with_the_prompt(conn, monkeyp
     assert prompt in argv
     assert kwargs["cwd"] == analyst.BASE_DIR
     assert kwargs["check"] is False
+    assert kwargs["timeout"] == analyst.CLAUDE_TIMEOUT_SECONDS == 900
+    assert kwargs["start_new_session"] is True
     assert set(analyst.EXTRA_PATH) <= set(kwargs["env"]["PATH"].split(":"))
 
 
@@ -328,14 +373,15 @@ def test_context_shows_why_a_score_is_only_watch_and_the_block(conn, dossier):
 
 
 def test_context_scores_today_when_not_given_any(conn, dossier, monkeypatch):
-    monkeypatch.setattr(model, "score_today", lambda c: [_stock("NVDA", 61.0)])
+    _stub_scoring(monkeypatch, [_stock("NVDA", 61.0)])
     assert "МОДЕЛЬ: балл 61" in analyst.context(conn, "NVDA")
 
 
 def test_context_scoring_failure_does_not_lose_the_dossier(conn, dossier, monkeypatch):
-    def boom(c):
+    def boom(c, *a, **k):
         raise RuntimeError("network")
 
+    monkeypatch.setattr(model, "candidate_signals", lambda c, today, **k: [])
     monkeypatch.setattr(model, "score_today", boom)
     out = analyst.context(conn, "NVDA")
     assert "МОДЕЛЬ: не посчитана: RuntimeError" in out
@@ -447,7 +493,7 @@ def test_cli_rejects_a_ticker_that_looks_like_a_command(cli, dossier, capsys):
 
 
 def test_cli_context_prints_the_context(cli, dossier, monkeypatch, capsys):
-    monkeypatch.setattr(model, "score_today", lambda c: [_stock("NVDA", 64.0)])
+    _stub_scoring(monkeypatch, [_stock("NVDA", 64.0)])
     assert cli("context", "$NVDA") == 0
     out = capsys.readouterr().out
     assert "МОДЕЛЬ: балл 64" in out
@@ -455,7 +501,7 @@ def test_cli_context_prints_the_context(cli, dossier, monkeypatch, capsys):
 
 
 def test_cli_context_by_queue_id_uses_the_queued_key_as_is(cli, conn, dossier, monkeypatch, capsys):
-    monkeypatch.setattr(model, "score_today", lambda c: [_stock("NVDA", 64.0)])
+    _stub_scoring(monkeypatch, [_stock("NVDA", 64.0)])
     db.enqueue_analysis(conn, "$NVDA")
     [(qid, _t)] = db.pending_analysis(conn)
     assert cli("context", "--queue", str(qid)) == 0
@@ -489,7 +535,7 @@ def test_cli_question_for_a_missing_row(cli, capsys):
 
 
 def test_cli_portfolio_and_news(cli, monkeypatch, capsys):
-    monkeypatch.setattr(model, "score_today", lambda c: [])
+    monkeypatch.setattr(model, "score_today", lambda c, *a, **k: [])
     assert cli("portfolio") == 0
     assert "НАБЛЮДЕНИЕ:" in capsys.readouterr().out
     seen = []
@@ -537,7 +583,7 @@ def test_the_method_forbids_study_values_and_restores_the_chart():
     assert "chart_get_state" in method
     restore = method[method.index("RESTORE"):]
     assert "chart_set_symbol" in restore and "chart_set_timeframe" in restore
-    assert "the symbol and the timeframe" in method
+    assert "the symbol from step b" in method
     assert "WITHOUT any arguments" in method and "quote_get" in method
     assert "indicators, drawings, alerts, Pine scripts, replay, layouts" in method
 
@@ -547,7 +593,7 @@ def test_the_method_says_no_disclaimers_and_only_b_tags():
     assert "🎯 Итоговый вердикт:" in method
     assert "NO disclaimers" in method
     assert "matched <b>...</b> pairs" in method and 'bare "<" or ">"' in method
-    assert "python analyst.py context 'NVDA'" in method
+    assert "`.venv/bin/python analyst.py context 'TICKER'`" in method
     assert "summary true" in method and "kill_existing false" in method
 
 
@@ -555,25 +601,28 @@ def test_both_prompts_read_the_method_and_forbid_disclaimers():
     for name in ("claude_analysis_prompt.txt", "claude_ask_prompt.txt"):
         text = _text(name)
         assert "analyst_method.txt" in text, name
+        assert "`.venv/bin/python analyst.py method`" in text, name
         assert "disclaimer" in text.lower(), name
 
 
-def test_the_telegram_prompt_reads_questions_and_contexts_by_queue_id():
+def test_the_telegram_prompt_reads_the_queue_writes_a_file_and_sends_by_id():
     text = _text("claude_analysis_prompt.txt")
-    assert "analyst.py question <ID>" in text
-    assert "analyst.py context --queue <ID>" in text
+    assert "`.venv/bin/python analyst.py pending`" in text and "очередь пуста" in text
+    assert "`.venv/bin/python analyst.py question <ID>`" in text
+    assert "`.venv/bin/python analyst.py context --queue <ID>`" in text
+    assert "`.venv/bin/python analyst.py send <ID>`" in text
     assert "ВОПРОС" in text
-    assert "/tmp/claude_analysis_msg.txt" in text and "sent: True" in text
-    assert "mark_analysis_processed" in text
+    assert "Write tool" in text and "data/analyst_msg.txt" in text
+    assert "sent: True" in text and "sent: False" in text and "marks row <ID> processed" in text
+    assert "/tmp/" not in text and "telegram_notify" not in text
 
 
 def test_the_terminal_prompt_sends_nothing_to_telegram():
-    text = _text("claude_ask_prompt.txt")
-    assert 'python3 -c "' not in text and "mark_analysis_processed" not in text
-    assert "/tmp/claude_analysis_msg.txt" not in text
+    text = " ".join(_text("claude_ask_prompt.txt").split())          # line wraps do not count
+    assert "analyst.py send" not in text and "analyst.py pending" not in text
     assert "Do not send anything to Telegram" in text
     assert "do not touch the analysis queue" in text and "do not create or edit any files" in text
-    assert "source .env" in text and "ВОПРОС:" in text
+    assert "ВОПРОС:" in text
 
 
 def test_the_launch_script_runs_the_analyst():
@@ -581,3 +630,481 @@ def test_the_launch_script_runs_the_analyst():
     assert "analyst.py process-queue" in script
     assert "/opt/homebrew/bin" in script and "/usr/local/bin" in script
     assert "set -euo pipefail" in script
+
+
+def test_the_message_and_lock_files_are_git_ignored():
+    ignored = _text(".gitignore").splitlines()
+    assert "data/analyst_msg.txt" in ignored and "data/analyst.lock" in ignored
+
+
+# ------------------------------------------------------------------ the queue lock, the timeout
+def test_process_queue_gives_up_when_another_run_keeps_the_lock(conn, monkeypatch, capsys):
+    db.enqueue_analysis(conn, "AAPL")
+    monkeypatch.setattr(analyst, "LOCK_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(analyst, "LOCK_POLL_SECONDS", 0.01)
+    calls = []
+    with open(analyst.LOCK_FILE, "a+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert analyst.process_queue(conn, run=lambda *a, **k: calls.append(a)) == 0
+    assert calls == []
+    assert "очередь занята другим прогоном" in capsys.readouterr().out
+    assert len(db.pending_analysis(conn)) == 1
+
+
+def test_the_lock_wait_is_ten_minutes_and_the_run_limit_fifteen():
+    assert analyst.LOCK_WAIT_SECONDS == 600 and analyst.CLAUDE_TIMEOUT_SECONDS == 900
+
+
+def _hold_the_lock_until_the_first_wait(monkeypatch, then=lambda: None):
+    """Someone else holds the lock; the first time process_queue sleeps, they let go."""
+    held = open(analyst.LOCK_FILE, "a+")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    waits = []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        then()
+        fcntl.flock(held, fcntl.LOCK_UN)
+        held.close()
+
+    monkeypatch.setattr(analyst.time, "sleep", sleep)
+    return waits
+
+
+def test_process_queue_waits_for_the_lock_then_runs(conn, monkeypatch):
+    db.enqueue_analysis(conn, "AAPL")
+    waits = _hold_the_lock_until_the_first_wait(monkeypatch)
+    calls = []
+    assert analyst.process_queue(conn, run=lambda argv, **k: calls.append(argv) or _Proc(5)) == 5
+    assert waits == [analyst.LOCK_POLL_SECONDS] and len(calls) == 1
+
+
+def test_process_queue_skips_rows_the_run_it_waited_for_answered(conn, monkeypatch):
+    db.enqueue_analysis(conn, "AAPL")
+    _hold_the_lock_until_the_first_wait(
+        monkeypatch, then=lambda: db.mark_analysis_processed(conn, 1))
+    calls = []
+    assert analyst.process_queue(conn, run=lambda *a, **k: calls.append(a)) == 0
+    assert calls == []
+
+
+def test_process_queue_holds_the_lock_while_claude_runs(conn):
+    db.enqueue_analysis(conn, "AAPL")
+
+    def run(argv, **kwargs):
+        with open(analyst.LOCK_FILE, "a+") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _Proc()
+
+    assert analyst.process_queue(conn, run=run) == 0
+    with open(analyst.LOCK_FILE, "a+") as after:            # released again
+        fcntl.flock(after, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_process_queue_releases_the_lock_when_claude_is_missing(conn):
+    db.enqueue_analysis(conn, "AAPL")
+
+    def run(*a, **k):
+        raise FileNotFoundError(2, "No such file", "claude")
+
+    assert analyst.process_queue(conn, run=run) == 127
+    with open(analyst.LOCK_FILE, "a+") as after:
+        fcntl.flock(after, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_process_queue_stops_a_run_past_its_time_limit_and_returns_124(conn, capsys):
+    db.enqueue_analysis(conn, "AAPL")
+
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    assert analyst.process_queue(conn, run=run) == 124
+    assert "900" in capsys.readouterr().out
+    assert len(db.pending_analysis(conn)) == 1                  # retried on the next run
+    with open(analyst.LOCK_FILE, "a+") as after:
+        fcntl.flock(after, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_run_group_is_subprocess_run_for_what_process_queue_and_ask_need():
+    done = analyst._run_group([sys.executable, "-c", "print('привет')"], capture_output=True,
+                              text=True, check=False, timeout=30, start_new_session=True)
+    assert (done.returncode, done.stdout.strip(), done.stderr) == (0, "привет", "")
+    failed = analyst._run_group([sys.executable, "-c", "raise SystemExit(3)"], cwd=ROOT,
+                                env=dict(os.environ), timeout=30)
+    assert failed.returncode == 3
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _gone_soon(pid: int) -> bool:
+    for _ in range(50):
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_run_group_kills_the_whole_process_group_on_a_timeout(tmp_path):
+    pidfile = tmp_path / "grandchild.pid"
+    script = ("import subprocess, sys, time\n"
+              "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+              f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+              "time.sleep(60)\n")
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        analyst._run_group([sys.executable, "-c", script], timeout=1.5)
+    assert time.monotonic() - started < 20
+    assert _gone_soon(int(pidfile.read_text()))              # not just Claude: what it started
+
+
+def test_run_group_kills_a_run_that_ignores_sigterm(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyst, "KILL_GRACE_SECONDS", 0.2)
+    pidfile = tmp_path / "leader.pid"
+    script = ("import os, signal, time\n"
+              "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+              f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+              "time.sleep(60)\n")
+    with pytest.raises(subprocess.TimeoutExpired):
+        analyst._run_group([sys.executable, "-c", script], timeout=1.5)
+    assert _gone_soon(int(pidfile.read_text()))
+
+
+def test_the_default_runner_of_process_queue_is_the_group_killing_one(conn, monkeypatch):
+    db.enqueue_analysis(conn, "AAPL")
+    seen = []
+    monkeypatch.setattr(analyst, "_run_group", lambda argv, **k: seen.append(k) or _Proc())
+    assert analyst.process_queue(conn) == 0
+    assert seen[0]["timeout"] == 900 and seen[0]["start_new_session"] is True
+
+
+# ------------------------------------------------------------------ a missing prompt file
+def test_a_missing_prompt_file_is_not_reported_as_a_missing_binary(conn, monkeypatch, capsys):
+    db.enqueue_analysis(conn, "AAPL")
+    monkeypatch.setattr(analyst, "ANALYSIS_PROMPT", "no-such-prompt.txt")
+    calls = []
+    assert analyst.process_queue(conn, run=lambda *a, **k: calls.append(a)) == 2
+    out = capsys.readouterr().out
+    assert "no-such-prompt.txt" in out and "claude не найден" not in out
+    assert calls == []
+
+
+def test_ask_with_a_missing_prompt_file_returns_2(monkeypatch, capsys):
+    monkeypatch.setattr(analyst, "ASK_PROMPT", "no-such-prompt.txt")
+    calls = []
+    assert analyst.ask("?", run=lambda *a, **k: calls.append(a)) == 2
+    out = capsys.readouterr().out
+    assert "no-such-prompt.txt" in out and "claude не найден" not in out
+    assert calls == []
+
+
+def test_an_empty_queue_needs_no_prompt_file(conn, monkeypatch):
+    monkeypatch.setattr(analyst, "ANALYSIS_PROMPT", "no-such-prompt.txt")
+    assert analyst.process_queue(conn, run=lambda *a, **k: 1 / 0) == 0
+
+
+# ------------------------------------------------------------------ send: the reply goes out by id
+def _write_message(text="<b>NVDA</b>\n• растёт\n🎯 Итоговый вердикт: держать\n"):
+    analyst.MESSAGE_FILE.write_text(text, encoding="utf-8")
+    return text
+
+
+def test_send_delivers_the_file_and_marks_the_row_processed_after_a_confirmed_send(conn):
+    qid = db.enqueue_question(conn, "что с Nvidia?")
+    text = _write_message()
+    sent = []
+    assert analyst.send_message(conn, qid, send=lambda t: sent.append(t) or True) == (True, None)
+    assert sent == [text]
+    assert db.pending_analysis(conn) == []
+    assert not analyst.MESSAGE_FILE.exists()      # the next row cannot re-send this answer
+
+
+def test_a_send_telegram_did_not_confirm_leaves_the_row_and_the_file(conn):
+    db.enqueue_analysis(conn, "AAPL")
+    [(qid, _t)] = db.pending_analysis(conn)
+    _write_message()
+    sent, why = analyst.send_message(conn, qid, send=lambda t: False)
+    assert sent is False and why
+    assert db.pending_analysis(conn) == [(qid, "AAPL")]
+    assert analyst.MESSAGE_FILE.exists()          # retried as it is
+
+
+def test_send_that_raises_is_a_failed_send(conn):
+    qid = db.enqueue_question(conn, "?")
+    _write_message()
+
+    def boom(text):
+        raise UnicodeEncodeError("utf-8", text, 0, 1, "bad")
+
+    sent, why = analyst.send_message(conn, qid, send=boom)
+    assert sent is False and "UnicodeEncodeError" in why
+    assert len(db.pending_analysis(conn)) == 1
+
+
+@pytest.mark.parametrize("content,word", [(None, "нет файла"), ("", "пуст"), (" \n\t\n", "пуст")])
+def test_send_without_a_message_sends_nothing(conn, content, word):
+    qid = db.enqueue_question(conn, "?")
+    if content is not None:
+        analyst.MESSAGE_FILE.write_text(content, encoding="utf-8")
+    calls = []
+    sent, why = analyst.send_message(conn, qid, send=lambda t: calls.append(t) or True)
+    assert sent is False and word in why and calls == []
+    assert len(db.pending_analysis(conn)) == 1
+
+
+def test_send_for_a_row_that_is_not_pending_sends_nothing(conn):
+    qid = db.enqueue_question(conn, "?")
+    db.mark_analysis_processed(conn, qid)
+    _write_message()
+    calls = []
+    for row in (qid, 999):
+        sent, why = analyst.send_message(conn, row, send=lambda t: calls.append(t) or True)
+        assert sent is False and str(row) in why
+    assert calls == [] and analyst.MESSAGE_FILE.exists()
+
+
+def test_send_uses_telegram_notify_by_default(conn, monkeypatch):
+    qid = db.enqueue_question(conn, "?")
+    text = _write_message()
+    seen = []
+    monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: seen.append(t) or True)
+    assert analyst.send_message(conn, qid) == (True, None) and seen == [text]
+
+
+def test_cli_send_prints_sent_true_and_marks_the_row(cli, conn, monkeypatch, capsys):
+    qid = db.enqueue_question(conn, "?")
+    _write_message()
+    monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: True)
+    assert cli("send", str(qid)) == 0
+    assert capsys.readouterr().out.strip() == "sent: True"
+    assert db.pending_analysis(conn) == []
+
+
+def test_cli_send_prints_sent_false_with_a_reason_and_exits_1(cli, conn, capsys):
+    qid = db.enqueue_question(conn, "?")
+    assert cli("send", str(qid)) == 1                       # nothing was written
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "sent: False" and "нет файла" in out[1]
+    assert len(db.pending_analysis(conn)) == 1
+
+
+# ------------------------------------------------------------------ .env
+def test_load_env_reads_the_shell_style_lines(tmp_path):
+    f = tmp_path / "env"
+    f.write_text('# a comment\n\nTOKEN=abc123\nexport CHAT="123 456"\nQ=\'single\'\nEMPTY=\n'
+                 'SPACED = padded \nHASH=val # trailing note\nQUOTED="x # y" # note\n'
+                 'not a pair\n1BAD=x\nKEEP=from-the-file\nURL=https://h/p?a=b&c=d\n', encoding="utf-8")
+    env = {"KEEP": "already-set"}
+    loaded = REAL_LOAD_ENV(f, env)
+    assert env == {"KEEP": "already-set", "TOKEN": "abc123", "CHAT": "123 456", "Q": "single",
+                   "EMPTY": "", "SPACED": "padded", "HASH": "val", "QUOTED": "x # y",
+                   "URL": "https://h/p?a=b&c=d"}
+    assert loaded == ["TOKEN", "CHAT", "Q", "EMPTY", "SPACED", "HASH", "QUOTED", "URL"]
+
+
+def test_a_later_line_of_the_file_wins_like_source_but_never_over_the_environment(tmp_path):
+    f = tmp_path / "env"
+    f.write_text("A=1\nA=2\nB=3\n", encoding="utf-8")
+    env = {"B": "set"}
+    REAL_LOAD_ENV(f, env)
+    assert env == {"A": "2", "B": "set"}
+
+
+def test_load_env_prints_nothing_and_a_missing_file_is_fine(tmp_path, capsys):
+    f = tmp_path / "env"
+    f.write_text("TELEGRAM_BOT_TOKEN=secret-value\n", encoding="utf-8")
+    REAL_LOAD_ENV(f, {})
+    assert REAL_LOAD_ENV(tmp_path / "nope", {}) == []
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+
+
+def test_load_env_defaults_to_the_repository_env_file_and_os_environ(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("ANALYST_TEST_KEY=1\n", encoding="utf-8")
+    monkeypatch.setattr(analyst, "BASE_DIR", tmp_path)
+    fake_environ = {}
+    monkeypatch.setattr(analyst.os, "environ", fake_environ)
+    assert REAL_LOAD_ENV() == ["ANALYST_TEST_KEY"] and fake_environ == {"ANALYST_TEST_KEY": "1"}
+
+
+def test_the_cli_loads_env_for_the_commands_claude_runs_but_not_for_the_ones_that_start_it(
+        cli, monkeypatch):
+    loads = []
+    monkeypatch.setattr(analyst, "load_env", lambda *a, **k: loads.append(1) or [])
+    monkeypatch.setattr(analyst, "process_queue", lambda c, **k: 0)
+    monkeypatch.setattr(analyst, "ask", lambda q, **k: 0)
+    cli("pending")
+    assert loads == [1]
+    cli("process-queue")
+    cli("ask", "вопрос")
+    assert loads == [1]         # Claude would inherit the keys; its own commands load them
+
+
+# ------------------------------------------------------------------ pending, method, free text
+def test_cli_pending_lists_the_rows_or_says_the_queue_is_empty(cli, conn, capsys):
+    assert cli("pending") == 0
+    assert capsys.readouterr().out.strip() == "очередь пуста"
+    db.enqueue_analysis(conn, "$NVDA")
+    qid = db.enqueue_question(conn, "?")
+    assert cli("pending") == 0
+    out = capsys.readouterr().out
+    assert "(1, '$NVDA')" in out and f"({qid}, 'ВОПРОС')" in out
+
+
+def test_cli_method_prints_the_method(cli, capsys):
+    assert cli("method") == 0
+    assert capsys.readouterr().out == _text("analyst_method.txt") + "\n"
+
+
+def test_cli_method_without_the_file(cli, monkeypatch, capsys):
+    monkeypatch.setattr(analyst, "METHOD_FILE", "no-such-method.txt")
+    assert cli("method") == 2
+
+
+def test_ask_and_news_take_text_that_starts_with_a_dash(cli, monkeypatch, capsys):
+    asked, searched = [], []
+    monkeypatch.setattr(analyst, "ask", lambda q, **k: asked.append(q) or 0)
+    monkeypatch.setattr(analyst, "news", lambda q: searched.append(q) or "новость")
+    assert cli("ask", "-5% за день: почему?") == 0
+    assert cli("ask", "--verbose", "как", "дела") == 0
+    assert cli("ask", "--", "--x", "y") == 0
+    assert asked == ["-5% за день: почему?", "--verbose как дела", "--x y"]
+    assert cli("news", "-nvidia", "earnings") == 0
+    assert cli("news", "--bad") == 0
+    assert searched == ["-nvidia earnings", "--bad"]
+    assert capsys.readouterr().out.count("новость") == 2
+
+
+def test_ask_and_news_need_some_text(cli, capsys):
+    assert cli("ask") == 2 and cli("news") == 2 and cli("ask", "--") == 2
+    assert "нужен текст" in capsys.readouterr().err
+
+
+def test_ask_help_still_works(cli, capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli("ask", "--help")
+    assert stop.value.code == 0
+
+
+# ------------------------------------------------------------------ context scores only the asked ticker
+def test_context_asks_for_the_signals_of_that_ticker_only(conn, dossier, monkeypatch):
+    seen = _stub_scoring(monkeypatch, [_stock("NVDA", 61.0)])
+    assert "МОДЕЛЬ: балл 61" in analyst.context(conn, "$NVDA")
+    assert seen["tickers"] == {"NVDA"} and seen["signals"] == ["sig"]
+    analyst.context(conn, "BTC")
+    assert seen["tickers"] == {"BTC", "CRYPTO:BTC"}
+    analyst.context(conn, "eqnr.ol")
+    assert seen["tickers"] == {"EQNR.OL", "CRYPTO:EQNR.OL"}
+    analyst.context(conn, "CRYPTO:SOL")
+    assert seen["tickers"] == {"CRYPTO:SOL"}
+
+
+def test_context_never_enriches_anything_but_the_asked_ticker(conn, dossier, monkeypatch):
+    import types
+    sigs = [types.SimpleNamespace(ticker=t) for t in ("NVDA", "AAA", "NVDA", "BBB", "CRYPTO:BTC")]
+    enriched, scored_with = [], {}
+    monkeypatch.setattr(model.strategy, "buy_side_signals", lambda c, **k: sigs)
+    monkeypatch.setattr(model.cluster, "disclosed_on", lambda c, s: dt.date.today().isoformat())
+    monkeypatch.setattr(model.cluster, "enrich_signals",
+                        lambda c, signals: enriched.extend(signals) or signals)
+
+    def score(c, today=None, *, signals=None, **kw):
+        scored_with["signals"] = signals
+        return [_stock("NVDA", 61.0)]
+
+    monkeypatch.setattr(model, "score_today", score)
+    analyst.context(conn, "$NVDA")
+    assert [s.ticker for s in enriched] == ["NVDA", "NVDA"]
+    assert scored_with["signals"] == enriched
+
+
+def test_portfolio_still_scores_everything(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr(model, "candidate_signals", lambda *a, **k: 1 / 0)
+    monkeypatch.setattr(model, "score_today", lambda c, *a, **k: calls.append((a, k)) or [])
+    assert "НАБЛЮДЕНИЕ: нет" in analyst.portfolio(conn)
+    assert calls == [((), {})]
+
+
+# ------------------------------------------------------------------ no signal: momentum and news
+def _rising_bars(n=260, start=100.0, step=0.5):
+    today = dt.date.today()
+    return [((today - dt.timedelta(days=n - i)).isoformat(), start + i * step) for i in range(n)]
+
+
+def test_a_ticker_without_a_signal_gets_its_momentum_and_news_parts(conn, dossier, monkeypatch):
+    bars, priced = _rising_bars(), []
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: priced.append(symbol) or bars)
+    headlines = [{"title": "Acme downgrade after probe", "published": "2026-09-28"}]
+    monkeypatch.setattr(model, "default_news", lambda ticker, source: headlines)
+    momentum = model_score.momentum_part([c for _d, c in bars])
+    assert momentum.points > 0 and momentum.lines
+    out = analyst.context(conn, "$NVDA", scored=[])
+    assert "МОДЕЛЬ: свежего сигнала за 14 дней нет" in out
+    line = next(ln for ln in out.splitlines() if ln.strip().startswith("импульс"))
+    assert line == (f"  импульс {round(momentum.points)} ({', '.join(momentum.lines)})"
+                    " · новости −10 (1 плохая)")
+    assert priced == ["NVDA"]
+    assert out.index("МОДЕЛЬ") < out.index("импульс") < out.index("ДОСЬЕ")
+
+
+def test_the_news_part_shows_a_red_flag_headline(conn, dossier, monkeypatch):
+    monkeypatch.setattr(model, "default_news", lambda t, s: [
+        {"title": "Acme faces SEC investigation", "published": "2026-09-28"},
+        {"title": "Acme raises guidance", "published": "2026-09-28"}])
+    out = analyst.context(conn, "NVDA", scored=[])
+    assert "новости 5 (1 хорошая)" in out and "красный флаг: Acme faces SEC investigation" in out
+
+
+def test_without_prices_the_momentum_is_said_to_be_unknown(conn, dossier):
+    out = analyst.context(conn, "NVDA", scored=[])
+    assert "импульс: нет истории цен · новости 0" in out
+
+
+def test_no_extra_lines_when_the_model_has_a_signal(conn, dossier, monkeypatch):
+    monkeypatch.setattr(model, "default_news", lambda t, s: 1 / 0)      # would be named if asked
+    out = analyst.context(conn, "NVDA", scored=[_stock("NVDA")])
+    assert "недоступны" not in out and "нет истории цен" not in out
+    assert "красный флаг" not in out
+
+
+def test_the_listing_of_a_norwegian_ticker_is_its_own(conn, dossier, monkeypatch):
+    priced, asked = [], []
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: priced.append(symbol) or [])
+    monkeypatch.setattr(model, "default_news", lambda t, s: asked.append((t, s)) or [])
+    analyst.context(conn, "EQNR.OL", scored=[])
+    assert priced == ["EQNR.OL"] and asked == [("EQNR", "NORWAY")]
+
+
+def test_a_signal_journal_source_picks_the_venue_of_a_bare_ticker(conn, dossier, monkeypatch):
+    priced = []
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: priced.append(symbol) or [])
+    conn.execute("INSERT INTO signal_journal (ticker, source, emitted_at, tier) "
+                 "VALUES ('EQNR', 'NORWAY', '2026-09-20', 'buy')")
+    conn.commit()
+    analyst.context(conn, "EQNR", scored=[])
+    assert priced == ["EQNR.OL"]
+
+
+@pytest.mark.parametrize("ticker", ["CRYPTO:SOL", "SOL", "DE0007164600", "SAP.DE"])
+def test_coins_isins_and_unpriced_venues_get_no_extra_lines(conn, dossier, monkeypatch, ticker):
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: 1 / 0)
+    monkeypatch.setattr(model, "default_news", lambda t, s: 1 / 0)
+    out = analyst.context(conn, ticker, scored=[]).splitlines()
+    assert out[0] == "МОДЕЛЬ: свежего сигнала за 14 дней нет"
+    assert out[1] == "ДОСЬЕ:"
+
+
+def test_a_failure_in_the_extra_lines_is_named_not_fatal(conn, dossier, monkeypatch):
+    def boom(ticker, source):
+        raise RuntimeError("feed down")
+
+    monkeypatch.setattr(model, "default_news", boom)
+    out = analyst.context(conn, "NVDA", scored=[])
+    assert "импульс и новости недоступны: RuntimeError" in out and "БРИФ NVDA" in out

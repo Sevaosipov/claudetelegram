@@ -227,6 +227,26 @@ def test_candidates_are_the_finders_signals_disclosed_in_the_last_14_days_enrich
                                     "new_positions_only": False, "max_age_days": 14}
 
 
+def test_candidates_can_be_narrowed_to_tickers_before_recency_and_enrichment(conn, monkeypatch):
+    sigs = [types.SimpleNamespace(name=n, ticker=t)
+            for n, t in (("a1", "AAA"), ("b1", "BBB"), ("a2", "AAA"), ("c1", "CRYPTO:BTC"))]
+    checked, enriched = [], []
+
+    def disclosed(conn_, s):
+        checked.append(s.name)
+        return _day(1)
+
+    monkeypatch.setattr(model.strategy, "buy_side_signals", lambda conn_, **kw: sigs)
+    monkeypatch.setattr(model.cluster, "disclosed_on", disclosed)
+    monkeypatch.setattr(model.cluster, "enrich_signals",
+                        lambda conn_, signals: enriched.extend(signals) or signals)
+    found = model.candidate_signals(conn, TODAY, tickers={"$aaa", "CRYPTO:btc"})
+    assert [s.name for s in found] == ["a1", "a2", "c1"]
+    assert checked == ["a1", "a2", "c1"] and [s.name for s in enriched] == ["a1", "a2", "c1"]
+    assert model.candidate_signals(conn, TODAY, tickers=set()) == []
+    assert len(model.candidate_signals(conn, TODAY)) == 4            # no filter: all of them
+
+
 def test_candidates_come_out_of_the_real_finders(conn, monkeypatch):
     today = dt.date.today()
     recent = (today - dt.timedelta(days=2)).isoformat()

@@ -163,13 +163,18 @@ def model_value(conn) -> float:
                if conn.execute("SELECT 1 FROM paper_books WHERE code = ?", (code,)).fetchone())
 
 
-def candidate_signals(conn, today: dt.date) -> list:
+def candidate_signals(conn, today: dt.date, *, tickers: set[str] | None = None) -> list:
     """Every buy-side signal disclosed in the last MODEL_SIGNAL_DAYS days, enriched with
     market cap and liquidity. A signal is scored again every day while it is fresh, so
-    the alert state is ignored."""
+    the alert state is ignored. `tickers` narrows it to those tickers (any case, a leading
+    "$" ignored) before the recency check and the enrichment, which fetch per signal: the
+    analyst asks about one name at a time."""
     found = strategy.buy_side_signals(
         conn, ignore_alert_state=True, onchain=False,
         cluster_kwargs=FINDER_CLUSTER_KWARGS, stake_kwargs=FINDER_STAKE_KWARGS)
+    if tickers is not None:
+        wanted = {t.strip().upper().removeprefix("$") for t in tickers}
+        found = [s for s in found if (getattr(s, "ticker", None) or "").upper() in wanted]
     since = (today - dt.timedelta(days=MODEL_SIGNAL_DAYS)).isoformat()
     fresh = [s for s in found if (cluster.disclosed_on(conn, s) or "") >= since]
     return cluster.enrich_signals(conn, fresh)
