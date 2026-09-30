@@ -22,6 +22,8 @@ from cluster.roles import INSIDER_ROLES
 
 STOCK_BUY = 60.0
 STOCK_WATCH = 45.0
+STAKE_CONTROL_PERCENT = 50.0  # a stake this big controls the company: a takeover, not a signal
+STAKE_MIN_GROWTH_PP = 1.0     # an amendment says something only when the stake grew this much
 COIN_BUY = 60.0
 MIN_MCAP_EUR = 20e6
 MIN_ADV_EUR = 100_000
@@ -66,8 +68,9 @@ POSITIVE = ("upgrade", "raises guidance", "raises forecast", "beats estimates", 
 # "hackathon" and "exploitation", so they may only continue with these inflections.
 # Known limitation: "miners exploit cheap power" still reads as an exploit.
 _CLOSED_INFLECTIONS = {"hack": "s|ed|er|ers|ing", "exploit": "s|ed|ing"}
-# "initial public offering" is a new listing, not this company diluting its holders.
-_NOT_PRECEDED_BY = {"public offering": "initial "}
+# "initial public offering" is a new listing, not this company diluting its holders; an
+# "anti-fraud" product is not fraud.
+_NOT_PRECEDED_BY = {"public offering": "initial ", "fraud": "anti-"}
 
 
 def _phrase_regex(phrase: str) -> str:
@@ -208,18 +211,35 @@ def insider_part(sig) -> Part:
     return Part(min(points, INSIDERS_CAP), lines)
 
 
+def is_amendment(sig) -> bool:
+    """A 13D/A or 13G/A: an update of a stake already on file."""
+    return "/A" in str(getattr(sig, "form_type", "") or "").upper()
+
+
+def _grew(sig) -> bool:
+    prev = getattr(sig, "prev_percent", None)
+    return prev is not None and round(sig.percent - prev, 6) >= STAKE_MIN_GROWTH_PP
+
+
 def stake_part(sig) -> Part:
     """A 13D/G stake replaces the insiders part: the bigger the stake the more it says,
-    and an activist (13D) says far more than a passive fund (13G)."""
+    and an activist (13D) says far more than a passive fund (13G). Two kinds say nothing
+    (spec section 1, as calibrated on the first live run): a controlling stake of
+    STAKE_CONTROL_PERCENT or more -- a takeover or a parent company, not someone betting on
+    the price -- and an amendment that doesn't show the stake up by at least a point (most
+    are routine updates by holders who have owned their stake for years)."""
+    if sig.percent >= STAKE_CONTROL_PERCENT:
+        return Part(0, ["контрольный пакет — не сигнал"])
+    if is_amendment(sig) and not _grew(sig):
+        return Part(0, ["поправка без роста доли"])
     over = min(max(sig.percent - 5, 0), 10)
     if _is_activist(sig):
         points, lines = 30 + 2 * over, [f"активист 13D: {_num(sig.percent, 1)}%"]
     else:
         points, lines = 15 + over, [f"13G: {_num(sig.percent, 1)}%"]
-    prev = getattr(sig, "prev_percent", None)
-    if prev is not None and round(sig.percent - prev, 6) >= 1.0:
+    if _grew(sig):
         points += 5
-        lines.append(f"доля +{_num(sig.percent - prev, 1)} п.п.")
+        lines.append(f"доля +{_num(sig.percent - sig.prev_percent, 1)} п.п.")
     return Part(min(points, INSIDERS_CAP), lines)
 
 

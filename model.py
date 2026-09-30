@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import assets
 import cluster
 import crypto
+import db
 import model_score
 import paper
 import positions
@@ -51,7 +52,12 @@ DEAD_MONEY_MIN_RETURN = 0.05
 MAX_HOLD_DAYS = 365
 CAUTION_DAYS = 7              # a coin's inflow or outflow signal counts this long
 STAKE_LOOKBACK_DAYS = 30
-PASSIVE_BIG_PERCENT = 10.0    # a 13G at least this large counts as a trigger
+ACTIVIST_MIN_PERCENT = 5.0    # a 13D on file counts as an activist nearby from this stake ...
+PASSIVE_BIG_PERCENT = 10.0    # ... and a 13G from this one; both below model_score.STAKE_CONTROL_PERCENT
+# A stock whose insiders and triggers can't reach the watchlist even with full momentum and
+# news is not worth a price or a news fetch.
+PRUNE_HEADROOM = model_score.MOMENTUM_CAP + model_score.NEWS_MAX
+SCORED_KEY = "model_scored_{day}"   # kv_cache: the day's scores, for the menu and the analyst
 MIN_FILL_FRACTION = 0.5       # a buy with less cash than its size goes ahead if the cash is this much of it
 FALLBACK_STOP = {"stock": 0.15, "crypto": 0.25}    # a position with no stop and too little history
 FINDER_CLUSTER_KWARGS = {"min_value": 50_000, "solo_threshold": 250_000}
@@ -181,20 +187,28 @@ def candidate_signals(conn, today: dt.date, *, tickers: set[str] | None = None) 
 
 
 # ---------------------------------------------------------------- scoring
+# An original filing (not a /A amendment) of a stake that doesn't control the company.
+_NEW_STAKE_SQL = ("SELECT ticker FROM sec_stakes WHERE form_type LIKE ? AND form_type NOT LIKE '%/A%' "
+                  "AND percent_of_class >= ? AND percent_of_class < ? AND event_date >= ?")
+
+
 def _context(conn, candidates: list, today: dt.date) -> tuple[set[str], set[str], set[str]]:
     """The tickers that an activist 13D, a big passive 13G or politicians are buying:
-    from today's candidates and from the stake filings of the last STAKE_LOOKBACK_DAYS."""
+    from today's candidates and from the stake filings of the last STAKE_LOOKBACK_DAYS.
+    Only a stake that is itself a signal counts: an original filing below control
+    (amendments are mostly routine updates by long-time holders), and a candidate only when
+    model_score.stake_part gives it points."""
     since = (today - dt.timedelta(days=STAKE_LOOKBACK_DAYS)).isoformat()
+    control = model_score.STAKE_CONTROL_PERCENT
     activist = {r[0] for r in conn.execute(
-        "SELECT ticker FROM sec_stakes WHERE form_type LIKE '%13D%' AND event_date >= ?", (since,))}
+        _NEW_STAKE_SQL, ("%13D%", ACTIVIST_MIN_PERCENT, control, since))}
     passive = {r[0] for r in conn.execute(
-        "SELECT ticker FROM sec_stakes WHERE form_type LIKE '%13G%' AND percent_of_class >= ? "
-        "AND event_date >= ?", (PASSIVE_BIG_PERCENT, since))}
+        _NEW_STAKE_SQL, ("%13G%", PASSIVE_BIG_PERCENT, control, since))}
     politicians: set[str] = set()
     for c in candidates:
         if getattr(c, "source", None) in _POLITICIANS:
             politicians.add(c.ticker)
-        if hasattr(c, "percent"):
+        if hasattr(c, "percent") and model_score.stake_part(c).points > 0:
             if c.is_activist:
                 activist.add(c.ticker)
             elif c.percent >= PASSIVE_BIG_PERCENT:
@@ -208,14 +222,16 @@ def _score_stocks(conn, candidates, prices, today, news_fn, t212) -> list:
     for sig in candidates:
         if hasattr(sig, "crypto_kind") or crypto.is_crypto(sig.ticker):
             continue
-        listed = paper.listing(sig.ticker, sig.source)
-        closes = [c for _d, c in prices.bars(listed[0])] if listed else []
         flags = {"activist": sig.ticker in activist, "passive_big": sig.ticker in passive,
                  "politicians": sig.ticker in politicians,
                  "t212": None if t212 is None else t212.can_buy(sig.ticker, sig.source)}
-        score = model_score.score_stock(sig, closes, None, **flags)
-        if score.total >= NEWS_MIN_PRESCORE:
-            score = model_score.score_stock(sig, closes, news_fn(sig.ticker, sig.source), **flags)
+        score = model_score.score_stock(sig, [], None, **flags)     # insiders and triggers only
+        if score.insiders + score.triggers + PRUNE_HEADROOM >= model_score.STOCK_WATCH:
+            listed = paper.listing(sig.ticker, sig.source)
+            closes = [c for _d, c in prices.bars(listed[0])] if listed else []
+            score = model_score.score_stock(sig, closes, None, **flags)
+            if score.total >= NEWS_MIN_PRESCORE:
+                score = model_score.score_stock(sig, closes, news_fn(sig.ticker, sig.source), **flags)
         if sig.ticker not in best or score.total > best[sig.ticker].total:
             best[sig.ticker] = score
     return list(best.values())
@@ -244,6 +260,36 @@ def _flow_is_fresh(sig, since: str) -> bool:
     (a hand-built signal) counts."""
     day = (getattr(sig, "window_end", None) or "")[:10]
     return not day or day >= since
+
+
+def _kept(s) -> dict:
+    """One score as cached_scores gives it back: what the menu and the analyst read."""
+    row = {"kind": s.kind, "ticker": s.ticker, "total": s.total, "decision": s.decision,
+           "reasons": list(s.reasons), "block": s.block, "stop_pct": s.stop_pct}
+    if s.kind == "crypto":
+        row.update(company=s.coin, source="CRYPTO", coin=s.coin, trend=s.trend, flows=s.flows,
+                   news=s.news, untradeable=None, t212=None)
+    else:
+        row.update(company=s.company, source=s.source, insiders=s.insiders, triggers=s.triggers,
+                   momentum=s.momentum, news=s.news, untradeable=s.untradeable, t212=s.t212)
+    return row
+
+
+def keep_scores(conn, today: dt.date, scored: list) -> None:
+    """Keep the day's scores (kv_cache SCORED_KEY), so the menu and the analyst need not score
+    everything again the same day."""
+    db.save_cached_json(conn, SCORED_KEY.format(day=today.isoformat()), [_kept(s) for s in scored])
+
+
+def cached_scores(conn, today: dt.date | None = None) -> list | None:
+    """Today's scores as the daily run kept them -- objects with the attributes
+    telegram_notify.format_scored and the analyst read -- highest first; None when the model
+    has not scored today (another day's scores never count)."""
+    today = today or dt.date.today()
+    rows = db.get_cached_json(conn, SCORED_KEY.format(day=today.isoformat()))
+    if not isinstance(rows, list):
+        return None
+    return [types.SimpleNamespace(**r) for r in rows if isinstance(r, dict)]
 
 
 def score_today(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_fn=None,
@@ -496,7 +542,13 @@ def run(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_f
     except Exception as e:      # no scores means no buys, but the books are still stamped
         conn.rollback()
         print(f"[model] scoring failed: {type(e).__name__}: {e}", file=sys.stderr)
-        scored = []
+        scored = None
+    if scored is not None:
+        try:
+            keep_scores(conn, today, scored)
+        except Exception as e:  # the menu and the analyst then score for themselves
+            print(f"[model] scores not kept: {type(e).__name__}: {e}", file=sys.stderr)
+    scored = scored or []
 
     if STOCK_BOOK not in failed:
         with _sleeve(conn, STOCK_BOOK, failed):

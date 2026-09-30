@@ -165,14 +165,50 @@ def test_stake_13d_points(percent, points):
     assert ms.stake_part(_stake("SCHEDULE 13D", percent)).points == points
 
 
-def test_stake_13d_amendment_is_still_an_activist():
-    assert ms.stake_part(_stake("SCHEDULE 13D/A", 8.0)).points == 36
+def test_stake_13d_amendment_with_growth_is_still_an_activist():
+    part = ms.stake_part(_stake("SCHEDULE 13D/A", 8.0, prev=6.5))
+    assert part.points == 36 + 5
+    assert part.lines == ["активист 13D: 8,0%", "доля +1,5 п.п."]
 
 
 def test_stake_13g_points():
     assert ms.stake_part(_stake("SCHEDULE 13G", 12.0)).points == 22
-    assert ms.stake_part(_stake("SCHEDULE 13G/A", 5.0)).points == 15
+    assert ms.stake_part(_stake("SCHEDULE 13G", 5.0)).points == 15
     assert ms.stake_part(_stake("SCHEDULE 13G", 30.0)).points == 25
+
+
+# Real filings the first live run scored as activist buys (2026-09-30): routine amendments by
+# holders who already control the company, and a takeover.
+@pytest.mark.parametrize("form,percent,prev,points,lines", [
+    ("SCHEDULE 13D/A", 18.7, None, 0, ["поправка без роста доли"]),     # IEP-like: no known growth
+    ("SCHEDULE 13D/A", 55.7, 53.5, 0, ["контрольный пакет — не сигнал"]),   # BZFD-like
+    ("SCHEDULE 13D/A", 19.85, 18.22, 55, ["активист 13D: 19,9%", "доля +1,6 п.п."]),  # TRMD-like
+    ("SCHEDULE 13D", 8.0, None, 36, ["активист 13D: 8,0%"]),            # an original 13D
+    ("SCHEDULE 13D", 100.0, None, 0, ["контрольный пакет — не сигнал"]),     # CHR-like takeover
+])
+def test_stake_calibration_on_real_filing_shapes(form, percent, prev, points, lines):
+    assert ms.stake_part(_stake(form, percent, prev=prev)) == ms.Part(points, lines)
+
+
+@pytest.mark.parametrize("form,percent,prev", [
+    ("SCHEDULE 13D/A", 8.0, None), ("SCHEDULE 13D/A", 8.0, 7.5), ("SCHEDULE 13G/A", 12.0, None),
+    ("SCHEDULE 13G/A", 12.0, 11.2), ("SC 13D/A", 9.0, None), ("SCHEDULE 13D/A", 8.0, 9.0),
+])
+def test_an_amendment_without_a_point_of_growth_scores_nothing(form, percent, prev):
+    assert ms.stake_part(_stake(form, percent, prev=prev)) == ms.Part(0, ["поправка без роста доли"])
+
+
+def test_an_amendment_growing_by_a_point_despite_float_noise_scores():
+    assert ms.stake_part(_stake("SCHEDULE 13G/A", 8.2, prev=7.2)).points == pytest.approx(15 + 3.2 + 5)
+
+
+@pytest.mark.parametrize("form,prev", [("SCHEDULE 13D", None), ("SCHEDULE 13G", None),
+                                       ("SCHEDULE 13D/A", 40.0), ("SCHEDULE 13G/A", 10.0)])
+def test_a_controlling_stake_is_not_a_signal_whatever_the_form(form, prev):
+    assert ms.stake_part(_stake(form, ms.STAKE_CONTROL_PERCENT, prev=prev)) == \
+        ms.Part(0, ["контрольный пакет — не сигнал"])
+    assert ms.stake_part(_stake(form.removesuffix("/A"), 49.9)).points > 0
+    assert ms.STAKE_CONTROL_PERCENT == 50.0
 
 
 def test_stake_lines_use_a_decimal_comma():
@@ -199,7 +235,7 @@ def test_stake_growth_of_exactly_a_point_counts_despite_float_noise():
 
 
 def test_stake_part_never_exceeds_the_cap():
-    top = ms.stake_part(_stake("SCHEDULE 13D", 90.0, prev=40.0))
+    top = ms.stake_part(_stake("SCHEDULE 13D", 45.0, prev=30.0))
     assert top.points == 55 <= 60
 
 
@@ -432,6 +468,18 @@ def test_news_stock_phrases_match_their_suffixes(title, points, red):
     part, flag = ms.news_part(_titles(title))
     assert part.points == points
     assert (flag == title) is red
+
+
+@pytest.mark.parametrize("title", ["Bank rolls out anti-fraud platform", "ANTI-FRAUD tools boost Acme",
+                                   "Acme buys an anti-fraud startup"])
+def test_news_anti_fraud_is_not_a_fraud_red_flag(title):
+    assert ms.news_part(_titles(title)) == (ms.Part(0, []), None)
+
+
+@pytest.mark.parametrize("title", ["Fraud charges filed against Acme", "Acme accused of accounting fraud",
+                                   "Anti-fraud unit uncovers fraud at Acme"])
+def test_news_fraud_itself_is_still_a_red_flag(title):
+    assert ms.news_part(_titles(title))[1] == title
 
 
 def test_news_initial_public_offering_is_not_a_share_offering_red_flag():

@@ -24,13 +24,16 @@ DB_PATH = Path(__file__).parent / "data" / "disclosures.db"
 
 
 def show_signals(conn) -> None:
-    """The model's score for every fresh signal and both coins, computed now (model.py) --
-    a browse, not a digest: signals already sent show up too -- then the pending close
-    alerts and the positions reported with /bought."""
+    """The model's score for every fresh signal and both coins (model.py): the scores the
+    daily run kept today, else computed now -- a browse, not a digest: signals already sent
+    show up too -- then the pending close alerts and the positions reported with /bought."""
     print()
-    print("Считаю оценки — новости и цены, может занять минуту...")
     try:
-        print(telegram_notify.format_scored(model.score_today(conn)))
+        scored = model.cached_scores(conn, dt.date.today())
+        if scored is None:
+            print("Считаю оценки — новости и цены, может занять минуту...")
+            scored = model.score_today(conn)
+        print(telegram_notify.format_scored(scored))
     except Exception as e:  # a failed source must not end the menu
         print(f"Ошибка: {type(e).__name__}: {e}")
     closes = positions.check_exits(conn)

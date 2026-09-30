@@ -79,10 +79,10 @@ def _sig(ticker="AAA", *, n=3, roles=("ceo",), pct=0.25, source="SEC", size=(1e9
         member_names=[b.name for b in buyers])
 
 
-def _stake(ticker="AAA", person="Fund LP", form="SCHEDULE 13D", percent=10.0):
+def _stake(ticker="AAA", person="Fund LP", form="SCHEDULE 13D", percent=10.0, prev=None):
     return types.SimpleNamespace(
         ticker=ticker, source="SEC13DG", company=f"{ticker} Corp", person=person, form_type=form,
-        percent=percent, prev_percent=None, is_activist=form.startswith("SCHEDULE 13D"),
+        percent=percent, prev_percent=prev, is_activist=form.startswith("SCHEDULE 13D"),
         market_cap_eur=1e9, avg_daily_value=1e6, corroborated_by=[])
 
 
@@ -773,11 +773,19 @@ def test_a_red_flag_headline_blocks_a_stock(conn):
 
 @pytest.mark.parametrize("filed_days_ago,form,percent,points", [
     (10, "SCHEDULE 13D", 8.0, 15),
-    (30, "SCHEDULE 13D/A", 8.0, 15),         # 30 days ago still counts
+    (30, "SCHEDULE 13D", 8.0, 15),           # 30 days ago still counts
     (31, "SCHEDULE 13D", 8.0, 0),
+    (10, "SCHEDULE 13D", 5.0, 15),           # from 5% ...
+    (10, "SCHEDULE 13D", 4.9, 0),
+    (10, "SCHEDULE 13D", 49.9, 15),          # ... to below control
+    (10, "SCHEDULE 13D", 50.0, 0),           # a controlling stake is not an activist nearby
+    (10, "SCHEDULE 13D/A", 8.0, 0),          # an amendment is not a new activist
+    (10, "SC 13D/A", 8.0, 0),
     (10, "SCHEDULE 13G", 12.0, 6),           # a passive 10%+
     (10, "SCHEDULE 13G", 10.0, 6),           # exactly 10% counts
     (10, "SCHEDULE 13G", 9.0, 0),
+    (10, "SCHEDULE 13G/A", 12.0, 0),         # amendments don't count for 13G either
+    (10, "SCHEDULE 13G", 50.0, 0),
 ])
 def test_recent_stake_filings_are_a_trigger_for_a_cluster_on_the_same_ticker(
         conn, filed_days_ago, form, percent, points):
@@ -892,3 +900,99 @@ def test_the_benchmark_is_the_two_books_benchmarks_added_up(conn):
 def test_the_benchmark_is_missing_when_either_book_has_none(conn):
     assert _run(conn, [], {"SPY": _bars([100.0] * 12, YESTERDAY)}).bench is None
     assert _run(conn, [], {}).bench is None
+
+
+# ------------------------------------------------- stake candidates: only a real signal is a trigger
+@pytest.mark.parametrize("stake,points", [
+    (_stake("AAA", form="SCHEDULE 13D", percent=8.0), 15),
+    (_stake("AAA", form="SCHEDULE 13D/A", percent=8.0), 0),               # no growth on file
+    (_stake("AAA", form="SCHEDULE 13D/A", percent=8.0, prev=6.0), 15),    # grew 2 points
+    (_stake("AAA", form="SCHEDULE 13D", percent=60.0), 0),                # controls the company
+    (_stake("AAA", form="SCHEDULE 13G/A", percent=12.0), 0),
+    (_stake("AAA", form="SCHEDULE 13G", percent=55.0), 0),
+])
+def test_a_stake_among_todays_candidates_counts_only_when_it_scores(conn, stake, points):
+    [aaa] = [s for s in _score(conn, [_sig("AAA"), stake], {"AAA": _stock_bars()})
+             if s.ticker == "AAA" and s.signal is not stake]
+    assert aaa.triggers == points
+
+
+# ------------------------------------------------- pruning: no fetch for what can't be watched
+def test_a_signal_that_cannot_reach_the_watchlist_is_scored_without_any_fetch(conn):
+    """insiders + triggers + the most momentum (15) and news (10) could add: below 45 -> no
+    price history and no headlines are fetched; it is still scored, as a skip."""
+    fetched, asked = [], []
+
+    def fetch(symbol, days=None):
+        fetched.append(symbol)
+        return _stock_bars()
+
+    def news(ticker, source):
+        asked.append(ticker)
+        return [{"title": "Acme wins contract"}]
+
+    low = _stake("LOW", form="SCHEDULE 13G", percent=9.0)         # 19: at most 44
+    amended = _stake("AMD", form="SCHEDULE 13D/A", percent=8.0)   # 0
+    edge = _stake("EDG", form="SCHEDULE 13G", percent=10.0)       # 15 ... 20 + 25 = 45: fetched
+    scored = model.score_today(conn, TODAY, fetch=fetch, news_fn=news, trend_fn=lambda c, s: None,
+                               signals=[low, amended, edge], t212=T212)
+    stocks = {s.ticker: s for s in scored if s.kind == "stock"}
+    assert "LOW" not in fetched and "AMD" not in fetched and "EDG" in fetched
+    assert [t for t in asked if not t.startswith("CRYPTO")] == []        # EDG scores 15 < 35: no news
+    for ticker, total in (("LOW", 19.0), ("AMD", 0.0)):
+        s = stocks[ticker]
+        assert (s.total, s.decision, s.momentum, s.news) == (total, "skip", 0, 0)
+        assert s.stop_pct is None and s.last_close is None
+
+
+def test_the_pruning_line_is_the_watch_bar_less_the_momentum_and_news_caps(conn):
+    fetched = []
+
+    def fetch(symbol, days=None):
+        fetched.append(symbol)
+        return []
+
+    politician = _sig("POL", source="HOUSE", n=2, roles=(), pct=None)     # 0 + 5
+    model.score_today(conn, TODAY, fetch=fetch, news_fn=lambda t, s: [], trend_fn=lambda c, s: None,
+                      signals=[politician, _sig("AAA")], t212=T212)
+    assert "POL" not in fetched and "AAA" in fetched
+    assert model_score.MOMENTUM_CAP + model_score.NEWS_MAX == 25 and model_score.STOCK_WATCH == 45
+
+
+# ------------------------------------------------- today's scores are kept for the menu and the analyst
+def test_the_run_keeps_todays_scores_and_they_come_back_as_they_were(conn):
+    import telegram_notify
+    report = _run(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],
+                  {"AAA": _stock_bars(), "BBB": _stock_bars(), "BTC-USD": _rising()},
+                  t212=types.SimpleNamespace(can_buy=lambda t, s: t != "BBB"))
+    cached = model.cached_scores(conn, TODAY)
+    assert [(s.kind, s.ticker, s.total, s.decision) for s in cached] == [
+        (s.kind, s.ticker, s.total, s.decision) for s in report.scored]
+    by = {s.ticker: s for s in cached}
+    aaa, real = by["AAA"], next(s for s in report.scored if s.ticker == "AAA")
+    for attr in ("company", "source", "insiders", "triggers", "momentum", "news", "reasons", "block",
+                 "untradeable", "t212", "stop_pct"):
+        assert getattr(aaa, attr) == getattr(real, attr), attr
+    assert by["BBB"].t212 is False
+    btc = by["CRYPTO:BTC"]
+    assert (btc.kind, btc.coin, btc.trend, btc.flows, btc.news) == ("crypto", "BTC", 60, 0, 0)
+    assert telegram_notify.format_scored(cached) == telegram_notify.format_scored(report.scored)
+
+
+def test_only_todays_kept_scores_count(conn):
+    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert model.cached_scores(conn, TODAY) is not None
+    assert model.cached_scores(conn, TODAY + dt.timedelta(days=1)) is None
+    assert model.cached_scores(conn, YESTERDAY) is None
+
+
+def test_a_failed_scoring_keeps_nothing(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("finders down")
+    monkeypatch.setattr(model, "score_today", boom)
+    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert model.cached_scores(conn, TODAY) is None
+
+
+def test_no_run_today_means_no_kept_scores(conn):
+    assert model.cached_scores(conn, TODAY) is None

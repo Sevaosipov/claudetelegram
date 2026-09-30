@@ -512,6 +512,29 @@ def test_menu_signals_survive_a_failing_score(conn, capsys, monkeypatch):
     assert "offline" in capsys.readouterr().out
 
 
+def test_menu_signals_use_todays_kept_scores_without_scoring_again(conn, capsys, monkeypatch):
+    import menu
+
+    model.keep_scores(conn, dt.date.today(), [_stock("KEPT", 64.0), _coin()])
+    monkeypatch.setattr(model, "score_today", lambda *a, **k: 1 / 0)
+    monkeypatch.setattr("positions.check_exits", lambda c, *a, **k: [])
+    menu.show_signals(conn)
+    out = capsys.readouterr().out
+    assert "🟢 KEPT 64" in out and "CRYPTO:BTC" in out
+    assert "ZeroDivisionError" not in out and "Считаю оценки" not in out
+
+
+def test_menu_signals_score_afresh_when_only_another_days_scores_are_kept(conn, capsys, monkeypatch):
+    import menu
+
+    model.keep_scores(conn, dt.date.today() - dt.timedelta(days=1), [_stock("OLD", 64.0)])
+    monkeypatch.setattr(model, "score_today", lambda c, *a, **k: [_stock("NEW", 61.0)])
+    monkeypatch.setattr("positions.check_exits", lambda c, *a, **k: [])
+    menu.show_signals(conn)
+    out = capsys.readouterr().out
+    assert "NEW 61" in out and "OLD" not in out and "Считаю оценки" in out
+
+
 def test_menu_shows_the_model_summary_and_where_to_look_further(conn, capsys):
     import menu
     model.create_books(conn, dt.date.today() - dt.timedelta(days=10))     # the menu reads the clock

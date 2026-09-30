@@ -744,6 +744,22 @@ def save_cached_value(conn: sqlite3.Connection, key: str, value: float) -> None:
     conn.commit()
 
 
+def save_cached_json(conn: sqlite3.Connection, key: str, obj) -> None:
+    """Keep `obj` (anything json can write) in kv_cache under `key`, as JSON text."""
+    save_cached_value(conn, key, json.dumps(obj, ensure_ascii=False))
+
+
+def get_cached_json(conn: sqlite3.Connection, key: str):
+    """What save_cached_json kept under `key`, or None (nothing kept, or not JSON)."""
+    row = conn.execute("SELECT value FROM kv_cache WHERE key = ?", (key,)).fetchone()
+    if not row or not isinstance(row[0], str):
+        return None
+    try:
+        return json.loads(row[0])
+    except ValueError:
+        return None
+
+
 def get_alert_state(conn: sqlite3.Connection, source: str, ticker: str) -> dict | None:
     """What was last alerted for this (source, ticker), or None if never alerted.
 

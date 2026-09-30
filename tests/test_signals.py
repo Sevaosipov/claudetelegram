@@ -689,15 +689,18 @@ def test_corroboration_house_senate_regime_is_symmetric(conn):
     assert signals[0].corroborated_by == []
 
 
-def test_corroboration_includes_exit_signals(conn):
-    """Exits count on either side -- co-occurrence, not agreement. See
-    cluster.find_corroboration's docstring."""
+def test_corroboration_ignores_journaled_exits(conn):
+    """People selling out of a ticker are no evidence for buying it: a journaled group exit
+    doesn't corroborate (the model scores corroboration as +5 on a buy)."""
     add_sec_purchase(conn, "AAA", "Buyer One", 300_000, RECENT)
     add_sec_purchase(conn, "AAA", "Buyer Two", 300_000, RECENT)
     _journal_row(conn, "AAA", "HOUSE", days_ago=3, kind="exit")
     signals = cluster.find_sec_clusters(conn)
     cluster.find_corroboration(conn, signals)
-    assert signals[0].corroborated_by == ["HOUSE"]
+    assert signals[0].corroborated_by == []
+    _journal_row(conn, "AAA", "BAFIN", days_ago=3)                # any other kind still counts
+    cluster.find_corroboration(conn, signals)
+    assert signals[0].corroborated_by == ["BAFIN"]
 
 
 def test_corroboration_survives_the_full_chain_to_the_dossier(conn):

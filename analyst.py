@@ -552,6 +552,14 @@ def _dossier(conn, ticker: str) -> str:
         return f"ДОСЬЕ: досье недоступно: {type(e).__name__}"
 
 
+def _kept_scores(conn) -> list | None:
+    """The scores the daily run kept today (model.cached_scores), or None."""
+    try:
+        return model.cached_scores(conn, dt.date.today())
+    except Exception:
+        return None
+
+
 def _score_today(conn, ticker: str | None = None) -> tuple[list | None, str | None]:
     """(the model's scores, None), or (None, the error's type name): scoring reaches for the
     network and the finders, and what the analyst has besides it is still worth having. With a
@@ -569,10 +577,15 @@ def _score_today(conn, ticker: str | None = None) -> tuple[list | None, str | No
 def context(conn, ticker: str, *, scored=None) -> str:
     """What the bot knows about `ticker` (its key as the queue stores it, "$NVDA" included):
     the model's score and decision, the model's and the user's positions in it, the dossier.
-    `scored` is model.score_today's list (else it is computed)."""
+    `scored` is model.score_today's list; else today's kept scores when they have the ticker,
+    else that one ticker is scored now."""
     error = None
     if scored is None:
-        scored, error = _score_today(conn, ticker)
+        kept = _kept_scores(conn)
+        if kept is not None and _score_of(kept, ticker) is not None:
+            scored = kept
+        else:
+            scored, error = _score_today(conn, ticker)
     model_lines = ([f"МОДЕЛЬ: не посчитана: {error}"] if scored is None
                    else _model_lines(conn, scored, ticker))
     return "\n".join(model_lines + _position_lines(conn, ticker) + [_dossier(conn, ticker)])
@@ -609,9 +622,12 @@ def _watchlist(scored: list) -> list[str]:
 
 
 def portfolio(conn, *, scored=None) -> str:
-    """The model summary, the stocks and coins it is watching and today's buys."""
+    """The model summary, the stocks and coins it is watching and today's buys. `scored` is
+    model.score_today's list; else today's kept scores, else everything is scored now."""
     today = dt.date.today()
     error = None
+    if scored is None:
+        scored = _kept_scores(conn)
     if scored is None:
         scored, error = _score_today(conn)
     watch_lines = ([f"НАБЛЮДЕНИЕ: не посчитано: {error}"] if scored is None

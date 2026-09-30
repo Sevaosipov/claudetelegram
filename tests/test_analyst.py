@@ -1230,6 +1230,29 @@ def test_context_never_enriches_anything_but_the_asked_ticker(conn, dossier, mon
     assert scored_with["signals"] == enriched
 
 
+def test_portfolio_uses_todays_kept_scores(conn, monkeypatch):
+    model.keep_scores(conn, dt.date.today(),
+                      [_stock("KEPT", 52.0, model_score.WATCH, reasons=["один инсайдер"])])
+    monkeypatch.setattr(model, "score_today", lambda *a, **k: 1 / 0)
+    assert "KEPT — 52: один инсайдер" in analyst.portfolio(conn)
+
+
+def test_context_takes_the_model_line_from_todays_kept_scores(conn, dossier, monkeypatch):
+    model.keep_scores(conn, dt.date.today(), [_stock("NVDA", 64.0), _coin("BTC", 72.0)])
+    monkeypatch.setattr(model, "candidate_signals", lambda *a, **k: 1 / 0)
+    monkeypatch.setattr(model, "score_today", lambda *a, **k: 1 / 0)
+    nvda = analyst.context(conn, "$NVDA")
+    assert "МОДЕЛЬ: балл 64 — покупка" in nvda and "3 инсайдера" in nvda and "T212: есть" in nvda
+    assert "МОДЕЛЬ: балл 72 — покупка" in analyst.context(conn, "BTC")
+
+
+def test_context_scores_a_ticker_the_kept_scores_miss_by_itself(conn, dossier, monkeypatch):
+    model.keep_scores(conn, dt.date.today(), [_stock("AAA", 64.0)])
+    seen = _stub_scoring(monkeypatch, [_stock("NVDA", 61.0)])
+    assert "МОДЕЛЬ: балл 61" in analyst.context(conn, "$NVDA")
+    assert seen["tickers"] == {"NVDA"}
+
+
 def test_portfolio_still_scores_everything(conn, monkeypatch):
     calls = []
     monkeypatch.setattr(model, "candidate_signals", lambda *a, **k: 1 / 0)
