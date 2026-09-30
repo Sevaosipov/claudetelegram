@@ -54,17 +54,15 @@ keys they need themselves.
       bracket makes Telegram reject the whole message with a 400 error and the send silently
       fails.
 
-   d. Write the message with your Write tool to the file data/analyst_msg.txt in the repository
-      (Write wants an absolute path: your working directory followed by /data/analyst_msg.txt).
-      The file holds exactly the message and nothing else; each row overwrites it. Then send it:
-      `.venv/bin/python analyst.py send <ID>`
-      It sends the file's content, and only after a confirmed send marks row <ID> processed. It
-      prints `sent: True` or `sent: False` with a reason. On `sent: False` leave the row: it
-      is retried on the next run. Never send a message for a row without writing that row's own
-      message first.
+   d. Send it, with the whole message as ONE single-quoted argument (newlines are fine inside the
+      quotes):
+      `.venv/bin/python analyst.py send <ID> '<the whole message>'`
+      The message must not contain the ' character (write ’ instead), or the quoting breaks.
+      It sends the message, and only after a confirmed send marks row <ID> processed. It prints
+      `sent: True`, or `sent: False (why)`. On `sent: False` leave the row: it is retried on the
+      next run. Each row gets its own message and its own send.
 
-Scope discipline: do nothing else in this repository. Do not edit any project files: the one
-file you write is data/analyst_msg.txt. Do not run the daily disclosure scrape, backtest, or
-any other job. Do not change the owner's TradingView setup beyond what the method allows, and
-leave the chart on the symbol and timeframe you found it on. Only the queue-processing work
-described above, for the rows actually pending.
+Scope discipline: do nothing else in this repository. You cannot write files and must not try
+to. Do not run the daily disclosure scrape, backtest, or any other job. Do not change the owner's
+TradingView setup beyond what the method allows, and leave the chart on the symbol and timeframe
+you found it on. Only the queue-processing work described above, for the rows actually pending.

@@ -15,7 +15,6 @@ data/*.log
 data/universe_cache.json
 data/cik_ticker_cache.json
 data/*_seen*.json
-data/analyst_msg.txt
 data/analyst.lock
 
 # SDD scratch (git-ignored workspace for the executing skill)

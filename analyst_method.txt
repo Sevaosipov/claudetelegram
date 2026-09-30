@@ -9,8 +9,8 @@ Your shell accepts ONLY the analyst commands, run from the repository (your work
     `.venv/bin/python analyst.py portfolio`          the model summary, the watchlist, today's buys
     `.venv/bin/python analyst.py news 'QUERY'`       recent headlines with dates
 plus the ones your own prompt names (reading the queue and sending). Nothing else works: no
-directory changes, no environment scripts, no pipes, no chained commands, no inline python. The
-commands find the keys they need themselves.
+directory changes, no environment scripts, no pipes, no chained commands, no inline python, and
+you cannot write or edit files. The commands find the keys they need themselves.
 
 1. FIND THE ASSETS
    - A queue row that is a ticker already names its asset (its context comes from
@@ -92,6 +92,9 @@ commands find the keys they need themselves.
    - NO disclaimers of any kind: no "not investment advice", no «не является инвестиционной
      рекомендацией». The owner asked for that to be removed and does not want to see it again.
    - No preamble, no closing pleasantries, no restating what you did: the message is the answer.
+   - Never write the ' character (a straight single quote) anywhere in the answer: use ’ instead
+     (Moody’s, with the typographic one). The message travels as one single-quoted command
+     argument, and a ' would end it.
    - HTML safety: use only matched <b>...</b> pairs. Never write a bare "<" or ">" anywhere else
      (write «меньше 30», «больше 10 процентов»; not "n<30", not ">10%", not arrows made of
      them): Telegram rejects the whole message and the send fails.

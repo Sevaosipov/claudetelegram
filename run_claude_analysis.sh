@@ -18,11 +18,11 @@
 # plain prompt files instead, which sidesteps the whole class of shell-quoting issues.
 #
 # analyst.py builds the claude command (the absolute ~/.local/bin/claude, not relying on launchd's
-# PATH; --permission-mode acceptEdits with --allowedTools scoped to ONE shell command prefix,
-# `.venv/bin/python analyst.py`, plus Write and a short list of mcp__tradingview__ tools, so no
-# interactive prompts and nothing else runnable). It also holds a lock on data/analyst.lock so
-# the launchd job and the bot's own run never answer the same rows twice, and stops a run that
-# takes longer than 15 minutes. launchd runs with a minimal PATH that lacks /usr/local/bin and
+# PATH; --allowedTools scoped to ONE shell command prefix, `.venv/bin/python analyst.py`, plus a
+# short list of mcp__tradingview__ tools -- no Write, no edit mode, so anything else is denied
+# without a prompt and nothing runnable can be written). It also holds a lock on
+# data/analyst.lock so the launchd job and the bot's own run never answer the same rows twice,
+# stops a run that takes longer than 15 minutes, and takes its claude down with it on SIGTERM. launchd runs with a minimal PATH that lacks /usr/local/bin and
 # /opt/homebrew/bin, where `node` -- which starts the TradingView MCP server -- lives (same class
 # of gotcha as python/venv elsewhere in this project), so both are put in front of PATH here and
 # again in the environment analyst.py hands to claude.

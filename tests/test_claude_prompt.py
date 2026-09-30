@@ -4,10 +4,12 @@ The headless Claude's shell is scoped to that one prefix (analyst.ALLOWED_TOOLS)
 headline or question can't make it run anything else, and the commands never carry user text:
 the queue stores Asset.key -- "$NVDA" for a US stock -- which a double-quoted shell command would
 expand to nothing (or worse, run what the text says). So a queue row is read by its numeric id
-(`question <ID>`, `context --queue <ID>`, `send <ID>`), and the tickers and search phrases Claude
-finds in a question itself go in single quotes ('TICKER', 'QUERY'; the ticker must pass
-analyst.valid_ticker). The commands find .env themselves: there is no `cd`, `source`, `&&`,
-pipe or `python3 -c` in any of the three files.
+(`question <ID>`, `context --queue <ID>`), and the tickers and search phrases Claude finds in a
+question itself go in single quotes ('TICKER', 'QUERY'; the ticker must pass
+analyst.valid_ticker). The one command that carries free text is `send <ID> '<the whole
+message>'`: Claude's own reply, as ONE single-quoted argument (there is no file it may write). The
+commands find .env themselves: there is no `cd`, `source`, `&&`, pipe or `python3 -c` in any of
+the three files.
 """
 from __future__ import annotations
 
@@ -22,10 +24,11 @@ PROMPT = ROOT / "claude_analysis_prompt.txt"
 PROMPTS = [PROMPT, ROOT / "claude_ask_prompt.txt", ROOT / "analyst_method.txt"]
 
 PREFIX = ".venv/bin/python analyst.py"
-# The whole command language of the prompts. The only placeholders: <ID>, 'TICKER', 'QUERY'.
+# The whole command language of the prompts. The only placeholders: <ID>, 'TICKER', 'QUERY' and
+# the message of `send`, the one place where Claude's own text goes into a command.
 COMMAND_FORM = re.compile(
-    re.escape(PREFIX) + r" (?:pending|method|portfolio|question <ID>|send <ID>|context --queue <ID>"
-    r"|context 'TICKER'|news 'QUERY')")
+    re.escape(PREFIX) + r" (?:pending|method|portfolio|question <ID>|context --queue <ID>"
+    r"|context 'TICKER'|news 'QUERY'|send <ID> '<the whole message>')")
 # A command runs to its closing backtick or the end of its line.
 COMMAND = re.compile(re.escape(PREFIX) + r"[^`\n]*")
 # Never anywhere in a prompt: what the old prompts ran, and what could chain or expand.
@@ -51,12 +54,16 @@ def test_every_command_is_one_of_the_allowed_forms():
 def test_the_form_rejects_user_text_and_anything_that_chains():
     for bad in (f'{PREFIX} context "$NVDA"', f"{PREFIX} context NVDA", f"{PREFIX} context $NVDA",
                 f"{PREFIX} context 'NVDA'; ls", f"{PREFIX} question 12", f"{PREFIX} send",
+                f"{PREFIX} send <ID>", f"{PREFIX} send <ID> hello",
+                f"{PREFIX} send <ID> \"<the whole message>\"", f"{PREFIX} send <ID> 'hello'",
+                f"{PREFIX} send <ID> '<the whole message>' && ls",
                 f"{PREFIX} context 'TICKER' && ls", f"{PREFIX} news QUERY", f"{PREFIX} ask 'x'",
                 f"{PREFIX} context --queue 5", f"python analyst.py context 'TICKER'",
                 f"{PREFIX} context '<TICKER>'", f"{PREFIX} question <ID> | cat"):
         assert not COMMAND_FORM.fullmatch(bad), bad
     for good in (f"{PREFIX} pending", f"{PREFIX} question <ID>", f"{PREFIX} context 'TICKER'",
-                 f"{PREFIX} context --queue <ID>", f"{PREFIX} send <ID>", f"{PREFIX} news 'QUERY'"):
+                 f"{PREFIX} context --queue <ID>", f"{PREFIX} news 'QUERY'",
+                 f"{PREFIX} send <ID> '<the whole message>'"):
         assert COMMAND_FORM.fullmatch(good), good
 
 
@@ -91,7 +98,8 @@ def test_every_command_is_a_real_analyst_subcommand_the_allowed_shell_prefix_cov
 
 def test_the_queue_rows_are_read_and_answered_by_id_through_the_analyst():
     commands = _commands(PROMPT)
-    for wanted in ("pending", "method", "question <ID>", "context --queue <ID>", "send <ID>"):
+    for wanted in ("pending", "method", "question <ID>", "context --queue <ID>",
+                   "send <ID> '<the whole message>'"):
         assert f"{PREFIX} {wanted}" in commands, wanted
     text = PROMPT.read_text(encoding="utf-8")
     # the old inline lookups, which pasted the queue's key into python code, are gone

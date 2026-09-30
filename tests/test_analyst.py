@@ -7,8 +7,10 @@ import datetime as dt
 import fcntl
 import os
 import pathlib
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -50,11 +52,10 @@ class _Proc:
 
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch, tmp_path):
-    """No test touches the repository's data/ directory, its .env or the network: the lock and
-    the message file live in tmp_path, .env is not read, and a stock the model has no signal on
+    """No test touches the repository's data/ directory, its .env or the network: the lock
+    lives in tmp_path, .env is not read, and a stock the model has no signal on
     has no prices and no headlines unless the test says otherwise."""
     monkeypatch.setattr(analyst, "LOCK_FILE", tmp_path / "analyst.lock")
-    monkeypatch.setattr(analyst, "MESSAGE_FILE", tmp_path / "analyst_msg.txt")
     monkeypatch.setattr(analyst, "load_env", lambda *a, **k: [])
     monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
     monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
@@ -91,12 +92,13 @@ def _stub_scoring(monkeypatch, scores, seen=None):
     return seen
 
 
-def _paper_position(conn, code, ticker, *, fill="2026-09-25", cost=8_000.0, last=8_400.0, stop=0.10):
+def _paper_position(conn, code, ticker, *, fill="2026-09-25", cost=8_000.0, last=8_400.0, stop=0.10,
+                    source="SEC"):
     conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
         "net_eur, entry_close, entry_fx, reason, last_value, stop_pct, score) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (code, ticker, "SEC", ticker, "USD", fill, cost, cost * 0.998, 10.0, 1.16, "балл 64", last,
+        (code, ticker, source, ticker, "USD", fill, cost, cost * 0.998, 10.0, 1.16, "балл 64", last,
          stop, 64.0))
     conn.commit()
 
@@ -114,20 +116,17 @@ def test_claude_command_has_the_flags_and_every_allowed_tool(monkeypatch, tmp_pa
     monkeypatch.setattr(analyst, "CLAUDE_BIN", tmp_path / "claude")
     cmd = analyst.claude_command("вопрос")
     assert cmd[:3] == [str(tmp_path / "claude"), "-p", "вопрос"]
-    assert cmd[3:5] == ["--permission-mode", "acceptEdits"]
-    i = cmd.index("--allowedTools")
-    assert cmd[i + 1:] == list(analyst.ALLOWED_TOOLS)
-    assert cmd.count("--allowedTools") == 1
-    assert "Bash(.venv/bin/python analyst.py:*)" in cmd and "Write" in cmd
-    assert "Bash" not in cmd                                   # never the whole shell
-    assert cmd[-len(analyst.ALLOWED_TOOLS):] == list(analyst.ALLOWED_TOOLS)    # the last flag
-    assert "mcp__tradingview__quote_get" in cmd
+    assert cmd[3] == "--allowedTools" and cmd.count("--allowedTools") == 1
+    assert cmd[4:] == list(analyst.ALLOWED_TOOLS)                  # the last flag, its tools after it
+    assert "Bash(.venv/bin/python analyst.py:*)" in cmd and "Bash" not in cmd   # never the whole shell
     assert all(f"mcp__tradingview__{t}" in cmd for t in analyst.TV_TOOLS)
 
 
-def test_the_shell_is_scoped_to_the_analyst_command_prefix():
-    assert analyst.ALLOWED_TOOLS[:2] == ("Bash(.venv/bin/python analyst.py:*)", "Write")
-    assert analyst.ALLOWED_TOOLS[2:] == tuple(f"mcp__tradingview__{t}" for t in analyst.TV_TOOLS)
+def test_claude_cannot_write_or_edit_anything(monkeypatch):
+    """A file it could write (analyst.py, a shim in .venv) would be run by the allowed prefix."""
+    cmd = analyst.claude_command("x")
+    assert "--permission-mode" not in cmd and "acceptEdits" not in cmd
+    assert not {"Write", "Edit", "MultiEdit", "NotebookEdit"} & set(analyst.ALLOWED_TOOLS)
 
 
 def test_the_tradingview_allow_list_is_the_nine_read_and_navigate_tools():
@@ -605,16 +604,25 @@ def test_both_prompts_read_the_method_and_forbid_disclaimers():
         assert "disclaimer" in text.lower(), name
 
 
-def test_the_telegram_prompt_reads_the_queue_writes_a_file_and_sends_by_id():
+def test_the_telegram_prompt_reads_the_queue_and_sends_the_answer_as_one_quoted_argument():
     text = _text("claude_analysis_prompt.txt")
+    flat = " ".join(text.split())
     assert "`.venv/bin/python analyst.py pending`" in text and "очередь пуста" in text
     assert "`.venv/bin/python analyst.py question <ID>`" in text
     assert "`.venv/bin/python analyst.py context --queue <ID>`" in text
-    assert "`.venv/bin/python analyst.py send <ID>`" in text
+    assert "`.venv/bin/python analyst.py send <ID> '<the whole message>'`" in text
+    assert "ONE single-quoted argument" in flat and "must not contain the ' character" in flat
+    assert "write ’ instead" in flat
+    assert "sent: True" in text and "sent: False (why)" in text and "marks row <ID> processed" in flat
     assert "ВОПРОС" in text
-    assert "Write tool" in text and "data/analyst_msg.txt" in text
-    assert "sent: True" in text and "sent: False" in text and "marks row <ID> processed" in text
-    assert "/tmp/" not in text and "telegram_notify" not in text
+    assert "Write" not in text and "analyst_msg" not in text and "/tmp/" not in text
+    assert "telegram_notify" not in text
+
+
+def test_the_method_forbids_the_straight_quote_in_an_answer():
+    flat = " ".join(_text("analyst_method.txt").split())
+    assert "Never write the ' character" in flat and "use ’ instead" in flat
+    assert "you cannot write or edit files" in flat
 
 
 def test_the_terminal_prompt_sends_nothing_to_telegram():
@@ -632,9 +640,11 @@ def test_the_launch_script_runs_the_analyst():
     assert "set -euo pipefail" in script
 
 
-def test_the_message_and_lock_files_are_git_ignored():
+def test_the_lock_file_is_git_ignored_and_there_is_no_message_file_any_more():
     ignored = _text(".gitignore").splitlines()
-    assert "data/analyst_msg.txt" in ignored and "data/analyst.lock" in ignored
+    assert "data/analyst.lock" in ignored and "data/analyst_msg.txt" not in ignored
+    assert not hasattr(analyst, "MESSAGE_FILE")
+    assert "analyst_msg" not in _text("analyst.py")
 
 
 # ------------------------------------------------------------------ the queue lock, the timeout
@@ -810,88 +820,134 @@ def test_an_empty_queue_needs_no_prompt_file(conn, monkeypatch):
 
 
 # ------------------------------------------------------------------ send: the reply goes out by id
-def _write_message(text="<b>NVDA</b>\n• растёт\n🎯 Итоговый вердикт: держать\n"):
-    analyst.MESSAGE_FILE.write_text(text, encoding="utf-8")
-    return text
+MESSAGE = "<b>NVDA</b>\n• растёт\n🎯 Итоговый вердикт: держать"
 
 
-def test_send_delivers_the_file_and_marks_the_row_processed_after_a_confirmed_send(conn):
+def test_send_delivers_the_text_and_marks_the_row_processed_after_a_confirmed_send(conn):
     qid = db.enqueue_question(conn, "что с Nvidia?")
-    text = _write_message()
     sent = []
-    assert analyst.send_message(conn, qid, send=lambda t: sent.append(t) or True) == (True, None)
-    assert sent == [text]
+    assert analyst.send_message(conn, qid, MESSAGE + "\n",
+                                send=lambda t: sent.append(t) or True) == (True, None)
+    assert sent == [MESSAGE]                                   # stripped
     assert db.pending_analysis(conn) == []
-    assert not analyst.MESSAGE_FILE.exists()      # the next row cannot re-send this answer
 
 
-def test_a_send_telegram_did_not_confirm_leaves_the_row_and_the_file(conn):
+def test_a_send_telegram_did_not_confirm_leaves_the_row(conn):
     db.enqueue_analysis(conn, "AAPL")
     [(qid, _t)] = db.pending_analysis(conn)
-    _write_message()
-    sent, why = analyst.send_message(conn, qid, send=lambda t: False)
+    sent, why = analyst.send_message(conn, qid, MESSAGE, send=lambda t: False)
     assert sent is False and why
     assert db.pending_analysis(conn) == [(qid, "AAPL")]
-    assert analyst.MESSAGE_FILE.exists()          # retried as it is
 
 
 def test_send_that_raises_is_a_failed_send(conn):
     qid = db.enqueue_question(conn, "?")
-    _write_message()
 
     def boom(text):
-        raise UnicodeEncodeError("utf-8", text, 0, 1, "bad")
+        raise RuntimeError("bot123456:SECRET-token is unreachable")
 
-    sent, why = analyst.send_message(conn, qid, send=boom)
-    assert sent is False and "UnicodeEncodeError" in why
+    sent, why = analyst.send_message(conn, qid, MESSAGE, send=boom)
+    assert sent is False and "RuntimeError" in why
+    assert "SECRET" not in why                                 # only the type is ever reported
     assert len(db.pending_analysis(conn)) == 1
 
 
-@pytest.mark.parametrize("content,word", [(None, "нет файла"), ("", "пуст"), (" \n\t\n", "пуст")])
-def test_send_without_a_message_sends_nothing(conn, content, word):
+@pytest.mark.parametrize("text", ["", " \n\t\n", None])
+def test_send_without_a_message_sends_nothing(conn, text):
     qid = db.enqueue_question(conn, "?")
-    if content is not None:
-        analyst.MESSAGE_FILE.write_text(content, encoding="utf-8")
     calls = []
-    sent, why = analyst.send_message(conn, qid, send=lambda t: calls.append(t) or True)
-    assert sent is False and word in why and calls == []
-    assert len(db.pending_analysis(conn)) == 1
+    assert analyst.send_message(conn, qid, text, send=lambda t: calls.append(t) or True) == (
+        False, "пустое сообщение")
+    assert calls == [] and len(db.pending_analysis(conn)) == 1
 
 
 def test_send_for_a_row_that_is_not_pending_sends_nothing(conn):
     qid = db.enqueue_question(conn, "?")
     db.mark_analysis_processed(conn, qid)
-    _write_message()
     calls = []
     for row in (qid, 999):
-        sent, why = analyst.send_message(conn, row, send=lambda t: calls.append(t) or True)
+        sent, why = analyst.send_message(conn, row, MESSAGE, send=lambda t: calls.append(t) or True)
         assert sent is False and str(row) in why
-    assert calls == [] and analyst.MESSAGE_FILE.exists()
+    assert calls == []
+
+
+def test_a_row_that_cannot_be_marked_after_a_confirmed_send_is_reported_not_hidden(conn, monkeypatch):
+    qid = db.enqueue_question(conn, "?")
+
+    def locked(c, row):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(analyst.db, "mark_analysis_processed", locked)
+    sent, note = analyst.send_message(conn, qid, MESSAGE, send=lambda t: True)
+    assert sent is True and "RuntimeError" in note and str(qid) in note
 
 
 def test_send_uses_telegram_notify_by_default(conn, monkeypatch):
     qid = db.enqueue_question(conn, "?")
-    text = _write_message()
     seen = []
     monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: seen.append(t) or True)
-    assert analyst.send_message(conn, qid) == (True, None) and seen == [text]
+    assert analyst.send_message(conn, qid, MESSAGE) == (True, None) and seen == [MESSAGE]
 
 
-def test_cli_send_prints_sent_true_and_marks_the_row(cli, conn, monkeypatch, capsys):
+def test_cli_send_takes_the_message_as_the_argument(cli, conn, monkeypatch, capsys):
     qid = db.enqueue_question(conn, "?")
-    _write_message()
-    monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: True)
-    assert cli("send", str(qid)) == 0
+    seen = []
+    monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: seen.append(t) or True)
+    assert cli("send", str(qid), MESSAGE) == 0
     assert capsys.readouterr().out.strip() == "sent: True"
-    assert db.pending_analysis(conn) == []
+    assert seen == [MESSAGE] and db.pending_analysis(conn) == []
 
 
-def test_cli_send_prints_sent_false_with_a_reason_and_exits_1(cli, conn, capsys):
+def test_cli_send_joins_a_message_that_arrives_as_several_arguments_and_may_start_with_a_dash(
+        cli, conn, monkeypatch):
     qid = db.enqueue_question(conn, "?")
-    assert cli("send", str(qid)) == 1                       # nothing was written
-    out = capsys.readouterr().out.splitlines()
-    assert out[0] == "sent: False" and "нет файла" in out[1]
+    seen = []
+    monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: seen.append(t) or True)
+    assert cli("send", str(qid), "-5%", "за", "день") == 0
+    assert seen == ["-5% за день"]
+    qid = db.enqueue_question(conn, "?")
+    assert cli("send", str(qid), "--", "--x") == 0 and seen[-1] == "--x"
+
+
+def test_cli_send_prints_sent_false_with_a_reason_and_exits_1(cli, conn, monkeypatch, capsys):
+    qid = db.enqueue_question(conn, "?")
+    monkeypatch.setattr(analyst.telegram_notify, "send_text", lambda t: False)
+    assert cli("send", str(qid), MESSAGE) == 1
+    assert capsys.readouterr().out.strip() == "sent: False (Telegram не принял сообщение)"
     assert len(db.pending_analysis(conn)) == 1
+
+
+def test_cli_send_without_text_is_sent_false_not_a_usage_error(cli, conn, capsys):
+    qid = db.enqueue_question(conn, "?")
+    assert cli("send", str(qid)) == 1
+    assert capsys.readouterr().out.strip() == "sent: False (пустое сообщение)"
+    assert cli("send", str(qid), "  ") == 1
+
+
+def test_cli_send_needs_a_row_number(cli, capsys):
+    assert cli("send") == 2 and cli("send", "abc", "text") == 2
+    assert "номер строки" in capsys.readouterr().err
+
+
+def test_cli_send_never_shows_a_traceback(cli, conn, monkeypatch, capsys):
+    qid = db.enqueue_question(conn, "?")
+
+    def boom(*a, **k):
+        raise RuntimeError("bot123456:SECRET-token")
+
+    monkeypatch.setattr(analyst, "send_message", boom)
+    assert cli("send", str(qid), MESSAGE) == 1
+    out = capsys.readouterr()
+    assert out.out.strip() == "sent: False (RuntimeError)" and "SECRET" not in out.out + out.err
+
+
+def test_cli_send_with_an_unreachable_database_is_sent_false_too(monkeypatch, capsys):
+    def boom(path):
+        raise RuntimeError("unable to open database file")
+
+    monkeypatch.setattr(analyst.db, "connect", boom)
+    assert analyst.main(["send", "1", MESSAGE]) == 1
+    assert capsys.readouterr().out.strip() == "sent: False (RuntimeError)"
 
 
 # ------------------------------------------------------------------ .env
@@ -1000,7 +1056,9 @@ def test_context_asks_for_the_signals_of_that_ticker_only(conn, dossier, monkeyp
     analyst.context(conn, "BTC")
     assert seen["tickers"] == {"BTC", "CRYPTO:BTC"}
     analyst.context(conn, "eqnr.ol")
-    assert seen["tickers"] == {"EQNR.OL", "CRYPTO:EQNR.OL"}
+    assert seen["tickers"] == {"EQNR.OL", "EQNR"}           # the bare name of the source NORWAY
+    analyst.context(conn, "SAP.DE")
+    assert seen["tickers"] == {"SAP.DE"}                    # no coin has a dot, no venue source
     analyst.context(conn, "CRYPTO:SOL")
     assert seen["tickers"] == {"CRYPTO:SOL"}
 
@@ -1108,3 +1166,131 @@ def test_a_failure_in_the_extra_lines_is_named_not_fatal(conn, dossier, monkeypa
     monkeypatch.setattr(model, "default_news", boom)
     out = analyst.context(conn, "NVDA", scored=[])
     assert "импульс и новости недоступны: RuntimeError" in out and "БРИФ NVDA" in out
+
+
+# ------------------------------------------------------------------ SIGTERM takes Claude down too
+def _wait_for_pids(pidfile: pathlib.Path, count: int = 2, seconds: float = 20.0) -> list[int]:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            pids = [int(p) for p in pidfile.read_text().split()]
+        except (OSError, ValueError):
+            pids = []
+        if len(pids) == count:
+            return pids
+        time.sleep(0.05)
+    raise AssertionError(f"{pidfile} never got {count} pids")
+
+
+def test_a_sigterm_to_the_analyst_takes_claude_and_its_children_down_and_exits_143(tmp_path):
+    """The real thing, in a process of its own: an analyst waiting on a stand-in for Claude (which
+    has a child of its own) is sent SIGTERM."""
+    pidfile = tmp_path / "pids"
+    stand_in = ("import os, subprocess, sys, time\n"
+                "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                f"open({str(pidfile)!r}, 'w').write(f'{{os.getpid()}} {{kid.pid}}')\n"
+                "time.sleep(60)\n")
+    runner = ("import sys\n"
+              f"sys.path.insert(0, {str(ROOT)!r})\n"
+              "import analyst\n"
+              f"analyst._run_group([sys.executable, '-c', {stand_in!r}], timeout=60)\n")
+    analyst_proc = subprocess.Popen([sys.executable, "-c", runner])
+    try:
+        claude_pid, kid_pid = _wait_for_pids(pidfile)
+        analyst_proc.send_signal(signal.SIGTERM)
+        assert analyst_proc.wait(timeout=30) == 143
+    finally:
+        if analyst_proc.poll() is None:
+            analyst_proc.kill()
+    assert _gone_soon(claude_pid) and _gone_soon(kid_pid)
+
+
+def test_a_sigterm_in_process_ends_in_143_and_puts_the_old_handler_back(tmp_path):
+    caught = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: caught.append(signum))
+    sentinel = signal.getsignal(signal.SIGTERM)
+    pidfile = tmp_path / "pid"
+    script = (f"import os; open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+              "import time; time.sleep(60)\n")
+    try:
+        timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGTERM))
+        timer.start()
+        with pytest.raises(SystemExit) as stop:
+            analyst._run_group([sys.executable, "-c", script], timeout=60)
+        assert stop.value.code == analyst.TERMINATED_EXIT == 143
+        assert signal.getsignal(signal.SIGTERM) is sentinel and caught == []
+        assert _gone_soon(int(pidfile.read_text()))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_the_sigterm_handler_is_put_back_after_every_way_a_run_can_end():
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: None)
+    sentinel = signal.getsignal(signal.SIGTERM)
+    try:
+        analyst._run_group([sys.executable, "-c", "pass"], timeout=30)
+        assert signal.getsignal(signal.SIGTERM) is sentinel
+        with pytest.raises(subprocess.TimeoutExpired):
+            analyst._run_group([sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.5)
+        assert signal.getsignal(signal.SIGTERM) is sentinel
+        with pytest.raises(FileNotFoundError):
+            analyst._run_group(["/no/such/claude"], timeout=5)
+        assert signal.getsignal(signal.SIGTERM) is sentinel
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_run_group_works_off_the_main_thread_without_touching_signals():
+    result = []
+    thread = threading.Thread(target=lambda: result.append(
+        analyst._run_group([sys.executable, "-c", "print('ok')"], capture_output=True, text=True,
+                           timeout=30)))
+    thread.start()
+    thread.join(30)
+    assert result and result[0].stdout.strip() == "ok"
+
+
+def test_a_stopped_analyst_releases_the_lock_and_leaves_the_rows_queued(conn):
+    db.enqueue_analysis(conn, "AAPL")
+
+    def run(*a, **k):
+        raise SystemExit(143)
+
+    with pytest.raises(SystemExit) as stop:
+        analyst.process_queue(conn, run=run)
+    assert stop.value.code == 143 and len(db.pending_analysis(conn)) == 1
+    with open(analyst.LOCK_FILE, "a+") as after:
+        fcntl.flock(after, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+# ------------------------------------------------------------------ EQNR.OL is the bare EQNR of NORWAY
+def test_a_venue_suffix_finds_the_bare_signal_of_that_source_only(conn, dossier):
+    norway, us = _stock("EQNR", 66.0, source="NORWAY"), _stock("EQNR", 40.0, source="SEC")
+    out = analyst.context(conn, "EQNR.OL", scored=[us, norway])
+    assert "МОДЕЛЬ: балл 66" in out
+    assert "МОДЕЛЬ: свежего сигнала" in analyst.context(conn, "EQNR.OL", scored=[us])
+    swedish = _stock("VOLV-B", 61.0, source="SWEDEN")
+    assert "МОДЕЛЬ: балл 61" in analyst.context(conn, "VOLV-B.ST", scored=[swedish])
+    assert "МОДЕЛЬ: свежего сигнала" in analyst.context(conn, "VOLV-B.OL", scored=[swedish])
+    assert "МОДЕЛЬ: балл 40" in analyst.context(conn, "EQNR", scored=[us])       # a bare key: any source
+    assert "МОДЕЛЬ: балл 66" in analyst.context(conn, "EQNR.OL", scored=[norway, us])
+
+
+def test_a_venue_suffix_finds_the_positions_of_that_source_only(conn, dossier):
+    model.create_books(conn, dt.date(2026, 9, 1))
+    _paper_position(conn, S, "EQNR", source="NORWAY", fill="2026-09-25")
+    _paper_position(conn, S, "EQNR", source="SEC", fill="2026-09-26")
+    for source, day in (("NORWAY", "2026-09-27"), ("SEC", "2026-09-28")):
+        conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, "
+                     "stop_pct) VALUES ('EQNR', ?, ?, 100.0, '[]', 0.15)", (source, day))
+    conn.commit()
+    out = analyst.context(conn, "EQNR.OL", scored=[])
+    assert "с 2026-09-25" in out and "с 2026-09-26" not in out
+    assert "с 2026-09-27" in out and "с 2026-09-28" not in out
+    assert "с 2026-09-26" in analyst.context(conn, "$EQNR", scored=[])
+
+
+def test_the_signals_of_a_venue_key_are_asked_for_by_the_bare_name(conn, dossier, monkeypatch):
+    seen = _stub_scoring(monkeypatch, [_stock("EQNR", 66.0, source="NORWAY")])
+    assert "МОДЕЛЬ: балл 66" in analyst.context(conn, "EQNR.OL")
+    assert seen["tickers"] == {"EQNR.OL", "EQNR"}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 
 import requests
 
@@ -21,6 +22,15 @@ import datefmt
 
 API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_LEN = 3500  # stay under Telegram's 4096-char limit with room to spare
+_TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+
+
+def _redact(text: str, token: str | None) -> str:
+    """`text` without the bot token. requests puts the whole URL, token included, into its error
+    messages, and what send_text prints lands in logs and in a headless Claude's transcript."""
+    if token:
+        text = text.replace(token, "<token>")
+    return _TOKEN_IN_URL.sub("bot<token>", text)
 
 
 def _esc(text) -> str:
@@ -98,7 +108,7 @@ def send_text(text: str) -> bool:
             )
             resp.raise_for_status()
         except requests.RequestException as e:
-            print(f"[telegram] send failed: {e}")
+            print(f"[telegram] send failed: {_redact(str(e), token)}")
             ok = False
     return ok
 

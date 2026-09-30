@@ -358,3 +358,64 @@ def test_caution_close_alert_reads_as_such():
                                  "подтверждает: -6.2% за 7 дн., ниже 20-дн. средней", 79_900.0)
     text = telegram_notify.format_close_alert(alert, html=False)
     assert "CRYPTO:BTC — сигнал осторожности" in text and "отток из спот-ETF" in text
+
+
+# ---------------------------------------------------------------- send_text never shows the token
+TOKEN = "123456789:AAH-fake_TOKEN-value_xyz"
+
+
+def _send_with(monkeypatch, capsys, error):
+    """send_text with a fake token and a requests.post that fails with `error`; returns
+    (what it returned, everything it printed)."""
+    import requests
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+
+    def post(url, **kwargs):
+        assert TOKEN in url                     # the real call does carry it in the URL
+        raise error
+
+    monkeypatch.setattr(requests, "post", post)
+    result = telegram_notify.send_text("привет")
+    captured = capsys.readouterr()
+    return result, captured.out + captured.err
+
+
+def test_send_text_prints_no_token_when_the_connection_fails(monkeypatch, capsys):
+    import requests
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    error = requests.ConnectionError(
+        f"HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: "
+        f"/bot{TOKEN}/sendMessage (Caused by NameResolutionError)")
+    result, out = _send_with(monkeypatch, capsys, error)
+    assert result is False
+    assert TOKEN not in out and "AAH-fake" not in out and "123456789" not in out
+    assert "[telegram] send failed" in out and "bot<token>/sendMessage" in out
+    assert url not in out
+
+
+def test_send_text_prints_no_token_when_telegram_answers_with_an_error(monkeypatch, capsys):
+    import requests
+    error = requests.HTTPError(
+        f"400 Client Error: Bad Request for url: https://api.telegram.org/bot{TOKEN}/sendMessage")
+    result, out = _send_with(monkeypatch, capsys, error)
+    assert result is False
+    assert TOKEN not in out and "bot<token>/sendMessage" in out
+
+
+def test_send_text_redacts_a_token_the_url_pattern_would_not_know(monkeypatch, capsys):
+    import requests
+    odd = "not-a-usual-token"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", odd)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr(requests, "post", lambda url, **k: (_ for _ in ()).throw(
+        requests.ConnectionError(f"failed: {url}")))
+    assert telegram_notify.send_text("x") is False
+    out = capsys.readouterr().out
+    assert odd not in out and "<token>" in out
+
+
+def test_redact_leaves_other_text_alone():
+    assert telegram_notify._redact("timeout after 15 s", TOKEN) == "timeout after 15 s"
+    assert telegram_notify._redact("timeout", None) == "timeout"
+    assert telegram_notify._redact(f"a {TOKEN} b", TOKEN) == "a <token> b"
