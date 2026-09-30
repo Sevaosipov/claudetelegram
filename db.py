@@ -856,7 +856,8 @@ def mark_norway_id_seen(conn: sqlite3.Connection, message_id: int) -> None:
 
 
 def journal_signal(conn: sqlite3.Connection, row: dict) -> None:
-    """Append one signal to signal_journal, exactly as it was sent."""
+    """Append one signal to signal_journal, exactly as it was when the daily run
+    committed it (bot._journal) -- with the model's decision in `tier`."""
     cols = ("source", "kind", "ticker", "company", "buyer_count", "total_value_eur",
             "holder_only", "has_officer", "position_increase_pct", "first_buy",
             "lag_days", "market_cap_eur", "value_pct_of_mcap", "percent_of_class",

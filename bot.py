@@ -167,7 +167,7 @@ def collect_new_signals(conn, args) -> tuple[list, list]:
       - buy side: cluster, stake and crypto signals, bearish coin signals included
       - exits: people who bought together later selling together (--no-exit-signals skips)
     Nothing else is filtered: the model scores what matters (model.py) and the journal
-    keeps the rest for history. One line per signal goes to the log.
+    keeps the rest for history. _journal logs each signal, once it is enriched.
     """
     sources = _which_sources(args)
     buys = strategy.buy_side_signals(
@@ -182,8 +182,6 @@ def collect_new_signals(conn, args) -> tuple[list, list]:
                      "max_age_days": 30},
     )
     exits = [] if args.no_exit_signals else strategy.exit_signals(conn, sources=sources)
-    for sig in buys + exits:
-        print(telegram_notify.format_any_signal(sig))
     return buys, exits
 
 
@@ -232,11 +230,11 @@ def _commit_signals(conn, signals) -> None:
     """Record signals as alerted, so they don't re-fire until they actually grow --
     and journal them at the same moment.
 
-    Journalling belongs here rather than where signals are computed. A signal that
-    was computed but not sent (Telegram down, --no-telegram) still returns on the
-    next run, so recording it at computation time would enter the same signal into
-    the journal repeatedly and quietly inflate every backtest group. One row per
-    signal actually sent.
+    Journalling belongs here rather than where signals are computed: a signal that was
+    only computed still returns on the next run, so recording it at computation time would
+    enter the same signal into the journal repeatedly and quietly inflate every backtest
+    group. One row per signal, written when _journal commits it -- whether or not the
+    day's Telegram message goes out.
     """
     for s in signals:
         db.journal_signal(conn, _signal_features(s))
@@ -284,7 +282,8 @@ def _journal(conn, signals: list, report) -> None:
     The tier is the model's decision for that ticker today (buy / watch / block / skip),
     `caution` for a bearish coin signal (positions._crypto_caution reads it), or None when
     the model did not score it (a filtered run, a crash, an unlisted name). Exit signals
-    are committed too, with no tier.
+    are committed too, with no tier. Each signal is logged as it is committed, so the line
+    carries the market cap and score that enrichment found.
     """
     buys = [s for s in signals if not hasattr(s, "seller_count")]
     if buys:
@@ -294,6 +293,8 @@ def _journal(conn, signals: list, report) -> None:
             sig.tier = strategy.CAUTION
         else:
             sig.tier = report.decisions.get(sig.ticker) if report is not None else None
+    for sig in signals:
+        print(telegram_notify.format_any_signal(sig))
     _commit_signals(conn, signals)
 
 

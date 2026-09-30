@@ -241,6 +241,8 @@ def test_bought_with_no_quote_stores_the_price_and_notes_it(conn, replies):
 # time.
 
 def _norway_journal(conn, ticker):
+    """A row as the tiered design wrote it (tier "strong"); the model's own rows are covered
+    in test_bot_model.py."""
     import db
     db.journal_signal(conn, {"source": "NORWAY", "kind": "cluster", "ticker": ticker,
                              "tier": "strong", "members": "[]"})

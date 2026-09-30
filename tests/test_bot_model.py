@@ -99,6 +99,23 @@ def test_journal_with_only_exits_does_not_enrich_at_all(conn, recorded):
     assert recorded["committed"] == [exit_sig]
 
 
+def test_journal_logs_each_signal_after_it_is_enriched(conn, monkeypatch, capsys):
+    """The log line carries what enrichment found (the market cap), so it is printed
+    after enrich_signals, not when the finders return."""
+    def enrich(conn, signals):
+        for s in signals:
+            s.market_cap_eur = 5e9
+        return signals
+    monkeypatch.setattr(cluster, "enrich_signals", enrich)
+    monkeypatch.setattr(bot, "_commit_signals", lambda conn, signals: None)
+    sig, exit_sig = _cluster_sig(), _exit_sig()
+    assert "млрд" not in telegram_notify.format_any_signal(sig)        # not yet enriched
+    bot._journal(conn, [sig, exit_sig], _report({"AAA": "buy"}))
+    out = capsys.readouterr().out
+    assert telegram_notify.format_any_signal(sig) in out and "компания €5.0 млрд" in out
+    assert telegram_notify.format_any_signal(exit_sig) in out
+
+
 def test_journal_writes_the_decision_and_the_alert_state_for_real(conn, monkeypatch):
     monkeypatch.setattr(cluster, "enrich_signals", lambda conn, signals: signals)
     sig = _cluster_sig()
@@ -239,13 +256,11 @@ def test_collect_new_signals_respects_no_exit_signals(conn):
     assert exits == []
 
 
-def test_collect_new_signals_prints_each_signal(conn, capsys):
+def test_collect_new_signals_prints_nothing_itself(conn, capsys):
     for name in ("Director One", "Director Two"):
         add_sec_purchase(conn, "AAA", name, 200_000, RECENT, filed_date=RECENT)
     buys, _exits = bot.collect_new_signals(conn, _args())
-    out = capsys.readouterr().out
-    assert len(buys) == 1
-    assert telegram_notify.format_any_signal(buys[0]) in out
+    assert len(buys) == 1 and capsys.readouterr().out == ""
 
 
 def test_collect_new_signals_skips_what_was_already_committed(conn, monkeypatch):
@@ -354,5 +369,58 @@ def test_main_on_a_filtered_run_journals_but_skips_the_monthly_report(main_run):
 
 def test_main_records_the_successful_run(main_run, tmp_path):
     main_run("--no-telegram")
+    conn = db.connect(tmp_path / "data" / "d.db")
+    assert db.get_cached_value(conn, "last_successful_run", float("inf")) is not None
+
+
+# ---------------------------------------------------- /bought reads the journal back
+def _norway_sig(ticker="EQNR"):
+    return cluster.ClusterSignal(source="NORWAY", ticker=ticker, company="Equinor", buyer_count=2,
+                                 total_value=1e6, members=[], window_start=RECENT,
+                                 window_end=RECENT, member_names=["Ola Nordmann", "Kari Hansen"])
+
+
+@pytest.mark.parametrize("decision", ["buy", "watch", "block", "skip", None])
+def test_bought_finds_the_source_and_insiders_of_a_journaled_signal_whatever_its_decision(
+        conn, monkeypatch, decision):
+    """/bought EQNR must price the Oslo listing and watch for the insiders' sales -- with
+    the journal holding the model's decision in `tier` and no `strong` row ever written."""
+    monkeypatch.setattr(cluster, "enrich_signals", lambda conn, signals: signals)
+    bot._journal(conn, [_norway_sig()], _report({"EQNR": decision} if decision else {}))
+    assert positions.position_source(conn, "EQNR") == "NORWAY"
+    pos = positions.open_position(conn, "EQNR", 270.0)
+    assert pos.source == "NORWAY" and pos.insiders == ["Ola Nordmann", "Kari Hansen"]
+    assert pos.signal_id is not None
+
+
+def test_bought_ignores_a_later_exit_or_caution_row_for_the_same_ticker(conn, monkeypatch):
+    monkeypatch.setattr(cluster, "enrich_signals", lambda conn, signals: signals)
+    bot._journal(conn, [_norway_sig()], _report({"EQNR": "buy"}))
+    bot._journal(conn, [cluster.ExitSignal(source="SEC", ticker="EQNR", company="Equinor",
+                                           total_buyers=2, seller_count=2, lines=[],
+                                           seller_names=["A", "B"])], None)
+    db.journal_signal(conn, {"source": "SEC", "kind": "cluster", "ticker": "EQNR",
+                             "tier": "caution", "members": '["Somebody Else"]'})
+    assert positions.position_source(conn, "EQNR") == "NORWAY"
+    assert positions.open_position(conn, "EQNR", 270.0).insiders == ["Ola Nordmann", "Kari Hansen"]
+
+
+def test_bought_takes_the_latest_buy_side_row(conn, monkeypatch):
+    monkeypatch.setattr(cluster, "enrich_signals", lambda conn, signals: signals)
+    first = _norway_sig()
+    bot._journal(conn, [first], _report({"EQNR": "watch"}))
+    second = _norway_sig()
+    second.member_names = ["Late Buyer"]
+    bot._journal(conn, [second], _report({"EQNR": "buy"}))
+    assert positions.open_position(conn, "EQNR", 270.0).insiders == ["Late Buyer"]
+
+
+# ------------------------------------------------------- the monthly report is contained
+def test_a_failing_monthly_report_does_not_escape_main(main_run, monkeypatch, tmp_path, capsys):
+    def boom(conn, today):
+        raise RuntimeError("report")
+    monkeypatch.setattr(paper_report, "maybe_send_monthly_report", boom)
+    main_run()                                                    # no exception
+    assert "[PAPER_REPORT] pass failed: RuntimeError: report" in capsys.readouterr().err
     conn = db.connect(tmp_path / "data" / "d.db")
     assert db.get_cached_value(conn, "last_successful_run", float("inf")) is not None

@@ -14,6 +14,8 @@ TODAY = dt.date(2026, 9, 23)
 
 
 def _strong_journal(conn, ticker, members, source="SEC"):
+    """A row as the tiered design wrote it (tier "strong"): /bought still reads those rows;
+    the model's own rows are covered in test_bot_model.py."""
     db.journal_signal(conn, {"source": source, "kind": "cluster", "ticker": ticker,
                              "tier": "strong", "members": json.dumps(members)})
 

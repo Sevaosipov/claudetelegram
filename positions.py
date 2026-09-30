@@ -5,7 +5,7 @@ Only reported positions are tracked, at the user's own entry price -- the bot ne
 reads or trades the brokerage account. A close alert fires once per position, on the
 first of:
 
-  insider_sell  one of the insiders behind the "Сильный" signal it came from sells
+  insider_sell  one of the insiders behind the signal it came from sells
                 after the open date -- Form 4 (not a 10b5-1 planned sale), a Form 144
                 notice of intent, or a sale row from Oslo, FI or BaFin;
   caution       (coins) a caution signal on the coin -- ETF outflows, a company
@@ -88,10 +88,17 @@ def open_positions(conn) -> list[Position]:
         f"SELECT {_COLS} FROM positions WHERE closed_at IS NULL ORDER BY opened_at")]
 
 
+# A journal row that is a buy-side signal, whatever tier the model gave it that day (buy,
+# watch, block, skip, none, or the retired strong / candidate): everything but a caution
+# (a bearish coin signal) and a group exit. /bought reads the source and the insiders
+# from the latest such row.
+_BUY_SIDE_ROW = "COALESCE(tier, '') != 'caution' AND COALESCE(kind, '') != 'exit'"
+
+
 def position_source(conn, ticker: str) -> str | None:
     """The source to price `ticker` against: "CRYPTO" for a crypto ticker,
-    otherwise the source of the latest strong signal_journal row for it,
-    otherwise None.
+    otherwise the source of the latest buy-side signal_journal row for it
+    (see _BUY_SIDE_ROW), otherwise None.
 
     The one definition of this lookup -- open_position uses it to decide what to
     store, and telegram_bot's /bought needs the identical answer BEFORE storing,
@@ -102,7 +109,7 @@ def position_source(conn, ticker: str) -> str | None:
     if crypto.is_crypto(ticker):
         return "CRYPTO"
     row = conn.execute(
-        "SELECT source FROM signal_journal WHERE ticker = ? AND tier = 'strong' "
+        f"SELECT source FROM signal_journal WHERE ticker = ? AND {_BUY_SIDE_ROW} "
         "ORDER BY emitted_at DESC, id DESC LIMIT 1", (ticker,)).fetchone()
     return row[0] if row else None
 
@@ -116,7 +123,7 @@ def open_position(conn, ticker: str, entry_price: float, today: dt.date | None =
     if any(p.ticker == ticker for p in open_positions(conn)):
         raise ValueError(f"position in {ticker} is already open")
     sig = conn.execute(
-        "SELECT id, members FROM signal_journal WHERE ticker = ? AND tier = 'strong' "
+        f"SELECT id, members FROM signal_journal WHERE ticker = ? AND {_BUY_SIDE_ROW} "
         "ORDER BY emitted_at DESC, id DESC LIMIT 1", (ticker,)).fetchone()
     signal_id, members = sig if sig else (None, "[]")
     conn.execute(
