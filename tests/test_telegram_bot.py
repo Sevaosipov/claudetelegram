@@ -39,11 +39,13 @@ def _offline_lookup(monkeypatch):
 
 @pytest.fixture
 def analysis(monkeypatch):
-    """Stubs the shared runner: records its labels; `.ok` is what it returns (True by default)."""
-    state = SimpleNamespace(labels=[], ok=True)
+    """Stubs the shared runner: records its labels and queue ids; `.ok` is what it returns
+    (True by default: the row was answered)."""
+    state = SimpleNamespace(labels=[], ids=[], ok=True)
 
-    def run(label):
+    def run(conn, queue_id, label):
         state.labels.append(label)
+        state.ids.append(queue_id)
         return state.ok
     monkeypatch.setattr(tb, "_run_analysis", run)
     return state
@@ -113,6 +115,22 @@ def test_a_ticker_runs_labelled_with_its_key(conn, analysis):
     assert analysis.labels == ["$AAPL"]
 
 
+def test_a_ticker_run_checks_the_row_it_queued_even_an_existing_one(conn, analysis, sent):
+    import db
+    analysis.ok = True
+    tb._handle_message(conn, "aapl")
+    tb._handle_message(conn, "AAPL")                          # still pending: the same row
+    [(qid, _t)] = db.pending_analysis(conn)
+    assert analysis.ids == [qid, qid]
+
+
+def test_a_question_run_checks_its_own_row(conn, analysis, sent):
+    import db
+    tb._handle_message(conn, "как рынок?")
+    [(qid, _t)] = db.pending_analysis(conn)
+    assert analysis.ids == [qid]
+
+
 def test_get_updates_treats_a_read_timeout_as_an_empty_poll():
     """A long poll outliving its timeout (e.g. waking from sleep) loses nothing, so it
     must not surface as an error -- that used to trigger up to 5 minutes of backoff."""
@@ -122,6 +140,20 @@ def test_get_updates_treats_a_read_timeout_as_an_empty_poll():
         def get(self, *a, **k):
             raise requests.ReadTimeout("read timed out")
     assert tb._get_updates("tok", None, Session()) == []
+
+
+def test_only_new_messages_are_handled_not_edits(conn, monkeypatch):
+    """Editing a sent message must not queue (and run) the analyst a second time."""
+    import db
+    handled = []
+    updates = [{"update_id": 7, "edited_message": {"chat": {"id": 5}, "text": "что с NVDA?"}},
+               {"update_id": 8, "message": {"chat": {"id": 5}, "text": "AAPL"}},
+               {"update_id": 9, "channel_post": {"chat": {"id": 5}, "text": "x"}}]
+    monkeypatch.setattr(tb, "_get_updates", lambda token, offset, session: updates)
+    monkeypatch.setattr(tb, "_handle_message", lambda c, text: handled.append(text))
+    tb._poll_once(conn, "tok", "5", session=None)
+    assert handled == ["AAPL"]
+    assert db.get_cached_value(conn, tb.STATE_OFFSET, tb.PERSIST_SECONDS) == 10
 
 
 def test_get_updates_still_raises_on_connection_errors():
@@ -555,14 +587,46 @@ def test_the_run_timeout_is_420_seconds():
     assert tb.RUN_ANALYSIS_TIMEOUT == 420
 
 
-def test_the_runner_returns_true_on_exit_zero_and_false_otherwise(monkeypatch, tmp_path):
+@pytest.fixture
+def row(conn):
+    """A queued question: (conn, its id)."""
+    import db
+    return conn, db.enqueue_question(conn, "?")
+
+
+def test_the_runner_succeeds_only_when_its_row_was_answered(monkeypatch, tmp_path, row):
+    """An exit 0 is not an answer (the pass may never have reached the row); a failed pass may
+    still have answered it (another row failed) -- then no fallback may follow."""
+    import db
+    conn, qid = row
     _real_runner(monkeypatch, _script(tmp_path, "exit 0\n"))
-    assert tb._run_analysis("t") is True
+    assert tb._run_analysis(conn, qid, "t") is False
     _real_runner(monkeypatch, _script(tmp_path, "echo boom >&2; exit 3\n", "bad.sh"))
-    assert tb._run_analysis("t") is False
+    assert tb._run_analysis(conn, qid, "t") is False
+    db.mark_analysis_processed(conn, qid)
+    assert tb._run_analysis(conn, qid, "t") is True
+    _real_runner(monkeypatch, _script(tmp_path, "exit 0\n", "ok.sh"))
+    assert tb._run_analysis(conn, qid, "t") is True
 
 
-def test_the_runner_runs_the_script_from_the_project_in_a_session_of_its_own(monkeypatch):
+def test_the_runner_sees_the_row_the_analyst_marked(monkeypatch, tmp_path):
+    """The analyst marks the row from a process of its own, on the same database file."""
+    import db
+    path = tmp_path / "queue.db"
+    conn = db.connect(path)
+    qid = db.enqueue_question(conn, "?")
+    marker = tmp_path / "mark.py"
+    marker.write_text("import sqlite3, sys\n"
+                      "c = sqlite3.connect(sys.argv[1])\n"
+                      "c.execute(\"UPDATE claude_analysis_queue SET processed_at = datetime('now') "
+                      "WHERE id = ?\", (int(sys.argv[2]),))\n"
+                      "c.commit()\n")
+    _real_runner(monkeypatch, _script(tmp_path, f"{sys.executable} {marker} {path} {qid}\n"))
+    assert tb._run_analysis(conn, qid, "t") is True
+
+
+def test_the_runner_runs_the_script_from_the_project_in_a_session_of_its_own(monkeypatch, row):
+    import db
     calls = []
 
     class Proc:
@@ -573,21 +637,24 @@ def test_the_runner_runs_the_script_from_the_project_in_a_session_of_its_own(mon
             return "", ""
 
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: calls.append((argv, kw)) or Proc())
-    assert tb._run_analysis("question 5") is True
+    conn, qid = row
+    db.mark_analysis_processed(conn, qid)
+    assert tb._run_analysis(conn, qid, "question 5") is True
     (argv, kw), (name, timeout) = calls
     assert argv == [str(tb.RUN_ANALYSIS_SCRIPT)] and kw["cwd"] == str(tb.BASE_DIR)
     assert kw["start_new_session"] is True and kw["text"] is True
+    assert kw["errors"] == "replace"                       # a stray byte in a log line is no crash
     assert kw["stdout"] == subprocess.PIPE and kw["stderr"] == subprocess.PIPE
     assert kw["stdin"] == subprocess.DEVNULL              # Claude never waits on a terminal
     assert timeout == tb.RUN_ANALYSIS_TIMEOUT
 
 
-def test_the_runner_survives_a_script_that_cannot_start(monkeypatch, tmp_path):
+def test_the_runner_survives_a_script_that_cannot_start(monkeypatch, tmp_path, row):
     _real_runner(monkeypatch, tmp_path / "missing.sh")
-    assert tb._run_analysis("t") is False
+    assert tb._run_analysis(*row, "t") is False
 
 
-def test_a_timeout_sends_sigterm_to_the_group_first(monkeypatch):
+def test_a_timeout_sends_sigterm_to_the_group_first(monkeypatch, row):
     signals, waits = [], []
 
     class Proc:
@@ -602,12 +669,12 @@ def test_a_timeout_sends_sigterm_to_the_group_first(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: Proc())
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append((pgid, sig)))
-    assert tb._run_analysis("t") is False
+    assert tb._run_analysis(*row, "t") is False
     assert signals == [(4242, signal.SIGTERM)]                 # the analyst was given time to clean up
     assert waits[0] == tb.RUN_ANALYSIS_TIMEOUT and waits[1] == tb.RUN_ANALYSIS_KILL_GRACE
 
 
-def test_a_group_that_ignores_sigterm_is_killed_after_the_grace(monkeypatch):
+def test_a_group_that_ignores_sigterm_is_killed_after_the_grace(monkeypatch, row):
     signals = []
 
     class Proc:
@@ -622,12 +689,47 @@ def test_a_group_that_ignores_sigterm_is_killed_after_the_grace(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: Proc())
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append(sig))
-    assert tb._run_analysis("t") is False
+    assert tb._run_analysis(*row, "t") is False
     assert signals == [signal.SIGTERM, signal.SIGKILL]
     assert tb.RUN_ANALYSIS_KILL_GRACE == 15
 
 
-def test_a_real_timeout_stops_the_whole_group_with_sigterm(monkeypatch, tmp_path):
+def test_a_run_that_already_exited_is_not_signalled(monkeypatch, row):
+    """Its process group id may already belong to somebody else."""
+    signals = []
+
+    class Proc:
+        pid, returncode = 4242, 0
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append(sig))
+    with pytest.raises(KeyboardInterrupt):
+        tb._run_analysis(*row, "t")
+    assert signals == []
+    proc = Proc()
+    tb._stop_group(proc)
+    assert signals == []
+
+
+def test_the_group_stops_being_signalled_once_the_run_has_exited(monkeypatch):
+    signals = []
+
+    class Proc:
+        pid, returncode = 4242, None
+
+        def communicate(self, timeout=None):
+            self.returncode = -15                    # SIGTERM ended it, and the pipes stay open
+            raise subprocess.TimeoutExpired("run.sh", timeout)
+
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append(sig))
+    tb._stop_group(Proc())
+    assert signals == [signal.SIGTERM]
+
+
+def test_a_real_timeout_stops_the_whole_group_with_sigterm(monkeypatch, tmp_path, row):
     """The script starts a background child and traps SIGTERM: the group gets SIGTERM (the
     marker), the child dies with it, and the runner is back well inside the grace."""
     marker, child = tmp_path / "term", tmp_path / "child.pid"
@@ -640,13 +742,13 @@ wait
 """)
     _real_runner(monkeypatch, script, timeout=1)
     started = time.monotonic()
-    assert tb._run_analysis("t") is False
+    assert tb._run_analysis(*row, "t") is False
     assert time.monotonic() - started < 10
     assert marker.read_text().strip() == "term"
     assert _gone(int(child.read_text()))
 
 
-def test_a_real_group_that_ignores_sigterm_is_killed(monkeypatch, tmp_path):
+def test_a_real_group_that_ignores_sigterm_is_killed(monkeypatch, tmp_path, row):
     child = tmp_path / "child.pid"
     script = _script(tmp_path, f"""
 trap '' TERM
@@ -655,11 +757,11 @@ echo $! > {child}
 while true; do sleep 1; done
 """)
     _real_runner(monkeypatch, script, timeout=1, grace=1)
-    assert tb._run_analysis("t") is False
+    assert tb._run_analysis(*row, "t") is False
     assert _gone(int(child.read_text()))
 
 
-def test_a_real_run_does_not_wait_for_a_grandchild_that_keeps_the_pipes(monkeypatch, tmp_path):
+def test_a_real_run_does_not_wait_for_a_grandchild_that_keeps_the_pipes(monkeypatch, tmp_path, row):
     """Claude runs in a session of its own and can hold the bot's pipes after the group is
     gone: the runner must still come back."""
     grandchild = tmp_path / "grandchild.pid"
@@ -671,7 +773,7 @@ while true; do sleep 1; done
     _real_runner(monkeypatch, script, timeout=1, grace=1, reap=1)
     try:
         started = time.monotonic()
-        assert tb._run_analysis("t") is False
+        assert tb._run_analysis(*row, "t") is False
         assert time.monotonic() - started < 10
     finally:
         try:

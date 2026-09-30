@@ -11,18 +11,20 @@ instead of an instant reply). So a ticker lookup now enqueues
 (db.enqueue_analysis) and synchronously runs run_claude_analysis.sh right
 away rather than waiting for its next scheduled fire -- that script (analyst.py process-queue)
 is the one thing that actually reads news and the chart and reasons (see its own header for why:
-no live-Claude hook exists inside this process). If that run fails or times
-out, falls back to sending the fast opinion.py-only reply so the user isn't
-left with total silence, and the queued row stays pending for the next
-scheduled or triggered run to retry.
+no live-Claude hook exists inside this process); analyst.py sends the answer itself. If that
+row is still unanswered when the run ends (it failed, timed out, or never reached the row),
+falls back to sending the fast opinion.py-only reply so the user isn't left with total
+silence, and the queued row stays pending for the next scheduled or triggered run to retry.
 
 Any other text -- several words, or one word that is not an asset -- and /ask TEXT is a
 question for the analyst: it is queued (db.enqueue_question, at most 2000 characters), the same
-run answers it, and the analyst sends the answer itself. If the run fails or times out, the
-user is told the question stays queued. /portfolio sends the model portfolio's summary
+run answers it, and the analyst sends the answer itself. If it is still unanswered after the
+run, the user is told the question stays queued. /portfolio sends the model portfolio's summary
 (paper_report.format_summary) at once, without Claude. A ticker lookup and a question share one
 runner, _run_analysis: a process group of its own, RUN_ANALYSIS_TIMEOUT seconds, SIGTERM first
-(analyst.py stops its Claude on it) and SIGKILL after a grace period.
+(analyst.py stops its Claude on it) and SIGKILL after a grace period; it succeeds when the row
+it was run for is marked processed, whatever the run's exit code (the pass also covers other
+rows). Only new messages are handled: an edited message is not a second request.
 
 /backtest TICKER answers a different question: how did this ticker trade
 after its OWN past SEC insider purchases (backtest.backtest_ticker(), a
@@ -245,9 +247,12 @@ def _stop_group(proc: subprocess.Popen) -> None:
     """A run that outlived its timeout: SIGTERM to its process group (analyst.py stops its own
     Claude on it, which lives in a session of its own), SIGKILL to the group when it is still
     there after RUN_ANALYSIS_KILL_GRACE seconds. Never blocks for good: a grandchild that
-    escaped the group may hold the pipes."""
+    escaped the group may hold the pipes. A run that has already exited is not signalled: its
+    group id may belong to somebody else by now."""
     steps = ((signal.SIGTERM, RUN_ANALYSIS_KILL_GRACE), (signal.SIGKILL, RUN_ANALYSIS_REAP_WAIT))
     for sig, wait in steps:
+        if proc.returncode is not None:
+            return
         try:
             os.killpg(proc.pid, sig)
         except (ProcessLookupError, PermissionError):
@@ -259,21 +264,39 @@ def _stop_group(proc: subprocess.Popen) -> None:
             continue
 
 
-def _run_analysis(label: str) -> bool:
-    """Runs run_claude_analysis.sh (the whole queue) and waits for it. True when it exited 0,
-    False on a failure or a timeout -- the caller falls back or says the row stays queued."""
+def _run_analysis(conn, queue_id: int, label: str) -> bool:
+    """Runs run_claude_analysis.sh (the whole queue) and waits for it. True when queue row
+    `queue_id` -- the one this request queued -- has been answered (marked processed) by the
+    time it is over; False when it is still pending: the run failed, timed out or never got to
+    it. The caller then falls back or says the row stays queued. The exit code alone decides
+    nothing: 0 may mean the pass never reached the row, and a failure may be another row's."""
+    _run_script(label)
+    try:
+        answered = db.analysis_processed(conn, queue_id)
+    except Exception as e:
+        print(f"[telegram_bot] could not read queue row {queue_id}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return False
+    if not answered:
+        print(f"[telegram_bot] {label}: queue row {queue_id} still pending after the run",
+              file=sys.stderr)
+    return answered
+
+
+def _run_script(label: str) -> bool:
+    """One run of run_claude_analysis.sh in a process group of its own, waited for at most
+    RUN_ANALYSIS_TIMEOUT seconds. True when it exited 0 (logged either way)."""
     proc = None
     try:
         proc = subprocess.Popen([str(RUN_ANALYSIS_SCRIPT)], cwd=str(BASE_DIR),
                                 start_new_session=True, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                errors="replace")
         try:
             _, err = proc.communicate(timeout=RUN_ANALYSIS_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            _stop_group(proc)
-            raise
-        except BaseException:
-            _stop_group(proc)                       # an interrupt must not leave Claude running
+        except BaseException:                       # a timeout, or an interrupt: no Claude left running
+            if proc.returncode is None:
+                _stop_group(proc)
             raise
         if proc.returncode != 0:
             raise RuntimeError(f"exit {proc.returncode}: {(err or '')[-2000:]}")
@@ -294,12 +317,12 @@ def _run_analysis(label: str) -> bool:
 
 def _handle_ask(conn, text: str) -> None:
     """A question for the analyst: queued, answered by the same run that answers tickers. The
-    analyst sends the answer itself (and marks the row processed), so on success this sends
-    nothing more."""
+    analyst sends the answer itself (and marks the row processed), so when the row is answered
+    this sends nothing more."""
     qid = db.enqueue_question(conn, text[:QUESTION_MAX_CHARS])
     print(f"[telegram_bot] queued question {qid}, running claude-analysis synchronously")
     telegram_notify.send_text(THINKING)
-    if not _run_analysis(f"question {qid}"):
+    if not _run_analysis(conn, qid, f"question {qid}"):
         telegram_notify.send_text(QUESTION_LATER)
 
 
@@ -312,14 +335,13 @@ def _handle_ticker(conn, asset) -> None:
                                   "(или источники цен сейчас не отвечают). " + LOOKUP_HINT)
         return
     ticker = asset.key
-    db.enqueue_analysis(conn, ticker)
+    queue_id = db.enqueue_analysis(conn, ticker)
     print(f"[telegram_bot] queued {ticker}, running claude-analysis synchronously")
-    if _run_analysis(ticker):
+    if _run_analysis(conn, queue_id, ticker):
         return
     # Fall back to the fast deterministic-only reply so the user isn't left with total
-    # silence -- the queued row stays pending either way (only marked processed on a
-    # confirmed send inside analyst.py), so the next scheduled or triggered run will still
-    # pick it up.
+    # silence -- the queued row stays pending (only marked processed on a confirmed send
+    # inside analyst.py), so the next scheduled or triggered run will still pick it up.
     try:
         rep = research.build(conn, ticker)
         telegram_notify.send_text(
@@ -382,7 +404,7 @@ def _poll_once(conn, token: str, chat_id: str, session: requests.Session) -> Non
     updates = _get_updates(token, offset, session)
     for u in updates:
         db.save_cached_value(conn, STATE_OFFSET, float(u["update_id"] + 1))
-        msg = u.get("message") or u.get("edited_message")
+        msg = u.get("message")          # not an edited_message: an edit is not a new request
         if not msg:
             continue
         from_chat = str(msg.get("chat", {}).get("id", ""))
