@@ -157,8 +157,9 @@ def _position_ticker(arg: str) -> str | None:
     without this, /bought BTC would open a position in "BTC" the literal string,
     which positions.last_close would then price as the Grayscale Bitcoin Mini
     Trust ETF instead of the coin. An Oslo or Stockholm listing written the Yahoo
-    way (EQNR.OL, VOLV-B.ST) passes as typed when its bare ticker is shaped like one
-    (VOLCAR-B.ST is longer than any other ticker here): _position_listing splits it."""
+    way (EQNR.OL, VOLV-B.ST) passes as typed when its bare ticker is shaped like one,
+    so ESSITY-B.ST is fine though it is longer than a ticker may be: _position_listing
+    splits it."""
     t = arg.strip().lstrip("$").upper()
     if t.startswith(crypto.PREFIX):
         sym = crypto.symbol_of(t)

@@ -689,12 +689,10 @@ def _own_positions(conn, today: dt.date) -> list[str]:
     """«ВАШИ ПОЗИЦИИ (/bought):» and, for each position the owner recorded, the facts /portfolio
     shows them in Telegram (as plain text); or why there is nothing to show."""
     try:
-        rows = positions.portfolio_rows(conn, today)
+        blocks = telegram_notify.my_position_blocks(positions.portfolio_rows(conn, today), html=False)
     except Exception as e:
         return [f"ВАШИ ПОЗИЦИИ (/bought): не посчитаны: {type(e).__name__}"]
-    if not rows:
-        return ["ВАШИ ПОЗИЦИИ (/bought): нет"]
-    return ["ВАШИ ПОЗИЦИИ (/bought):"] + telegram_notify.my_position_blocks(rows, html=False)
+    return ["ВАШИ ПОЗИЦИИ (/bought):"] + blocks if blocks else ["ВАШИ ПОЗИЦИИ (/bought): нет"]
 
 
 def portfolio(conn, *, scored=None) -> str:

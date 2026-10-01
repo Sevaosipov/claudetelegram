@@ -945,10 +945,13 @@ def test_portfolio_says_when_you_have_no_positions(conn):
     assert "НАБЛЮДЕНИЕ: нет" in out                                   # the model part is as before
 
 
-def test_portfolio_keeps_the_model_when_your_positions_cannot_be_read(conn, monkeypatch):
+@pytest.mark.parametrize("broken", [(positions, "portfolio_rows"),
+                                    (analyst.telegram_notify, "my_position_blocks")])
+def test_portfolio_keeps_the_model_when_your_positions_cannot_be_shown(conn, my_prices, monkeypatch, broken):
     def boom(*a, **k):
         raise RuntimeError("offline")
-    monkeypatch.setattr(positions, "portfolio_rows", boom)
+    _bought(conn, "GME")
+    monkeypatch.setattr(*broken, boom)
     out = analyst.portfolio(conn, scored=[])
     assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): не посчитаны: RuntimeError"
     assert "НАБЛЮДЕНИЕ: нет" in out and "ПОКУПКИ СЕГОДНЯ: нет" in out
