@@ -421,8 +421,9 @@ def main_run(monkeypatch, tmp_path):
         calls.append(("closes", cl))
         return True
 
-    def format_week(conn, today, rep, *, html=True):
+    def format_week(conn, today, rep, *, html=True, model_failed=False):
         calls.append(("week", today, rep))
+        run.week_kwargs.append({"model_failed": model_failed})
         if run.week_fails:
             raise RuntimeError("format")
         return "WEEK"
@@ -456,6 +457,7 @@ def main_run(monkeypatch, tmp_path):
     run.report, run.buy_sig, run.exit_sig, run.closes = report, buy_sig, exit_sig, closes
     run.caution_sig, run.cautions = caution_sig, False
     run.today, run.send_ok, run.model_crashes, run.week_fails = FRI, True, False, False
+    run.week_kwargs = []                                          # what format_week was asked for, per call
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 
@@ -553,22 +555,84 @@ def test_a_missed_friday_is_made_up_on_the_weekend_buys_and_message(main_run):
     assert ("model", True) in calls and ("send", "WEEK") in calls and ("monthly", SAT) in calls
 
 
+def _week_keys(main_run, like):
+    return main_run.db().execute("SELECT COUNT(*) FROM kv_cache WHERE key LIKE ?", (like,)).fetchone()[0]
+
+
 def test_a_crashed_model_pass_does_not_use_up_the_weeks_buys(main_run):
     main_run.model_crashes = True
     main_run()
-    assert main_run.db().execute("SELECT COUNT(*) FROM kv_cache WHERE key LIKE 'model_buys_%'"
-                                 ).fetchone() == (0,)
+    assert _week_keys(main_run, "model_buys_%") == 0
     main_run.model_crashes = False
     main_run.today = SAT
     calls = main_run()
     assert [c for c in calls if c[0] == "model"] == [("model", True), ("model", True)]
+    assert _week_keys(main_run, "model_buys_%") == 1
 
 
-def test_the_weekly_message_is_sent_even_when_the_model_crashed(main_run):
-    """The report is None then; format_week falls back to the scores the daily run kept."""
+def test_a_friday_with_a_crashed_model_sends_no_weekly_message_and_keeps_the_week_open(main_run):
+    """The message waits for the week's model pass (spec amendment): it would show no buys, and
+    the pass that buys next (Saturday) would not be in it."""
     main_run.model_crashes = True
     calls = main_run()
-    assert ("week", FRI, None) in calls and ("send", "WEEK") in calls
+    kinds = _kinds(calls)
+    assert "week" not in kinds and "send" not in kinds and "monthly" not in kinds
+    assert "closes" in kinds                                      # the close alerts do not wait
+    assert _week_keys(main_run, "model_buys_%") == 0 and _week_keys(main_run, "weekly_message_%") == 0
+    assert main_run.week_kwargs == []
+
+
+def test_saturday_with_a_good_pass_buys_and_sends_the_message_after_a_crashed_friday(main_run):
+    main_run.model_crashes = True
+    main_run()
+    main_run.model_crashes = False
+    main_run.today = SAT
+    calls = main_run()
+    assert ("model", True) in calls and ("send", "WEEK") in calls and ("monthly", SAT) in calls
+    assert main_run.week_kwargs == [{"model_failed": False}]       # no warning: the model did run
+    assert _week_keys(main_run, "model_buys_%") == 1 and _week_keys(main_run, "weekly_message_%") == 1
+
+
+def test_sunday_with_the_model_still_crashing_sends_the_message_with_the_warning(main_run):
+    main_run.model_crashes = True
+    for day in (FRI, SAT):
+        main_run.today = day
+        assert "send" not in _kinds(main_run())                   # nothing yet: no model pass this week
+    main_run.today = SUN
+    calls = main_run()
+    assert ("week", SUN, None) in calls and ("send", "WEEK") in calls
+    assert main_run.week_kwargs == [{"model_failed": True}]
+    assert _week_keys(main_run, "model_buys_%") == 0 and _week_keys(main_run, "weekly_message_%") == 1
+    assert ("monthly", SUN) in calls                               # the message went: its monthly follows
+    calls.clear()
+    main_run()                                                    # Sunday again: done for the week
+    assert "send" not in _kinds(calls)
+
+
+def test_sunday_with_a_good_pass_sends_the_message_without_the_warning(main_run):
+    main_run.model_crashes = True
+    for day in (FRI, SAT):
+        main_run.today = day
+        main_run()
+    main_run.model_crashes = False
+    main_run.today = SUN
+    calls = main_run()
+    assert ("model", True) in calls and ("send", "WEEK") in calls
+    assert main_run.week_kwargs == [{"model_failed": False}]
+
+
+def test_a_sunday_message_that_fails_to_send_is_not_marked(main_run):
+    main_run.model_crashes = True
+    main_run.send_ok = False
+    main_run.today = SUN
+    main_run()
+    assert main_run.week_kwargs == [{"model_failed": True}] and _week_keys(main_run, "weekly_message_%") == 0
+
+
+def test_a_run_before_sunday_with_no_pass_yet_says_so_in_the_log(main_run, capsys):
+    main_run.model_crashes = True
+    main_run()
+    assert "weekly message waits" in capsys.readouterr().out
 
 
 def test_a_filtered_run_never_buys_and_sends_no_weekly_message(main_run):

@@ -659,6 +659,21 @@ def test_a_week_with_trades_does_not_say_there_were_none(conn):
     assert "Сделок за неделю нет" not in _week(conn)
 
 
+WARNING = "⚠️ Модель на этой неделе не отработала — покупок не было."
+
+
+def test_a_week_the_model_failed_carries_a_warning_just_before_the_portfolio_line(conn):
+    _week_model(conn)
+    blocks = _week(conn, model_failed=True).split("\n\n")
+    assert blocks[-2] == WARNING and blocks[-1].startswith("Портфель: €107 100")
+    assert "<b>" not in WARNING and WARNING in paper_report.format_week(conn, FRI, None, model_failed=True)
+
+
+def test_a_normal_week_has_no_warning(conn):
+    _week_model(conn)
+    assert "⚠️" not in _week(conn) and "⚠️" not in _week(conn, model_failed=False)
+
+
 def test_the_sections_come_in_order(conn):
     _week_model(conn)
     _order(conn, S, "AAA")

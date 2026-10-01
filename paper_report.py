@@ -214,6 +214,7 @@ def format_book(conn, code: str) -> str:
 _WEEK_DAYS = 6              # the week is today - 6 days ... today
 _MAX_WATCH = 5
 _MAX_SELLERS = 5
+MODEL_FAILED_WARNING = "⚠️ Модель на этой неделе не отработала — покупок не было."
 _SCORE_PREFIX = re.compile(r"^балл \d+:\s*")      # an order's reason opens with its score, shown apart
 
 
@@ -315,12 +316,13 @@ def _week_return(conn, today: dt.date, value: float) -> float | None:
     return value / sum(before) - 1
 
 
-def format_week(conn, today: dt.date, report, *, html: bool = True) -> str:
+def format_week(conn, today: dt.date, report, *, html: bool = True, model_failed: bool = False) -> str:
     """The weekly Telegram message (spec 2026-10-01-weekly-model-message.md): what the model bought
     and sold in the week today-6 ... today, what it holds, what it is watching, the groups that
     started selling, and where the portfolio stands. Always a message, however quiet the week.
     `report` is model.DayReport (None: the model did not run -- its watch list is then the
-    scores the daily run kept). Blocks are joined by a blank line and none has one inside, so a
+    scores the daily run kept). `model_failed`: the week's model pass never got through (the
+    Sunday message goes out regardless), which a warning line says. Blocks are joined by a blank line and none has one inside, so a
     long message splits between blocks (telegram_notify._chunk)."""
     stats = model_stats(conn, today)
     if stats is None:
@@ -348,6 +350,8 @@ def format_week(conn, today: dt.date, report, *, html: bool = True) -> str:
     if exits := _exit_lines(conn, start, end, esc):
         parts.append(block("🚨 Продают те, кто покупал", exits))
 
+    if model_failed:
+        parts.append(esc(MODEL_FAILED_WARNING))
     line = f"Портфель: {money_eur(stats['value'])} ({signed_pct(stats['ret'])} с начала)"
     week = _week_return(conn, today, stats["value"])
     if week is not None:

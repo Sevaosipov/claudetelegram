@@ -91,3 +91,14 @@ Rules: `<b>` and `<pre>` only, every dynamic string escaped, Russian, no disclai
   - `format_week` sections and their omission, the quiet-week text, the week return, and HTML escaping of a hostile
     company name.
 - **The `main()` order test** is updated.
+
+## Amendment (coordinator ruling, 2026-10-01): the message waits for the model pass
+
+- The weekly message is sent only when the week's buys key is set (a non-crashing model pass this ISO week),
+  so a crashed Friday sends nothing and the next run in the window (Saturday) buys and sends.
+- Exception: Sunday, the last day of the window. The message goes out regardless, and if the buys key is still
+  unset it carries one line «⚠️ Модель на этой неделе не отработала — покупок не было.» just before the portfolio
+  line (`format_week(..., model_failed=True)`).
+- The monthly report follows the weekly message, so it waits with it.
+- Tests: Friday with a crashed model -> no weekly message, buys key unset; Saturday with a good pass -> buys and
+  the message; Sunday with the model still crashing -> the message with the warning line.
