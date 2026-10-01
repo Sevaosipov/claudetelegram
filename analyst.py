@@ -52,7 +52,6 @@ from pathlib import Path
 
 import assets
 import db
-import marketcap
 import model
 import model_score
 import paper
@@ -494,15 +493,6 @@ def valid_ticker(text: str) -> str | None:
     return ticker.removeprefix("$") if TICKER_RE.match(ticker) else None
 
 
-def _split_venue(key: str) -> tuple[str, str] | None:
-    """("EQNR", "NORWAY") for "EQNR.OL": the signal tables know a Norwegian or Swedish stock as
-    the bare ticker with the source that disclosed it. None for any other key."""
-    for source, venue in marketcap.SOURCE_VENUE.items():
-        if venue and key.endswith(venue) and len(key) > len(venue):
-            return key[:-len(venue)], source
-    return None
-
-
 class _Spellings:
     """How the bot's tables may spell a ticker: "$NVDA" is NVDA, a bare "BTC" is BTC or
     CRYPTO:BTC, "EQNR.OL" is also the bare EQNR of the source NORWAY. `stock_only` is a "$" written
@@ -513,7 +503,7 @@ class _Spellings:
         key = ticker.strip().upper()
         self.stock_only = key.startswith("$")
         key = key.removeprefix("$")
-        self.venue = _split_venue(key)
+        self.venue = positions.split_venue(key)
         self.names = {key}
         if self.venue:
             self.names.add(self.venue[0])
@@ -554,7 +544,7 @@ def _quiet_lines(conn, ticker: str) -> list[str]:
         if asset is None or asset.kind != "stock" or asset.is_isin:
             return []
         if asset.exchange:      # EQNR.OL: the signal tables know it as EQNR with source NORWAY
-            venue = _split_venue(asset.symbol)
+            venue = positions.split_venue(asset.symbol)
             if venue is None:
                 return []
             name, source = venue
