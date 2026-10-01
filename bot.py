@@ -1,7 +1,10 @@
 """Collect newly disclosed stock purchases from public filings, log every one of
 them, journal the *signals* they form, and run the model portfolio (model.py) on them.
-The one Telegram message a day says what the model bought and sold, plus the close
-alerts on your /bought positions and the groups that started selling.
+The model scores and sells on every run but buys only on the week's first full run from
+Friday to Sunday, and the week's one Telegram message (what the model bought and sold, holds
+and watches, the groups that started selling) goes out once that pass has got through -- on
+Sunday regardless, with a warning if the model never did. Every other day Telegram gets only
+the close alerts on your /bought positions, as they fire, and the breakage warnings.
 
 Sources:
     SEC Form 4        US insider purchases and sales (sec_edgar.py)
@@ -77,6 +80,17 @@ DB_PATH = BASE_DIR / "data" / "disclosures.db"
 LOG_PATH = BASE_DIR / "data" / "bot.log"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 
+# The weekly run (spec 2026-10-01): the first full run of an ISO week on a Friday, Saturday or
+# Sunday -- Friday normally, the weekend only when the Mac missed it. Two independent kv_cache
+# keys mark the week: the model's buys, and the Telegram message (set only once it is sent).
+# The message waits for the week's model pass (the buys key) -- except on Sunday, when it goes
+# out regardless, with a warning line if the model never got through.
+WEEKLY_FROM_WEEKDAY = 4         # Friday; Monday is 0
+LAST_WEEKLY_WEEKDAY = 6         # Sunday
+BUYS_KEY = "model_buys_{week}"
+MESSAGE_KEY = "weekly_message_{week}"
+_WEEK_KEY_TTL = 30 * 86400
+
 
 class _Tee:
     """Write to the original stream and to the log file at once.
@@ -117,14 +131,14 @@ def _open_log():
     return LOG_PATH.open("a", encoding="utf-8")
 
 
-def _run_source(name: str, fn, *fn_args):
+def _run_source(name: str, fn, *fn_args, **fn_kwargs):
     """Run one source's whole pass, turning a failure into a reported miss rather
     than a dead run. The sources are independent: a bad day at SEC must not cost the
     run its BaFin, Norway and Sweden data, nor the signal computation afterwards --
     which is exactly what an uncaught exception here used to do. None means the
     source failed, which is deliberately distinct from 0 (ran, found nothing)."""
     try:
-        return fn(*fn_args)
+        return fn(*fn_args, **fn_kwargs)
     except Exception as e:
         print(f"[{name}] pass failed: {type(e).__name__}: {e}", file=sys.stderr)
         return None
@@ -254,21 +268,47 @@ _FILTER_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_
 
 def _filtered_run(args) -> bool:
     """True when a flag limits this run to some sources or scores, so it sees only part of
-    the day's signals. The model then neither trades nor starts its clock, and the monthly
-    report waits for a full run -- new signals are still journaled."""
+    the day's signals. The model then neither trades nor starts its clock, and the weekly
+    message and the monthly report wait for a full run -- new signals are still journaled."""
     return any(getattr(args, name, False) for name in _FILTER_FLAGS)
 
 
-def _run_model(conn, args) -> "model.DayReport | None":
+def _today() -> dt.date:
+    return dt.date.today()
+
+
+def _week_id(day: dt.date) -> str:
+    """The ISO week `day` is in, «2026-W41» (the ISO year: 2027-01-01 is in 2026-W53)."""
+    iso = day.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def _week_marked(conn, today: dt.date, key: str) -> bool:
+    return db.get_cached_value(conn, key.format(week=_week_id(today)), _WEEK_KEY_TTL) is not None
+
+
+def _weekly_due(conn, today: dt.date, key: str = MESSAGE_KEY) -> bool:
+    """True on a Friday, Saturday or Sunday whose week has not yet set `key` (BUYS_KEY: the
+    model's buys; MESSAGE_KEY, the default: the Telegram message). The caller adds the full-run
+    condition, and sets the key (_mark_week) when what it stands for is done."""
+    return today.weekday() >= WEEKLY_FROM_WEEKDAY and not _week_marked(conn, today, key)
+
+
+def _mark_week(conn, today: dt.date, key: str) -> None:
+    db.save_cached_value(conn, key.format(week=_week_id(today)), 1.0)
+
+
+def _run_model(conn, args, *, buy: bool) -> "model.DayReport | None":
     """The model portfolio's daily pass (model.py) -- after the new signals are collected,
-    whether or not Telegram is on. It trades virtual books only. A crash is reported like
-    a failed source rather than taking the run down. None on a filtered run (which sees
-    only part of the day's signals, so must not trade or start the books' clock) and after
-    a crash."""
+    whether or not Telegram is on. It trades virtual books only, and places buys only when
+    `buy` (the week's one buying run); it sells and scores every time. A crash is reported
+    like a failed source rather than taking the run down. None on a filtered run (which sees
+    only part of the day's signals, so must not trade or start the books' clock, buy or not)
+    and after a crash."""
     if _filtered_run(args):
         print("[model] skipped: filtered run")
         return None
-    report = _run_source("MODEL", model.run, conn)
+    report = _run_source("MODEL", model.run, conn, buy=buy)
     if report is None and not args.no_telegram:
         telegram_notify.send_text("⚠️ disclosure-bot: модельный портфель упал в этом прогоне. "
                                   "Логи: data/launchd.err.log")
@@ -308,19 +348,34 @@ def _journal(conn, signals: list, report) -> None:
     _commit_signals(conn, signals)
 
 
-def _send_day(conn, report, closes: list, exits: list) -> bool:
-    """One Telegram message (telegram_notify.format_model_day) when there is a model buy
-    or sale, a close alert or a group exit; the close alerts are marked alerted only if
-    it went through, so a failed send retries them next run. Nothing to say -> nothing
-    sent, returns False."""
-    text = telegram_notify.format_model_day(report, closes, exits)
-    if text is None:
+def _send_closes(conn, closes: list) -> bool:
+    """The daily Telegram message: «🚪 Ваши позиции» and a close alert for each /bought position
+    that fired, as soon as it fires (it is real money, so it does not wait for the week). They
+    are marked alerted only if the send went through, so a failed send retries them next run.
+    Nothing fired -> nothing sent, returns False."""
+    if not closes:
         return False
+    text = "\n".join([telegram_notify._b("🚪 Ваши позиции", True)]
+                     + [telegram_notify.format_close_alert(a) for a in closes])
     if not telegram_notify.send_text(text):
         print(f"[telegram] send failed -- leaving {len(closes)} close alert(s) for the next run",
               file=sys.stderr)
         return False
     positions.mark_alerted(conn, closes)
+    return True
+
+
+def _send_weekly(conn, today: dt.date, report, *, model_failed: bool = False) -> bool:
+    """The weekly model message (paper_report.format_week) -- however quiet the week. The week's
+    message key is set only once it went through, so a failed Friday send is tried again on the
+    next run of the same Friday-to-Sunday window. `model_failed` adds the warning line (the
+    Sunday message with no model pass behind it). True when it was sent."""
+    text = paper_report.format_week(conn, today, report, model_failed=model_failed)
+    if not telegram_notify.send_text(text):
+        print("[telegram] weekly message not sent -- will retry on the next run this week",
+              file=sys.stderr)
+        return False
+    _mark_week(conn, today, MESSAGE_KEY)
     return True
 
 
@@ -427,7 +482,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-score", type=float, default=0,
                      help="marks a manual, filtered run (as do the --*-only flags): new signals are "
                           "still collected and journaled, but the model portfolio does not trade and "
-                          "the monthly report waits for a full run. Default 0 (a full run)")
+                          "the weekly message and the monthly report wait for a full run. Default 0 "
+                          "(a full run)")
     ap.add_argument("--min-liquidity", type=float, default=0,
                      help="marks a manual, filtered run, like --min-score. Default 0 (a full run)")
     ap.add_argument("--no-market-context", action="store_true",
@@ -631,17 +687,34 @@ def main():
         for x in stale_sources:
             print(f"[stale] {x}", file=sys.stderr)
 
+        today = _today()
+        filtered = _filtered_run(args)
         buys, exits = collect_new_signals(conn, args)
         rest = _journal_cautions(conn, buys)          # a caution found today counts today
-        report = _run_model(conn, args)
+        # The model buys only on the week's first full run from Friday to Sunday; its key is
+        # set once that pass got through completely (no crash, scoring done, no sleeve failed),
+        # so any other pass buys again on the next run of the window.
+        buy = not filtered and _weekly_due(conn, today, BUYS_KEY)
+        report = _run_model(conn, args, buy=buy)
+        if buy and report is not None and report.complete:
+            _mark_week(conn, today, BUYS_KEY)
         _journal(conn, rest + exits, report)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))
         if not args.no_telegram:
-            _send_day(conn, report, closes, exits)
-            if not _filtered_run(args):
-                _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, dt.date.today())
+            _send_closes(conn, closes)
+            if not filtered and _weekly_due(conn, today):
+                # The message waits for the week's model pass: with the model down it would show
+                # no buys, and the pass that buys next would not be in it. Sunday is the last
+                # day of the window, so it goes out then whatever happened.
+                model_ok = _week_marked(conn, today, BUYS_KEY)
+                if model_ok or today.weekday() == LAST_WEEKLY_WEEKDAY:
+                    # The monthly report follows the weekly message: only once it was sent.
+                    if _run_source("WEEKLY", _send_weekly, conn, today, report, model_failed=not model_ok):
+                        _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, today)
+                else:
+                    print("[telegram] weekly message waits for the week's model pass")
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from

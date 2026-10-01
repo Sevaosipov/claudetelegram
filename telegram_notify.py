@@ -609,8 +609,6 @@ def format_positions(positions: list, price_fn) -> str:
 
 
 # ------------------------------------------------------------------ the model portfolio
-_MODEL_START_EUR = 100_000.0     # model.STOCK_START_EUR + model.CRYPTO_START_EUR (not imported: model is heavy)
-_MAX_REASONS = 3
 _MAX_OTHER_STOCKS = 15
 
 
@@ -635,61 +633,6 @@ def share_pct(x: float) -> str:
 
 def _e(text, html: bool) -> str:
     return _esc(text) if html else str(text)
-
-
-def format_trade(t, *, html: bool = True, portfolio: float = _MODEL_START_EUR) -> str:
-    """One buy or sale of the model's day (model.Trade); `portfolio` is what a buy's share
-    is measured against."""
-    if t.side == "sell":
-        reason = t.reasons[0] if t.reasons else "продажа"
-        result = f" (результат {signed_pct(t.result)})" if t.result is not None else ""
-        return f"• {_e(t.ticker, html)} — {_e(reason, html)}{result}"
-    head = f"• {_e(t.ticker, html)} — {_e(t.company, html)}"
-    if t.amount_eur is not None:
-        head += f": {money_eur(t.amount_eur)}"
-        if portfolio:
-            head += f" ({share_pct(t.amount_eur / portfolio)} портфеля)"
-    if t.stop_pct is not None:
-        head += f", стоп −{t.stop_pct * 100:.0f}% от максимума"
-    if t.score is not None:
-        head += f", балл {t.score:.0f}"
-    if t.t212 is False:
-        head += " · нет на T212"
-    return "\n".join([head] + [f"   {_e(r, html)}" for r in t.reasons[:_MAX_REASONS]])
-
-
-def format_model_day(report, closes: list, exits: list, *, html: bool = True,
-                     today: dt.date | None = None) -> str | None:
-    """The daily Telegram message: what the model buys and sells, the alerts on the
-    /bought positions, the group exits, and where the portfolio stands. None when there is
-    nothing to say. `report` is model.DayReport (None when the model did not run)."""
-    buys = list(report.buys) if report is not None else []
-    sells = list(report.sells) if report is not None else []
-    if not (buys or sells or closes or exits):
-        return None
-    today = today or dt.date.today()
-    value = report.value if report is not None else None
-    parts = [_b(f"📊 Модельный портфель — {today:%d.%m}", html)]
-    if buys:
-        share_of = value or _MODEL_START_EUR
-        parts.append("\n".join(
-            [_b("🟢 Купить (исполнение по закрытию следующего дня)", html)]
-            + [format_trade(t, html=html, portfolio=share_of) for t in buys]))
-    if sells:
-        parts.append("\n".join([_b("🔴 Продать", html)] + [format_trade(t, html=html) for t in sells]))
-    if closes:
-        parts.append("\n".join([_b("🚪 Ваши позиции", html)]
-                               + [format_close_alert(a, html=html) for a in closes]))
-    if exits:
-        signals = [format_any_signal(s, html=html) for s in exits]
-        signals[0] = f"{_b('🚨 Продают те, кто покупал', html)}\n{signals[0]}"    # header stays with the first
-        parts.append("\n\n".join(signals))
-    if value is not None:
-        line = f"Портфель: {money_eur(value)} ({signed_pct(value / _MODEL_START_EUR - 1)})"
-        if report.bench is not None:
-            line += f", смесь 70/30: {signed_pct(report.bench / _MODEL_START_EUR - 1)}"
-        parts.append(line)
-    return "\n\n".join(parts)
 
 
 _DECISION_ICON = {"buy": "🟢", "watch": "👀", "block": "⛔", "skip": "·"}

@@ -1,22 +1,36 @@
-"""The model portfolio's views: the daily Telegram message, the scored list, the summary
+"""The model portfolio's views: the weekly Telegram message, the scored list, the summary
 (paper_report.format_summary / model_stats) and the menu's signals view. Offline -- scores,
 reports and books are hand-built."""
 from __future__ import annotations
 
 import datetime as dt
+import json
+import re
+import time
 
 import pytest
 
-import cluster
+import db
 import model
 import model_score
 import paper_report
 import positions
 import telegram_notify as tn
-from model import DayReport, Trade
+from model import DayReport
 
 TODAY = dt.date(2026, 10, 5)
 S, C = model.STOCK_BOOK, model.CRYPTO_BOOK
+
+
+@pytest.fixture(autouse=True)
+def _utc(monkeypatch):
+    """The weekly message reads journal timestamps (stored in UTC) as local dates; the tests
+    that put a row on the edge of a week need the local day to be the UTC day."""
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 # ------------------------------------------------------------------ builders
@@ -37,137 +51,13 @@ def _coin(coin="BTC", total=60.0, decision=model_score.BUY, **kw):
     return model_score.CoinScore(**base)
 
 
-def _buy(**kw):
-    base = dict(side="buy", ticker="AAA", company="Acme Corp", amount_eur=9_800.0, stop_pct=0.10,
-                score=64.0, reasons=["3 инсайдера", "CEO среди покупателей", "рост 6 месяцев"],
-                result=None, t212=None)
-    base.update(kw)
-    return Trade(**base)
-
-
-def _sell(**kw):
-    base = dict(side="sell", ticker="BBB", company="Beta Inc", amount_eur=5_400.0, stop_pct=0.10,
-                score=61.0, reasons=["стоп: −10% от максимума"], result=0.083)
-    base.update(kw)
-    return Trade(**base)
-
-
-def _report(buys=(), sells=(), value=101_230.0, bench=100_800.0, scored=()):
-    return DayReport(buys=list(buys), sells=list(sells), scored=list(scored), value=value,
-                     bench=bench, decisions={})
+def _report(scored=(), value=101_230.0, bench=100_800.0):
+    return DayReport(buys=[], sells=[], scored=list(scored), value=value, bench=bench, decisions={})
 
 
 def _close(ticker="CCC"):
     pos = positions.Position(1, ticker, "SEC", "2026-09-01", 100.0, ["A"], None, None, None, None)
     return positions.CloseAlert(pos, "trailing_stop", "−10% от максимума 100.00", 84.0)
-
-
-def _exit_signal(ticker="ZZZ"):
-    return cluster.ExitSignal(source="SEC", ticker=ticker, company="Exit Corp", total_buyers=3,
-                              seller_count=2, lines=["A: bought $1 -> sold $2"],
-                              seller_names=["A", "B"])
-
-
-# ---------------------------------------------------------------- format_trade
-def test_buy_line_and_the_first_three_reasons():
-    text = tn.format_trade(_buy(reasons=["r1", "r2", "r3", "r4"]), html=False)
-    assert text.splitlines() == [
-        "• AAA — Acme Corp: €9 800 (9,8% портфеля), стоп −10% от максимума, балл 64",
-        "   r1", "   r2", "   r3"]
-
-
-def test_buy_share_is_of_the_portfolio_it_is_given():
-    text = tn.format_trade(_buy(amount_eur=5_000.0), html=False, portfolio=50_000.0)
-    assert "€5 000 (10,0% портфеля)" in text
-
-
-def test_a_buy_off_trading_212_is_labelled():
-    assert "нет на T212" in tn.format_trade(_buy(t212=False), html=False)
-    assert "нет на T212" not in tn.format_trade(_buy(t212=True), html=False)
-    assert "нет на T212" not in tn.format_trade(_buy(t212=None), html=False)
-
-
-def test_sell_line_shows_the_reason_and_the_result():
-    assert tn.format_trade(_sell(), html=False) == "• BBB — стоп: −10% от максимума (результат +8,3%)"
-    loss = tn.format_trade(_sell(result=-0.041), html=False)
-    assert loss.endswith("(результат −4,1%)")
-
-
-def test_trade_html_escapes_every_dynamic_string():
-    text = tn.format_trade(_buy(ticker="A&B", company="A&B <x>", reasons=["<b>bold</b>"]))
-    assert "A&amp;B &lt;x&gt;" in text and "&lt;b&gt;bold&lt;/b&gt;" in text and "<x>" not in text
-    sell = tn.format_trade(_sell(reasons=["продаёт <инсайдер>"]))
-    assert "&lt;инсайдер&gt;" in sell
-
-
-# ------------------------------------------------------------ format_model_day
-def test_nothing_to_say_is_none():
-    assert tn.format_model_day(None, [], []) is None
-    assert tn.format_model_day(_report(), [], []) is None
-    assert tn.format_model_day(_report(scored=[_stock()]), [], []) is None     # scores alone are not news
-
-
-def test_sections_come_in_order_with_the_portfolio_line_last():
-    text = tn.format_model_day(_report([_buy(t212=False)], [_sell()]), [_close()], [_exit_signal()],
-                               html=False, today=dt.date(2026, 10, 5))
-    assert text.startswith("📊 Модельный портфель — 05.10")
-    order = ["🟢 Купить (исполнение по закрытию следующего дня)", "🔴 Продать", "🚪 Ваши позиции",
-             "🚨 Продают те, кто покупал"]
-    positions_ = [text.index(h) for h in order]
-    assert positions_ == sorted(positions_)
-    assert "• AAA — Acme Corp: €9 800" in text and "нет на T212" in text
-    assert "• BBB — стоп: −10% от максимума (результат +8,3%)" in text
-    assert "CCC" in text and "стоп от максимума" in text and "ZZZ" in text
-    assert text.splitlines()[-1] == "Портфель: €101 230 (+1,2%), смесь 70/30: +0,8%"
-
-
-def test_the_share_of_a_buy_is_measured_against_the_days_value():
-    text = tn.format_model_day(_report([_buy(amount_eur=10_123.0)], value=101_230.0), [], [],
-                               html=False)
-    assert "(10,0% портфеля)" in text
-
-
-def test_sections_without_content_are_left_out():
-    text = tn.format_model_day(_report([_buy()]), [], [], html=False)
-    assert "Купить" in text
-    assert "Продать" not in text and "Ваши позиции" not in text and "Продают те" not in text
-
-
-def test_the_mix_is_omitted_without_a_benchmark():
-    text = tn.format_model_day(_report([_buy()], bench=None), [], [], html=False)
-    assert text.splitlines()[-1] == "Портфель: €101 230 (+1,2%)"
-
-
-def test_a_loss_and_a_falling_mix_read_with_a_minus():
-    text = tn.format_model_day(_report([_buy()], value=98_000.0, bench=99_000.0), [], [], html=False)
-    assert text.splitlines()[-1] == "Портфель: €98 000 (−2,0%), смесь 70/30: −1,0%"
-
-
-def test_closes_alone_are_worth_a_message():
-    text = tn.format_model_day(None, [_close()], [], html=False, today=dt.date(2026, 10, 5))
-    assert "Ваши позиции" in text and "CCC" in text
-    assert "Портфель:" not in text and "Купить" not in text
-
-
-def test_exits_alone_are_worth_a_message():
-    text = tn.format_model_day(_report(), [], [_exit_signal()], html=False)
-    assert "Продают те, кто покупал" in text and "ZZZ" in text
-
-
-def test_html_message_is_bold_headed_and_escaped():
-    text = tn.format_model_day(
-        _report([_buy(company="A&B <x>")], [_sell(reasons=["a < b & c"])]), [], [],
-        today=dt.date(2026, 10, 5))
-    assert "<b>📊 Модельный портфель — 05.10</b>" in text
-    assert "<b>🟢 Купить (исполнение по закрытию следующего дня)</b>" in text
-    assert "<b>🔴 Продать</b>" in text
-    assert "A&amp;B &lt;x&gt;" in text and "a &lt; b &amp; c" in text
-    assert "<x>" not in text
-
-
-def test_plain_message_has_no_tags():
-    text = tn.format_model_day(_report([_buy()], [_sell()]), [], [], html=False)
-    assert "<b>" not in text
 
 
 # --------------------------------------------------------------- format_scored
@@ -276,13 +166,14 @@ def _closed_trades(conn, code, n):
 
 
 def _open_position(conn, code, ticker, *, fill="2026-09-25", cost=8_000.0, last=8_400.0, stop=0.10):
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
         "net_eur, entry_close, entry_fx, reason, last_value, stop_pct, score) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (code, ticker, "SEC", ticker, "USD", fill, cost, cost * 0.998, 10.0, 1.16, "балл 64", last,
          stop, 64.0))
     conn.commit()
+    return cur.lastrowid
 
 
 def _add_archive(conn, n=13):
@@ -496,6 +387,336 @@ def test_html_summary_is_bold_headed_with_escaped_rows_in_pre(conn):
     assert "<pre>" in text and text.count("<pre>") == text.count("</pre>")
     assert "S&amp;P 500" in text and "A&amp;B" in text and "A&B" not in text
     assert "S&P" not in text
+
+
+# ----------------------------------------------------------------- format_week
+FRI = dt.date(2026, 10, 9)           # a weekly run's day: the week is 03.10 - 09.10
+_TAGS = re.compile(r"</?[a-zA-Z][^>]*>")
+
+
+def _week_model(conn, *, equity=True):
+    """The model, started three weeks before FRI. The books together: 100 000 -> 105 000 a week
+    ago -> 107 100 now (the week +2,0%, since the start +7,1%); the mix: 100 000 -> 100 800 now."""
+    model.create_books(conn, FRI - dt.timedelta(days=21))
+    if not equity:
+        return
+    for code, rows in ((S, (("2026-09-18", 70_000, 70_000), ("2026-10-02", 73_500, 71_000),
+                            ("2026-10-09", 75_000, 72_000))),
+                       (C, (("2026-09-18", 30_000, 30_000), ("2026-10-02", 31_500, 28_000),
+                            ("2026-10-09", 32_100, 28_800)))):
+        for day, value, bench in rows:
+            conn.execute("INSERT INTO paper_equity (book, date, value, cash, bench) VALUES (?,?,?,?,?)",
+                         (code, day, value, 0.0, bench))
+    conn.commit()
+
+
+def _order(conn, book, ticker, *, created="2026-10-09", status="pending", side="buy", amount=5_355.0,
+           reason="балл 64: 3 инсайдера; CEO среди покупателей", stop=0.10, score=64.0, position_id=None):
+    conn.execute(
+        "INSERT INTO paper_orders (book, ticker, source, side, amount_eur, position_id, reason, created, "
+        "status, insiders, stop_pct, score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (book, ticker, "SEC", side, amount if side == "buy" else None, position_id, reason, created,
+         status, "[]", stop, score))
+    conn.commit()
+
+
+def _closed(conn, book, ticker, *, closed, fill="2026-09-20", cost=8_000.0, proceeds=8_400.0,
+            reason="стоп: −10% от максимума"):
+    cur = conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx, closed_date, close_reason, proceeds_eur, last_value) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (book, ticker, "SEC", ticker, "USD", fill, cost, cost, 10.0, 1.16, closed, reason, proceeds, proceeds))
+    conn.commit()
+    return cur.lastrowid
+
+
+def _exit_row(conn, ticker, company, sellers, *, emitted="2026-10-08 12:00:00", kind="exit"):
+    db.journal_signal(conn, {"source": "SEC", "kind": kind, "ticker": ticker, "company": company,
+                             "members": json.dumps(sellers, ensure_ascii=False)})
+    conn.execute("UPDATE signal_journal SET emitted_at = ? WHERE id = (SELECT MAX(id) FROM signal_journal)",
+                 (emitted,))
+    conn.commit()
+
+
+def _week(conn, report=None, **kw):
+    return paper_report.format_week(conn, FRI, report, html=False, **kw)
+
+
+def _section(text: str, header: str) -> list[str]:
+    """The lines of the block that starts with `header` (blocks are separated by a blank line)."""
+    for block in text.split("\n\n"):
+        if block.startswith(header):
+            return block.splitlines()
+    raise AssertionError(f"no section {header!r} in:\n{text}")
+
+
+def test_the_week_before_the_model_starts_says_so(conn):
+    assert (paper_report.format_week(conn, FRI, None)
+            == "Модельный портфель ещё не запущен — стартует с первого ежедневного прогона.")
+
+
+def test_the_week_message_is_headed_by_the_week_in_bold(conn):
+    _week_model(conn)
+    assert _week(conn).splitlines()[0] == "📊 Модельный портфель — неделя 03.10–09.10"
+    assert paper_report.format_week(conn, FRI, None).startswith(
+        "<b>📊 Модельный портфель — неделя 03.10–09.10</b>")
+
+
+def test_the_weeks_buys_come_from_both_books_with_amount_share_stop_score_and_reason(conn):
+    _week_model(conn)
+    _order(conn, S, "AAA", created="2026-10-09", amount=5_355.0)
+    _order(conn, C, "CRYPTO:BTC", created="2026-10-06", amount=3_210.0, stop=0.15, score=75.0,
+           reason="балл 75: выше 100-дн. средней")
+    buys = _section(_week(conn), "🟢 Покупки")
+    assert buys[0] == "🟢 Покупки"
+    assert buys[1] == "• AAA: €5 355 (5,0% портфеля), стоп −10% от максимума, балл 64"
+    assert buys[2] == "   3 инсайдера; CEO среди покупателей"         # the order's reason, its «балл» is above
+    assert buys[3] == "   исполнится по закрытию ближайшего торгового дня"
+    assert buys[4] == "• CRYPTO:BTC: €3 210 (3,0% портфеля), стоп −15% от максимума, балл 75"
+    assert buys[5] == "   выше 100-дн. средней"
+
+
+def test_a_filled_buy_shows_its_fill_date_and_entry_close(conn):
+    _week_model(conn)
+    _order(conn, S, "AAA", created="2026-10-06", status="filled")
+    _open_position(conn, S, "AAA", fill="2026-10-07")
+    _closed(conn, S, "AAA", closed="2026-09-01", fill="2026-08-01")      # an earlier holding of it: not the fill
+    buys = _section(_week(conn), "🟢 Покупки")
+    assert "   исполнен 07.10 по закрытию 10.00 USD" in buys
+    assert not any("исполнится" in ln for ln in buys)
+
+
+def test_only_buy_orders_created_in_the_week_that_went_through_are_listed(conn):
+    _week_model(conn)
+    _order(conn, S, "EDGE", created="2026-10-03")                       # the week's first day
+    _order(conn, S, "OLD", created="2026-10-02")                        # a day before it
+    _order(conn, S, "SKIP", created="2026-10-08", status="skipped")
+    _order(conn, S, "GONE", created="2026-10-08", status="cancelled")
+    _order(conn, S, "SELL", created="2026-10-08", side="sell")
+    text = _week(conn)
+    assert "EDGE" in text
+    for name in ("OLD", "SKIP", "GONE"):
+        assert name not in text
+    assert "SELL" not in "\n".join(_section(text, "🟢 Покупки"))
+
+
+def test_without_buys_there_is_no_buys_section(conn):
+    _week_model(conn)
+    assert "🟢" not in _week(conn)
+
+
+def test_the_weeks_sales_show_reason_and_result_and_the_pending_ones_wait(conn):
+    _week_model(conn)
+    _closed(conn, S, "CCC", closed="2026-10-07", cost=8_000.0, proceeds=8_400.0)
+    _closed(conn, C, "CRYPTO:ETH", closed="2026-10-03", cost=5_000.0, proceeds=4_750.0, reason="тренд вниз")
+    _closed(conn, S, "OLD", closed="2026-10-02")                          # closed before the week
+    pid = _open_position(conn, S, "DDD", fill="2026-09-25", cost=8_000.0, last=8_160.0)
+    _order(conn, S, "DDD", side="sell", position_id=pid, reason="новости: fraud", status="pending")
+    sales = _section(_week(conn), "🔴 Продажи")
+    assert sales == ["🔴 Продажи",
+                     "• CRYPTO:ETH — тренд вниз (результат −5,0%)",           # in the order they closed
+                     "• CCC — стоп: −10% от максимума (результат +5,0%)",
+                     "• DDD — новости: fraud (ждёт исполнения, сейчас +2,0%)"]
+
+
+def test_without_sales_there_is_no_sales_section(conn):
+    _week_model(conn)
+    _closed(conn, S, "OLD", closed="2026-10-02")
+    assert "🔴" not in _week(conn)
+
+
+def test_open_positions_show_days_result_and_stop(conn):
+    _week_model(conn)
+    _open_position(conn, S, "AAA", fill="2026-10-05", cost=8_000, last=8_400, stop=0.10)
+    _open_position(conn, C, "CRYPTO:BTC", fill="2026-10-08", cost=5_000, last=4_750, stop=0.2)
+    held = _section(_week(conn), "📋 В портфеле")
+    assert held[0] == "📋 В портфеле"
+    aaa = next(ln for ln in held if "AAA" in ln)
+    btc = next(ln for ln in held if "CRYPTO:BTC" in ln)
+    assert "4 дн." in aaa and "+5,0%" in aaa and "стоп −10%" in aaa
+    assert "1 дн." in btc and "−5,0%" in btc and "стоп −20%" in btc
+
+
+def test_no_open_positions_reads_all_in_cash(conn):
+    _week_model(conn)
+    assert _section(_week(conn), "📋 В портфеле") == ["📋 В портфеле", "пусто — всё в деньгах"]
+
+
+def test_watch_lists_up_to_five_watched_scores_with_their_top_reason(conn):
+    _week_model(conn)
+    scored = [_stock("BUY1", 64.0, model_score.BUY), _stock("SKP1", 30.0, model_score.SKIP),
+              _stock("BLK1", 40.0, model_score.BLOCK)]
+    scored += [_stock(f"W{i}", 58.0 - i, model_score.WATCH, reasons=[f"причина {i}", "вторая"])
+               for i in range(7)]
+    scored += [_coin("ETH", 50.0, model_score.WATCH, reasons=["выше 100-дн. средней"])]
+    watch = _section(_week(conn, _report(scored)), "👀 Наблюдение")
+    assert watch[0] == "👀 Наблюдение"
+    assert len(watch) == 6                                               # the header and five
+    assert watch[1] == "• W0 — балл 58: причина 0"
+    assert [ln.split()[1] for ln in watch[1:]] == ["W0", "W1", "W2", "W3", "W4"]     # highest first
+    text = "\n".join(watch)
+    assert "BUY1" not in text and "SKP1" not in text and "BLK1" not in text and "вторая" not in text
+
+
+def test_watch_without_a_report_reads_todays_kept_scores(conn):
+    _week_model(conn)
+    model.keep_scores(conn, FRI, [_stock("KEPT", 52.0, model_score.WATCH, reasons=["r"]),
+                                  _coin("ETH", 50.0, model_score.WATCH)])
+    watch = _section(_week(conn), "👀 Наблюдение")
+    assert watch[1] == "• KEPT — балл 52: r" and watch[2].startswith("• CRYPTO:ETH — балл 50")
+
+
+def test_watch_ignores_the_scores_of_another_day_and_is_left_out_when_empty(conn):
+    _week_model(conn)
+    model.keep_scores(conn, FRI - dt.timedelta(days=1), [_stock("OLD", 52.0, model_score.WATCH)])
+    assert "👀" not in _week(conn)
+    assert "👀" not in _week(conn, _report([_stock("BUY1", 64.0, model_score.BUY)]))
+
+
+def test_group_exits_of_the_week_name_the_sellers(conn):
+    _week_model(conn)
+    _exit_row(conn, "ZZZ", "Exit Corp", ["Ann Lee", "Bo Chen"], emitted="2026-10-08 12:00:00")
+    _exit_row(conn, "YYY", "Early Inc", ["C D"], emitted="2026-10-03 12:00:00")           # the week's first day
+    _exit_row(conn, "OLD", "Old Inc", ["E F"], emitted="2026-10-02 12:00:00")             # before the week
+    _exit_row(conn, "CLU", "Cluster Inc", ["G H"], emitted="2026-10-08 12:00:00", kind="cluster")
+    exits = _section(_week(conn), "🚨 Продают те, кто покупал")
+    assert exits[0] == "🚨 Продают те, кто покупал"
+    assert "• ZZZ — Exit Corp: Ann Lee, Bo Chen" in exits and "• YYY — Early Inc: C D" in exits
+    assert not any("OLD" in ln or "CLU" in ln for ln in exits)
+
+
+def test_a_ticker_that_exited_twice_in_a_week_is_listed_once_with_its_latest_sellers(conn):
+    _week_model(conn)
+    _exit_row(conn, "ZZZ", "Exit Corp", ["A"], emitted="2026-10-06 12:00:00")
+    _exit_row(conn, "ZZZ", "Exit Corp", ["A", "B"], emitted="2026-10-08 12:00:00")
+    exits = _section(_week(conn), "🚨 Продают те, кто покупал")
+    assert exits[1:] == ["• ZZZ — Exit Corp: A, B"]
+
+
+def test_a_long_seller_list_is_cut(conn):
+    _week_model(conn)
+    _exit_row(conn, "ZZZ", "Exit Corp", [f"P{i}" for i in range(9)])
+    assert _section(_week(conn), "🚨 Продают те, кто покупал")[1] == (
+        "• ZZZ — Exit Corp: P0, P1, P2, P3, P4 и ещё 4")
+
+
+def test_without_exits_there_is_no_exits_section(conn):
+    _week_model(conn)
+    assert "🚨" not in _week(conn)
+
+
+def test_the_last_line_has_the_value_the_return_the_week_and_the_mix(conn):
+    _week_model(conn)
+    assert _week(conn).splitlines()[-1] == (
+        "Портфель: €107 100 (+7,1% с начала), за неделю +2,0%; смесь 70/30: +0,8% с начала")
+
+
+def test_the_week_return_uses_the_last_value_on_or_before_a_week_ago(conn):
+    _week_model(conn)
+    conn.execute("DELETE FROM paper_equity WHERE date = '2026-10-02'")
+    for code, value in ((S, 73_500), (C, 31_500)):                       # the Thursday before it
+        conn.execute("INSERT INTO paper_equity (book, date, value, cash, bench) VALUES (?,?,?,?,?)",
+                     (code, "2026-10-01", value, 0.0, None))
+    conn.commit()
+    assert "за неделю +2,0%" in _week(conn).splitlines()[-1]
+
+
+def test_with_no_value_a_week_ago_the_week_return_is_left_out(conn):
+    _week_model(conn)
+    conn.execute("DELETE FROM paper_equity WHERE date <= '2026-10-02'")  # nothing on or before a week ago
+    assert "за неделю" not in _week(conn).splitlines()[-1]
+
+
+def test_the_last_line_leaves_out_what_it_cannot_compute(conn):
+    _week_model(conn)
+    conn.execute("UPDATE paper_equity SET bench = NULL")
+    conn.execute("DELETE FROM paper_equity WHERE date <= '2026-10-02'")
+    assert _week(conn).splitlines()[-1] == "Портфель: €107 100 (+7,1% с начала)"
+
+
+def test_the_week_return_needs_both_books(conn):
+    _week_model(conn)
+    conn.execute("DELETE FROM paper_equity WHERE date <= '2026-10-02' AND book = ?", (C,))
+    assert "за неделю" not in _week(conn).splitlines()[-1]
+
+
+def test_a_quiet_week_is_still_a_report(conn):
+    _week_model(conn)
+    text = _week(conn)
+    assert "Сделок за неделю нет." in text and "пусто — всё в деньгах" in text
+    for icon in ("🟢", "🔴", "👀", "🚨"):
+        assert icon not in text
+    assert text.splitlines()[0].startswith("📊 Модельный портфель — неделя")
+    assert text.splitlines()[-1].startswith("Портфель: €107 100")
+
+
+def test_a_week_with_trades_does_not_say_there_were_none(conn):
+    _week_model(conn)
+    _order(conn, S, "AAA")
+    assert "Сделок за неделю нет" not in _week(conn)
+    _closed(conn, S, "CCC", closed="2026-10-07")
+    assert "Сделок за неделю нет" not in _week(conn)
+
+
+WARNING = "⚠️ Модель на этой неделе не отработала — покупок не было."
+
+
+def test_a_week_the_model_failed_carries_a_warning_just_before_the_portfolio_line(conn):
+    _week_model(conn)
+    blocks = _week(conn, model_failed=True).split("\n\n")
+    assert blocks[-2] == WARNING and blocks[-1].startswith("Портфель: €107 100")
+    assert "<b>" not in WARNING and WARNING in paper_report.format_week(conn, FRI, None, model_failed=True)
+
+
+def test_a_normal_week_has_no_warning(conn):
+    _week_model(conn)
+    assert "⚠️" not in _week(conn) and "⚠️" not in _week(conn, model_failed=False)
+
+
+def test_the_sections_come_in_order(conn):
+    _week_model(conn)
+    _order(conn, S, "AAA")
+    _closed(conn, S, "CCC", closed="2026-10-07")
+    _open_position(conn, S, "HHH", fill="2026-10-05")
+    _exit_row(conn, "ZZZ", "Exit Corp", ["A", "B"])
+    text = _week(conn, _report([_stock("WAT", 52.0, model_score.WATCH)]))
+    order = ["📊 Модельный портфель", "🟢 Покупки", "🔴 Продажи", "📋 В портфеле", "👀 Наблюдение",
+             "🚨 Продают те, кто покупал", "Портфель: €"]
+    idx = [text.index(h) for h in order]
+    assert idx == sorted(idx)
+
+
+def test_html_week_is_escaped_and_uses_only_bold_and_pre(conn):
+    _week_model(conn)
+    _order(conn, S, "A&B", reason="балл 64: <b>bold</b> & co")
+    _closed(conn, S, "C<C", closed="2026-10-07", reason="продаёт <инсайдер>")
+    _open_position(conn, S, "H&H", fill="2026-10-05")
+    _exit_row(conn, "Z&Z", "Evil <script>alert(1)</script> & Co", ["Ann <i>Lee</i>", "B&B"])
+    text = paper_report.format_week(conn, FRI, _report([_stock("W&W", 52.0, model_score.WATCH,
+                                                             reasons=["a < b & c"])]))
+    for dynamic in ("A&amp;B", "&lt;b&gt;bold&lt;/b&gt; &amp; co", "C&lt;C", "&lt;инсайдер&gt;", "H&amp;H",
+                    "Z&amp;Z", "Evil &lt;script&gt;alert(1)&lt;/script&gt; &amp; Co",
+                    "Ann &lt;i&gt;Lee&lt;/i&gt;", "B&amp;B", "W&amp;W", "a &lt; b &amp; c"):
+        assert dynamic in text
+    assert set(_TAGS.findall(text)) <= {"<b>", "</b>", "<pre>", "</pre>"}
+    assert text.count("<pre>") == text.count("</pre>") == 1
+    assert "<b>🟢 Покупки</b>" in text and "<b>📋 В портфеле</b>" in text
+
+
+def test_the_pre_block_has_no_blank_line_so_a_split_cannot_cut_it(conn):
+    _week_model(conn)
+    for i in range(4):
+        _open_position(conn, S, f"H{i}", fill="2026-10-05")
+    text = paper_report.format_week(conn, FRI, None)
+    inside = text[text.index("<pre>"):text.index("</pre>")]
+    assert "\n\n" not in inside
+
+
+def test_plain_week_has_no_tags(conn):
+    _week_model(conn)
+    _open_position(conn, S, "HHH", fill="2026-10-05")
+    assert not _TAGS.search(_week(conn))
 
 
 # ---------------------------------------------------------------------- the menu

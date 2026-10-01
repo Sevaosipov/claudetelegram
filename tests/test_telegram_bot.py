@@ -543,6 +543,11 @@ def test_help_text_lists_questions_and_the_portfolio():
     assert "/backtest" in tb.HELP_TEXT and "/bought" in tb.HELP_TEXT
 
 
+def test_help_text_says_the_summary_comes_on_fridays():
+    assert ("Сводка модельного портфеля приходит по пятницам; /portfolio — в любой момент."
+            in tb.HELP_TEXT.splitlines())
+
+
 def test_the_module_docstring_mentions_questions():
     assert "/ask" in tb.__doc__ and "question" in tb.__doc__.lower()
 

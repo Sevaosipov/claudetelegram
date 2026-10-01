@@ -431,6 +431,40 @@ def test_a_watch_or_blocked_stock_is_not_bought(conn):
     assert report.decisions["BBB"] == model_score.BLOCK and report.decisions["WWW"] == model_score.SKIP
 
 
+# ------------------------------------------------ the weekly buys: run(buy=False)
+def test_a_run_without_buys_places_no_order_and_keeps_scoring_and_the_snapshot(conn):
+    series = {"AAA": _stock_bars(), "BTC-USD": _rising()}
+    report = _run(conn, [_sig("AAA"), _flow("BTC")], series, buy=False)
+    assert paper.orders(conn, S) == [] and paper.orders(conn, C) == []     # no buy, no skip row either
+    assert report.buys == []
+    assert report.decisions["AAA"] == model_score.BUY                      # ... but it was scored,
+    assert report.decisions["CRYPTO:BTC"] == model_score.BUY
+    assert [s.ticker for s in model.cached_scores(conn, TODAY)][:1] == ["CRYPTO:BTC"]      # ... and kept
+    assert conn.execute("SELECT COUNT(*) FROM paper_equity").fetchone()[0] == 2      # ... and stamped
+
+
+def test_a_run_without_buys_still_sells_on_an_exit_rule(conn):
+    _position(conn, "AAA", stop_pct=0.10)                     # the zigzag's peak 120 puts the line at 108
+    report = _run(conn, [_sig("BBB")], {"AAA": _stock_bars(), "BBB": _stock_bars()}, buy=False)
+    assert [t.reasons for t in report.sells] == [["стоп: −10% от максимума"]]
+    assert [(o["ticker"], o["side"], o["status"]) for o in paper.orders(conn, S)] == [("AAA", "sell", "pending")]
+    assert report.buys == []
+
+
+def test_a_run_without_buys_does_not_skip_a_blocked_candidate_either(conn):
+    _position(conn, "OLD", closed_days_ago=5)                 # sold 5 days ago: a buy would be «недавно продан»
+    _run(conn, [_sig("OLD")], {"OLD": _stock_bars()}, buy=False)
+    assert paper.orders(conn, S) == []
+
+
+def test_buys_are_on_unless_asked_off(conn):
+    series = {"AAA": _stock_bars(), "BTC-USD": _rising()}
+    report = _run(conn, [_sig("AAA"), _flow("BTC")], series)               # the default
+    assert sorted(t.ticker for t in report.buys) == ["AAA", "CRYPTO:BTC"]
+    explicit = _run(conn, [_sig("BBB")], {"BBB": _stock_bars()}, buy=True)
+    assert [t.ticker for t in explicit.buys] == ["BBB"]
+
+
 # ------------------------------------------------------------- stock exits
 PATH = [100, 105, 110, 120, 130, 128, 125, 122, 120]     # closes from the fill day (10 days ago) on
 
@@ -1009,6 +1043,53 @@ def test_a_failed_scoring_keeps_nothing(conn, monkeypatch):
     monkeypatch.setattr(model, "score_today", boom)
     _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
     assert model.cached_scores(conn, TODAY) is None
+
+
+# ------------------------------------------------- the report says whether the pass was complete
+def test_a_clean_pass_is_complete(conn):
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is True
+    assert _run(conn, [], {}, buy=False).complete is True          # whether it buys does not matter
+
+
+def test_a_pass_with_a_failed_sleeve_is_not_complete(conn, monkeypatch):
+    real = paper.fill_orders
+
+    def flaky(conn_, code, prices, today):
+        if code == C:
+            raise RuntimeError("boom")
+        return real(conn_, code, prices, today)
+
+    monkeypatch.setattr(paper, "fill_orders", flaky)
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is False
+
+
+def test_a_failing_buy_in_one_sleeve_is_not_complete_though_the_other_buys(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("no sector")
+    monkeypatch.setattr(model, "_buy_coins", boom)
+    report = _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert report.complete is False and [t.ticker for t in report.buys] == ["AAA"]
+
+
+def test_a_failing_snapshot_is_not_complete(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("disk")
+    monkeypatch.setattr(paper, "_snapshot", boom)
+    assert _run(conn, [], {}).complete is False
+
+
+def test_a_failed_scoring_is_not_complete(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("finders down")
+    monkeypatch.setattr(model, "score_today", boom)
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is False
+
+
+def test_scores_that_could_not_be_kept_do_not_make_a_pass_incomplete(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("cache")
+    monkeypatch.setattr(model, "keep_scores", boom)
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is True
 
 
 def test_no_run_today_means_no_kept_scores(conn):
