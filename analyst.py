@@ -247,8 +247,10 @@ def _run_claude(run, prompt: str):
     the project that is removed afterwards: the read-only shell commands Claude may run in its
     working directory without a rule find nothing there. Raises what `run` raises."""
     with tempfile.TemporaryDirectory(prefix="disclosure-analyst-") as workdir:
+        # stdin closed: from a terminal, claude -p otherwise waits 3 s for piped input
         return run(claude_command(prompt), cwd=workdir, env=claude_env(), capture_output=True,
-                   text=True, errors="replace", timeout=CLAUDE_TIMEOUT_SECONDS)
+                   text=True, errors="replace", timeout=CLAUDE_TIMEOUT_SECONDS,
+                   stdin=subprocess.DEVNULL)
 
 
 def _cli_error(answer: str) -> bool:

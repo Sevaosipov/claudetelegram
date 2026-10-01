@@ -480,7 +480,8 @@ def test_a_ticker_row_runs_one_claude_on_its_own_prompt_and_the_answer_is_sent(c
     assert row_context == ["$NVDA"]                             # computed here, before the run
     assert _outside_the_project(kwargs.pop("cwd"))
     assert kwargs == {"env": analyst.claude_env(), "capture_output": True, "text": True,
-                      "errors": "replace", "timeout": 900}
+                      "errors": "replace", "timeout": 900,
+                      "stdin": subprocess.DEVNULL}
     assert send.sent == [ANSWER]                                # stripped, sent as it is
     assert db.analysis_processed(conn, qid) and _attempts(conn, qid) == 0
 
@@ -717,7 +718,8 @@ def test_ask_runs_the_terminal_prompt_and_prints_the_answer_without_bold_tags(ca
     assert argv == analyst.claude_command(analyst.build_prompt("terminal", question="что с NVDA?"))
     assert _outside_the_project(kwargs.pop("cwd"))
     assert kwargs == {"env": analyst.claude_env(), "capture_output": True, "text": True,
-                      "errors": "replace", "timeout": 900}
+                      "errors": "replace", "timeout": 900,
+                      "stdin": subprocess.DEVNULL}
 
 
 def test_ask_returns_a_failing_returncode(capsys):
