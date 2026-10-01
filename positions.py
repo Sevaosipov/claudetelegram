@@ -342,26 +342,31 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
             "to_stop": 1 - stop_level / last if last else None}
 
 
-def _asset_key(ticker: str) -> tuple[str, str]:
+_VENUE_SOURCES = ("NORWAY", "SWEDEN")
+
+
+def _asset_key(ticker: str, source: str | None = None) -> tuple[str, str, str]:
     """A name as the model's books and the user's positions share it: a coin by its symbol, a
-    stock by its ticker (the stock BTC and the coin BTC stay two assets)."""
+    stock by its ticker (the stock BTC and the coin BTC stay two assets), and an Oslo or
+    Stockholm listing with its venue (Oslo's NRC is not the US NRC)."""
     if crypto.is_crypto(ticker):
-        return "coin", crypto.symbol_of(ticker).upper()
-    return "stock", ticker.upper()
+        return "coin", crypto.symbol_of(ticker).upper(), ""
+    return "stock", ticker.upper(), source if source in _VENUE_SOURCES else ""
 
 
-def _model_names(conn) -> set[tuple[str, str]]:
+def _model_names(conn) -> set[tuple[str, str, str]]:
     """What MODEL-S and MODEL-C hold now (_asset_key)."""
     import model
     import paper
-    return {_asset_key(p["ticker"]) for code in model.BOOKS for p in paper.open_positions(conn, code)}
+    return {_asset_key(p["ticker"], p["source"])
+            for code in model.BOOKS for p in paper.open_positions(conn, code)}
 
 
 def portfolio_rows(conn, today: dt.date) -> list[tuple[Position, dict, bool]]:
     """What /portfolio shows: (position, position_status, model_holds) for each open position,
     oldest first. `model_holds`: MODEL-S or MODEL-C has an open position in the same name."""
     held = _model_names(conn)
-    return [(pos, position_status(pos, today), _asset_key(pos.ticker) in held)
+    return [(pos, position_status(pos, today), _asset_key(pos.ticker, pos.source) in held)
             for pos in open_positions(conn)]
 
 

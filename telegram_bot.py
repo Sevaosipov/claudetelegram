@@ -254,8 +254,14 @@ def _handle_positions_command(conn, text: str) -> bool:
         telegram_notify.send_text(f"Позиция {ticker} уже открыта. /sold {ticker}, чтобы закрыть.")
         return True
     insiders = ", ".join(telegram_notify._esc(n) for n in pos.insiders)
-    who = (f"слежу за продажами: {insiders}" if pos.insiders
-           else "сильного сигнала по нему не было — слежу за сроком и новостями")
+    if pos.insiders:
+        who = f"слежу за продажами: {insiders}"
+    elif pos.source == "SWEDEN":
+        # Finansinspektionen's signals are keyed by ISIN, so a Stockholm ticker can't be matched to them.
+        who = ("за продажами инсайдеров Стокгольма не слежу (сигналы идут по ISIN) — "
+               "слежу за стопом, сроком и новостями")
+    else:
+        who = "сильного сигнала по нему не было — слежу за сроком и новостями"
     # With no market price the stop can't be watched (the note says so): don't state one.
     stop = "" if note else (f"стоп −{pos.stop_pct * 100:.0f}% от максимума; " if pos.stop_pct is not None
                             else "стоп — по умолчанию; ")

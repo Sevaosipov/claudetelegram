@@ -884,11 +884,11 @@ def test_position_status_reads_the_price_and_the_history_the_way_check_exits_doe
 
 
 # ------------------------------------------------------------------ portfolio_rows
-def _model_position(conn, book, ticker, closed=None):
+def _model_position(conn, book, ticker, closed=None, source="SEC"):
     conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
         "net_eur, entry_close, entry_fx, closed_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (book, ticker, "SEC", ticker, "USD", "2026-09-20", 1_000.0, 998.0, 10.0, 1.16, closed))
+        (book, ticker, source, ticker, "USD", "2026-09-20", 1_000.0, 998.0, 10.0, 1.16, closed))
     conn.commit()
 
 
@@ -934,3 +934,20 @@ def test_a_stock_named_like_a_coin_is_not_the_coin_the_model_holds(conn, priced)
     _model_position(conn, model.CRYPTO_BOOK, "CRYPTO:BTC")
     _open(conn, "BTC", 100.0, stop=0.10)
     assert [held for _p, _st, held in _rows(conn)] == [False]
+
+
+def test_an_oslo_listing_is_not_the_us_stock_of_the_same_name_the_model_holds(conn, priced):
+    """Oslo's NRC and the US NRC are two companies: only a match on the venue too counts."""
+    _model_position(conn, model.STOCK_BOOK, "NRC")                       # the US NRC
+    oslo = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY",
+                                   closes_fn=lambda t, s=None: [])
+    us = positions.open_position(conn, "AAA", 100.0, today=TODAY, closes_fn=lambda t, s=None: [])
+    _model_position(conn, model.STOCK_BOOK, "AAA")
+    holds = {p.ticker: held for p, _st, held in _rows(conn)}
+    assert holds == {"NRC": False, "AAA": True} and oslo.source == "NORWAY" and us.source is None
+
+
+def test_an_oslo_listing_the_model_holds_on_oslo_too_counts(conn, priced):
+    _model_position(conn, model.STOCK_BOOK, "NRC", source="NORWAY")
+    positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY", closes_fn=lambda t, s=None: [])
+    assert [held for _p, _st, held in _rows(conn)] == [True]

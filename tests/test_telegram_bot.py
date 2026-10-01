@@ -382,6 +382,13 @@ def test_bought_a_stockholm_listing_stores_the_bare_ticker_with_its_source(conn,
         ("VOLV-B", "SWEDEN", 270.0), ("ESSITY-B", "SWEDEN", 300.0)]
 
 
+def test_bought_a_stockholm_listing_says_its_insiders_are_not_watched(conn, replies):
+    """Finansinspektionen's signals are keyed by ISIN: the reply must not claim there was no signal."""
+    tb._handle_message(conn, "/bought VOLV-B.ST 270")
+    assert "за продажами инсайдеров Стокгольма не слежу (сигналы идут по ISIN)" in replies[-1]
+    assert "сильного сигнала по нему не было" not in replies[-1]
+
+
 def test_sold_an_oslo_listing_closes_it(conn, replies):
     import positions
     tb._handle_message(conn, "/bought EQNR.OL 150")
