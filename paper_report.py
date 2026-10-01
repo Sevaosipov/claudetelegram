@@ -10,6 +10,7 @@ import datetime as dt
 import json
 import re
 
+import crypto
 import db
 import model
 import model_score
@@ -116,7 +117,7 @@ def _pp(x: float) -> str:
 def _position_row(p: dict, today: dt.date) -> str:
     value = p["last_value"] if p["last_value"] is not None else p["net_eur"]
     days = (today - dt.date.fromisoformat(p["fill_date"])).days
-    row = f"{p['ticker']:<12} {days:>3} дн.  {signed_pct(value / p['cost_eur'] - 1):>7}"
+    row = f"{crypto.symbol_of(p['ticker']):<12} {days:>3} дн.  {signed_pct(value / p['cost_eur'] - 1):>7}"
     if p["stop_pct"] is not None:
         row += f"  стоп −{p['stop_pct'] * 100:.0f}%"
     return row
@@ -244,7 +245,7 @@ def _buy_lines(conn, order: dict, portfolio: float, esc) -> list[str]:
         pieces.append(f"стоп −{order['stop_pct'] * 100:.0f}% от максимума")
     if order["score"] is not None:
         pieces.append(f"балл {order['score']:.0f}")
-    lines = [f"• {esc(order['ticker'])}" + (": " + esc(", ".join(pieces)) if pieces else "")]
+    lines = [f"• {esc(crypto.symbol_of(order['ticker']))}" + (": " + esc(", ".join(pieces)) if pieces else "")]
     reason = _SCORE_PREFIX.sub("", order["reason"] or "").strip()
     if reason:
         lines.append(f"   {esc(reason)}")
@@ -265,14 +266,14 @@ def _sale_lines(conn, start: str, end: str, esc) -> list[str]:
     for p in closed:
         result = f" (результат {signed_pct(p['proceeds_eur'] / p['cost_eur'] - 1)})" \
             if p["proceeds_eur"] is not None else ""
-        lines.append(f"• {esc(p['ticker'])} — {esc(p['close_reason'] or 'продажа')}{result}")
+        lines.append(f"• {esc(crypto.symbol_of(p['ticker']))} — {esc(p['close_reason'] or 'продажа')}{result}")
     waiting = sorted((o for code in model.BOOKS for o in paper.pending_orders(conn, code)
                       if o["side"] == "sell"), key=lambda o: o["id"])
     for o in waiting:
         row = conn.execute("SELECT cost_eur, last_value FROM paper_positions WHERE id = ?",
                            (o["position_id"],)).fetchone()
         now = f", сейчас {signed_pct(row[1] / row[0] - 1)}" if row and row[1] is not None else ""
-        lines.append(f"• {esc(o['ticker'])} — {esc(o['reason'])} (ждёт исполнения{now})")
+        lines.append(f"• {esc(crypto.symbol_of(o['ticker']))} — {esc(o['reason'])} (ждёт исполнения{now})")
     return lines
 
 
@@ -282,7 +283,7 @@ def _watch_lines(conn, today: dt.date, report, esc) -> list[str]:
     scored = report.scored if report is not None else (model.cached_scores(conn, today) or [])
     watched = sorted((s for s in scored if s.decision == model_score.WATCH),
                      key=lambda s: s.total, reverse=True)[:_MAX_WATCH]
-    return [f"• {esc(s.ticker)} — балл {s.total:.0f}" + (f": {esc(s.reasons[0])}" if s.reasons else "")
+    return [f"• {esc(crypto.symbol_of(s.ticker))} — балл {s.total:.0f}" + (f": {esc(s.reasons[0])}" if s.reasons else "")
             for s in watched]
 
 

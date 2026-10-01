@@ -319,7 +319,7 @@ def test_summary_lists_open_positions_with_days_result_and_stop(conn):
     _open_position(conn, C, "CRYPTO:BTC", fill="2026-10-01", cost=5_000, last=4_750, stop=0.2)
     text = paper_report.format_summary(conn, TODAY)
     aaa = next(ln for ln in text.splitlines() if "AAA" in ln)
-    btc = next(ln for ln in text.splitlines() if "CRYPTO:BTC" in ln)
+    btc = next(ln for ln in text.splitlines() if ln.lstrip().startswith("BTC "))
     assert "10 дн." in aaa and "+5,0%" in aaa and "стоп −10%" in aaa
     assert "4 дн." in btc and "−5,0%" in btc and "стоп −20%" in btc
 
@@ -473,7 +473,7 @@ def test_the_weeks_buys_come_from_both_books_with_amount_share_stop_score_and_re
     assert buys[1] == "• AAA: €5 355 (5,0% портфеля), стоп −10% от максимума, балл 64"
     assert buys[2] == "   3 инсайдера; CEO среди покупателей"         # the order's reason, its «балл» is above
     assert buys[3] == "   исполнится по закрытию ближайшего торгового дня"
-    assert buys[4] == "• CRYPTO:BTC: €3 210 (3,0% портфеля), стоп −15% от максимума, балл 75"
+    assert buys[4] == "• BTC: €3 210 (3,0% портфеля), стоп −15% от максимума, балл 75"   # a coin by its symbol
     assert buys[5] == "   выше 100-дн. средней"
 
 
@@ -515,7 +515,7 @@ def test_the_weeks_sales_show_reason_and_result_and_the_pending_ones_wait(conn):
     _order(conn, S, "DDD", side="sell", position_id=pid, reason="новости: fraud", status="pending")
     sales = _section(_week(conn), "🔴 Продажи")
     assert sales == ["🔴 Продажи",
-                     "• CRYPTO:ETH — тренд вниз (результат −5,0%)",           # in the order they closed
+                     "• ETH — тренд вниз (результат −5,0%)",           # in the order they closed
                      "• CCC — стоп: −10% от максимума (результат +5,0%)",
                      "• DDD — новости: fraud (ждёт исполнения, сейчас +2,0%)"]
 
@@ -533,7 +533,7 @@ def test_open_positions_show_days_result_and_stop(conn):
     held = _section(_week(conn), "📋 В портфеле")
     assert held[0] == "📋 В портфеле"
     aaa = next(ln for ln in held if "AAA" in ln)
-    btc = next(ln for ln in held if "CRYPTO:BTC" in ln)
+    btc = next(ln for ln in held if "BTC" in ln and "CRYPTO:" not in ln)
     assert "4 дн." in aaa and "+5,0%" in aaa and "стоп −10%" in aaa
     assert "1 дн." in btc and "−5,0%" in btc and "стоп −20%" in btc
 
@@ -564,7 +564,7 @@ def test_watch_without_a_report_reads_todays_kept_scores(conn):
     model.keep_scores(conn, FRI, [_stock("KEPT", 52.0, model_score.WATCH, reasons=["r"]),
                                   _coin("ETH", 50.0, model_score.WATCH)])
     watch = _section(_week(conn), "👀 Наблюдение")
-    assert watch[1] == "• KEPT — балл 52: r" and watch[2].startswith("• CRYPTO:ETH — балл 50")
+    assert watch[1] == "• KEPT — балл 52: r" and watch[2].startswith("• ETH — балл 50")
 
 
 def test_watch_ignores_the_scores_of_another_day_and_is_left_out_when_empty(conn):
