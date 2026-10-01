@@ -19,7 +19,7 @@ silence, and the queued row stays pending for the next scheduled or triggered ru
 Any other text -- several words, or one word that is not an asset -- and /ask TEXT is a
 question for the analyst: it is queued (db.enqueue_question, at most 2000 characters), the same
 run answers it, and the analyst sends the answer itself. If it is still unanswered after the
-run, the user is told the question stays queued. /portfolio sends the model portfolio's summary
+run, the user is told the question stays queued. /model sends the model portfolio's summary
 (paper_report.format_summary) at once, without Claude. A ticker lookup and a question share one
 runner, _run_analysis: a process group of its own, RUN_ANALYSIS_TIMEOUT seconds, SIGTERM first
 (analyst.py stops its Claude on it) and SIGKILL after a grace period; it succeeds when the row
@@ -33,10 +33,15 @@ exist historically, so there's nothing to check it against yet; see
 db.journal_opinion() / backtest.py's --opinions mode, which starts
 accumulating a real record from whenever a ticker first gets checked.
 
-/bought TICKER [price], /sold TICKER and /positions track what the user
-reports actually buying (positions.py) -- entirely separate from the ticker
+/bought TICKER [price], /sold TICKER and /portfolio (/positions too) track what the
+user reports actually buying (positions.py) -- entirely separate from the ticker
 lookup above, and the only place this bot writes state instead of just
-reading and replying. See POSITIONS_USAGE and _handle_positions_command.
+reading and replying. /portfolio shows the user's own positions, each with how it
+stands now (positions.portfolio_rows, telegram_notify.format_my_portfolio), at once
+and without Claude. /bought and /sold take an Oslo or Stockholm listing written the
+Yahoo way (EQNR.OL, VOLV-B.ST): it is stored the way the signal tables know it, the
+bare ticker with its source (EQNR, NORWAY), so it is priced on its own exchange.
+See POSITIONS_USAGE and _handle_positions_command.
 
 Only ever responds to TELEGRAM_CHAT_ID -- the same chat the rest of
 disclosure-bot already alerts into. Any message from a different chat is
@@ -99,9 +104,10 @@ PERSIST_SECONDS = 30 * 365 * 24 * 3600
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 
 _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
-POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие)\n"
+POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
+                   "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST\n"
                    "/sold TICKER — отметить продажу\n"
-                   "/positions — открытые позиции")
+                   "/portfolio — ваши позиции")
 
 LOOKUP_HINT = ("Любой тикер или монета: NVDA, BTC, SOL, EQNR.OL, VOLV-B.ST. "
                "$BTC — акция с таким тикером, BTC-USD — монета.")
@@ -110,8 +116,8 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
-             "/portfolio — модельный портфель.\n"
-             "Сводка модельного портфеля приходит по пятницам; /portfolio — в любой момент.\n"
+             "/portfolio — ваши позиции (/bought), /model — модельный портфель.\n"
+             "Сводка модельного портфеля приходит по пятницам.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
              "что-то значить на уровне одного тикера).\n"
@@ -150,31 +156,59 @@ def _position_ticker(arg: str) -> str | None:
     the "CRYPTO:BTC" form both map to this project's crypto ticker convention --
     without this, /bought BTC would open a position in "BTC" the literal string,
     which positions.last_close would then price as the Grayscale Bitcoin Mini
-    Trust ETF instead of the coin."""
+    Trust ETF instead of the coin. An Oslo or Stockholm listing written the Yahoo
+    way (EQNR.OL, VOLV-B.ST) passes as typed when its bare ticker is shaped like one
+    (VOLCAR-B.ST is longer than any other ticker here): _position_listing splits it."""
     t = arg.strip().lstrip("$").upper()
     if t.startswith(crypto.PREFIX):
         sym = crypto.symbol_of(t)
         return crypto.ticker(sym) if sym in crypto.SYMBOLS else None
     if t in crypto.SYMBOLS:
         return crypto.ticker(t)
+    venue = positions.split_venue(t)
+    if venue:
+        return t if _TICKER_RE.match(venue[0]) else None
     return t if (_TICKER_RE.match(t) or _ISIN_RE.match(t)) else None
 
 
+def _position_listing(arg: str) -> tuple[str, str | None] | None:
+    """(ticker, source) of what /bought or /sold was given, or None. An Oslo or Stockholm listing
+    written the Yahoo way is stored the way the signal tables know it -- the bare ticker with the
+    source that discloses it ("EQNR", "NORWAY") -- so it is priced on its own exchange, not as
+    "EQNR-OL" or as the unrelated US EQNR. Anything else is _position_ticker's, with no source
+    of its own: the journal's latest signal decides."""
+    ticker = _position_ticker(arg)
+    if ticker is None:
+        return None
+    return positions.split_venue(ticker) or (ticker, None)
+
+
+def _handle_my_portfolio(conn) -> None:
+    """/portfolio and /positions: the user's own positions, each with how it stands now."""
+    try:
+        rows = positions.portfolio_rows(conn, dt.date.today())
+        telegram_notify.send_text(telegram_notify.format_my_portfolio(rows))
+    except Exception as e:
+        print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось собрать список позиций ({type(e).__name__}). "
+                                  "Попробуйте позже.")
+
+
 def _handle_positions_command(conn, text: str) -> bool:
-    """/bought, /sold, /positions -- the positions that positions.py tracks for close
-    alerts. Returns False for anything else."""
+    """/portfolio (/positions too), /bought, /sold -- the positions that positions.py tracks for
+    close alerts. Returns False for anything else."""
     parts = text.split()
     cmd = parts[0].lower().split("@")[0] if parts else ""
-    if cmd == "/positions":
-        telegram_notify.send_text(telegram_notify.format_positions(
-            positions.open_positions(conn), positions.last_close))
+    if cmd in ("/portfolio", "/positions"):
+        _handle_my_portfolio(conn)
         return True
     if cmd not in ("/bought", "/sold"):
         return False
-    ticker = _position_ticker(parts[1]) if len(parts) > 1 else None
-    if not ticker:
+    listing = _position_listing(parts[1]) if len(parts) > 1 else None
+    if not listing:
         telegram_notify.send_text(POSITIONS_USAGE)
         return True
+    ticker, venue_source = listing
     if cmd == "/sold":
         pos = positions.close_position(conn, ticker)
         telegram_notify.send_text(f"Позиция {ticker} закрыта." if pos
@@ -191,7 +225,7 @@ def _handle_positions_command(conn, text: str) -> bool:
             telegram_notify.send_text(POSITIONS_USAGE)
             return True
 
-    source = positions.position_source(conn, ticker)
+    source = venue_source or positions.position_source(conn, ticker)
     market_price = positions.last_close(ticker, source)
     note = ""
     if user_price is not None:
@@ -209,7 +243,9 @@ def _handle_positions_command(conn, text: str) -> bool:
     else:
         price = market_price
     if not price:
-        telegram_notify.send_text(f"Не нашёл цену {ticker} — укажите её: /bought {ticker} 12.34")
+        # a command to copy: an Oslo or Stockholm listing keeps its suffix (/bought EQNR is the US EQNR)
+        typed = positions.yahoo_symbol(ticker, venue_source) if venue_source else ticker
+        telegram_notify.send_text(f"Не нашёл цену {ticker} — укажите её: /bought {typed} 12.34")
         return True
     try:
         pos = positions.open_position(conn, ticker, price, source=source)
@@ -354,19 +390,20 @@ def _handle_ticker(conn, asset) -> None:
         telegram_notify.send_text(f"Не удалось получить данные по {ticker}. Попробуйте позже.")
 
 
-def _handle_portfolio(conn) -> None:
+def _handle_model(conn) -> None:
+    """/model: the model portfolio's summary."""
     try:
         telegram_notify.send_text(paper_report.format_summary(conn, dt.date.today(), html=True))
     except Exception as e:
-        print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[telegram_bot] /model failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось собрать сводку портфеля ({type(e).__name__}). "
                                   "Попробуйте позже.")
 
 
 def _handle_message(conn, text: str) -> None:
-    """Routing: the positions commands, /backtest, /portfolio, /ask, any other /command (help);
-    then a single token that is an asset with a price -- the ticker analysis; anything else
-    -- a question for the analyst."""
+    """Routing: the positions commands (/portfolio, /positions, /bought, /sold), /backtest, /model,
+    /ask, any other /command (help); then a single token that is an asset with a price -- the
+    ticker analysis; anything else -- a question for the analyst."""
     text = (text or "").strip()
     if _handle_positions_command(conn, text):
         return
@@ -378,8 +415,8 @@ def _handle_message(conn, text: str) -> None:
         return
     if text.startswith("/"):
         command = text.split()[0].lower().split("@")[0]
-        if command == "/portfolio":
-            _handle_portfolio(conn)
+        if command == "/model":
+            _handle_model(conn)
         elif command == "/ask":
             question = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
             if question:

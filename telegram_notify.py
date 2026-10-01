@@ -18,6 +18,7 @@ import re
 
 import requests
 
+import crypto
 import datefmt
 
 API_URL = "https://api.telegram.org/bot{token}/sendMessage"
@@ -676,3 +677,59 @@ def format_scored(scored: list, *, html: bool = False) -> str:
         lines.append(f"Прочие (балл ниже {watch:.0f}):")
         lines += [_score_line(s, html) for s in others[:_MAX_OTHER_STOCKS]]
     return "\n".join(lines)
+
+
+# ------------------------------------------------------- your own positions (/portfolio)
+_NO_POSITIONS = ("Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
+                 "Модельный портфель: /model.")
+_SELL_HINT = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть, /model — модельный портфель."
+
+
+def _price(x: float) -> str:
+    """«1 234,50»: a space between thousands, a comma decimal."""
+    return f"{x:,.2f}".replace(",", " ").replace(".", ",")
+
+
+def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
+    """One position: how it stands now, the stop, who it watches, and whether the model holds
+    it too. `st` is positions.position_status."""
+    priced = st["last"] is not None
+    now = (f"сейчас {_price(st['last'])} ({signed_pct(st['result'])})" if priced
+           else "сейчас — цена недоступна")
+    lines = [f"• {crypto.symbol_of(pos.ticker)}: вход {_price(pos.entry_price)} "
+             f"({dt.date.fromisoformat(pos.opened_at):%d.%m}), {now}, {st['days']} дн."]
+    if priced:
+        gap = (f"до стопа {share_pct(st['to_stop'])}" if st["to_stop"] >= 0
+               else f"ниже стопа на {share_pct(-st['to_stop'])}")
+        lines.append(f"   стоп {_price(st['stop_level'])} (−{st['stop_pct'] * 100:.0f}% от максимума "
+                     f"{_price(st['peak'])}), {gap}")
+    if pos.insiders:
+        lines.append(f"   слежу за продажами: {', '.join(pos.insiders)}")
+    if model_holds:
+        lines.append("   модель тоже держит")
+    return "\n".join(_e(line, html) for line in lines)
+
+
+def my_position_blocks(rows: list, *, html: bool = True) -> list[str]:
+    """The positions of `rows` -- (Position, positions.position_status, model_holds) -- oldest
+    first, one block each (its lines joined by a newline)."""
+    ordered = sorted(rows, key=lambda r: (r[0].opened_at, r[0].id))
+    return [_my_block(pos, st, held, html) for pos, st, held in ordered]
+
+
+def format_my_portfolio(rows: list, *, html: bool = True) -> str:
+    """/portfolio: the positions the user recorded with /bought, with how each stands now (a
+    block per position, a blank line between), their average result and the hint that a
+    signal to sell comes by itself. `rows` as in my_position_blocks."""
+    if not rows:
+        return _NO_POSITIONS
+    n = len(rows)
+    header = _b(f"💼 Ваш портфель — {n} {_plural(n, 'позиция', 'позиции', 'позиций')}", html)
+    footer = []
+    results = [st["result"] for _pos, st, _held in rows if st["result"] is not None]
+    if results:
+        k = len(results)
+        footer.append(f"Средний результат: {signed_pct(sum(results) / k)} по {k} "
+                      f"{_plural(k, 'позиции', 'позициям', 'позициям')}")
+    footer.append(_SELL_HINT)
+    return "\n\n".join([header, *my_position_blocks(rows, html=html), "\n".join(footer)])
