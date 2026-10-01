@@ -413,6 +413,20 @@ def test_an_oslo_listing_is_priced_on_oslo_with_no_signal_to_say_so(conn, monkey
     assert positions.open_positions(conn) == []
 
 
+def test_portfolio_shows_an_oslo_position_at_its_oslo_price(conn, monkeypatch):
+    """The whole chain: /bought EQNR.OL, then /portfolio reads the price of EQNR.OL (not of the
+    unrelated US EQNR) for the stored EQNR of NORWAY."""
+    import positions
+    out = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: out.append(msg) or True)
+    prices = {"EQNR": 25.0, "EQNR.OL": 270.0}
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: prices.get(symbol))
+    tb._handle_message(conn, "/bought EQNR.OL 250")
+    out.clear()
+    tb._handle_message(conn, "/portfolio")
+    assert "• EQNR: вход 250,00 (" in out[0] and "сейчас 270,00 (+8,0%)" in out[0]
+
+
 def test_bought_an_oslo_listing_watches_the_oslo_insiders(conn, replies):
     import db
     import json

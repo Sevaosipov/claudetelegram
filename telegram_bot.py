@@ -37,8 +37,8 @@ accumulating a real record from whenever a ticker first gets checked.
 user reports actually buying (positions.py) -- entirely separate from the ticker
 lookup above, and the only place this bot writes state instead of just
 reading and replying. /portfolio shows the user's own positions, each with how it
-stands now (positions.portfolio_rows, telegram_notify.format_my_portfolio), at once
-and without Claude. /bought and /sold take an Oslo or Stockholm listing written the
+stands now (positions.portfolio_rows, telegram_notify.format_my_portfolio), without
+Claude (the prices come from Yahoo). /bought and /sold take an Oslo or Stockholm listing written the
 Yahoo way (EQNR.OL, VOLV-B.ST): it is stored the way the signal tables know it, the
 bare ticker with its source (EQNR, NORWAY), so it is priced on its own exchange.
 See POSITIONS_USAGE and _handle_positions_command.
