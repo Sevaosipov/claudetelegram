@@ -19,7 +19,8 @@ only the TradingView MCP server, `--permission-mode dontAsk` (whatever is not al
 denied), and a shell allowed exactly three read commands, named by their absolute paths
 (ANALYST_CMD is `<BASE_DIR>/.venv/bin/python <BASE_DIR>/analyst.py`):
     ANALYST_CMD context 'TICKER'     the model's score, the positions, the dossier
-    ANALYST_CMD portfolio            the model summary, the watchlist, today's buys
+    ANALYST_CMD portfolio            the owner's /bought positions, the model summary, the
+                                     watchlist, today's buys
     ANALYST_CMD news 'QUERY'         up to 10 Google News headlines with dates
 Each Claude runs in a fresh empty folder outside the project, removed after the run: the
 read-only shell commands Claude may run in its working directory without a rule find nothing
@@ -684,9 +685,22 @@ def _watchlist(scored: list) -> list[str]:
         for s in watch]
 
 
+def _own_positions(conn, today: dt.date) -> list[str]:
+    """«ВАШИ ПОЗИЦИИ (/bought):» and, for each position the owner recorded, the facts /portfolio
+    shows them in Telegram (as plain text); or why there is nothing to show."""
+    try:
+        rows = positions.portfolio_rows(conn, today)
+    except Exception as e:
+        return [f"ВАШИ ПОЗИЦИИ (/bought): не посчитаны: {type(e).__name__}"]
+    if not rows:
+        return ["ВАШИ ПОЗИЦИИ (/bought): нет"]
+    return ["ВАШИ ПОЗИЦИИ (/bought):"] + telegram_notify.my_position_blocks(rows, html=False)
+
+
 def portfolio(conn, *, scored=None) -> str:
-    """The model summary, the stocks and coins it is watching and today's buys. `scored` is
-    model.score_today's list; else today's kept scores, else everything is scored now."""
+    """The owner's own /bought positions, then the model: its summary, the stocks and coins it
+    is watching and today's buys. `scored` is model.score_today's list; else today's kept
+    scores, else everything is scored now."""
     today = dt.date.today()
     error = None
     if scored is None:
@@ -697,8 +711,8 @@ def portfolio(conn, *, scored=None) -> str:
                    else _watchlist(scored))
     buys = _buys_today(conn, today)
     buy_lines = ["ПОКУПКИ СЕГОДНЯ:"] + buys if buys else ["ПОКУПКИ СЕГОДНЯ: нет"]
-    return "\n".join([paper_report.format_summary(conn, today), ""] + watch_lines + [""]
-                     + buy_lines)
+    return "\n".join(_own_positions(conn, today) + ["", paper_report.format_summary(conn, today), ""]
+                     + watch_lines + [""] + buy_lines)
 
 
 def news(query: str) -> str:
@@ -741,7 +755,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("context", help="the model's score, positions and the dossier: context TICKER"
                    ).add_argument("ticker")
-    sub.add_parser("portfolio", help="model summary, watchlist, today's buys")
+    sub.add_parser("portfolio", help="your /bought positions, model summary, watchlist, today's buys")
     sub.add_parser("news", help="Google News headlines: news QUERY").add_argument("query", nargs="*")
     sub.add_parser("ask", help="ask the analyst from the terminal: ask TEXT").add_argument(
         "text", nargs="*")

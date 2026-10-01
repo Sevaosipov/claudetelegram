@@ -20,6 +20,7 @@ import db
 import model
 import model_score
 import paper
+import positions
 import research
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -897,6 +898,69 @@ def test_portfolio_lists_at_most_ten_watch_scores(conn):
     assert "W09" in out and "W10" not in out
 
 
+def _bought(conn, ticker, *, opened="2026-09-28", entry=23.10, insiders="[]", stop=0.10, source=None):
+    conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, stop_pct) "
+                 "VALUES (?,?,?,?,?,?)", (ticker, source, opened, entry, insiders, stop))
+    conn.commit()
+
+
+@pytest.fixture
+def my_prices(monkeypatch):
+    """What the owner's positions are read through: a price of 24.05 and no price history."""
+    monkeypatch.setattr(positions, "last_close", lambda t, s=None: 24.05)
+    monkeypatch.setattr(positions, "daily_closes", lambda t, s=None: [])
+
+
+def test_portfolio_opens_with_your_positions_then_the_model(conn, my_prices):
+    model.create_books(conn, dt.date(2026, 9, 1))
+    _bought(conn, "GME", insiders='["Ryan Cohen"]')
+    _bought(conn, "BBB", opened="2026-09-30", entry=10.0)
+    _paper_position(conn, S, "GME")                                  # the model holds it too
+    out = analyst.portfolio(conn, scored=[])
+    lines = out.splitlines()
+    days = (dt.date.today() - dt.date(2026, 9, 28)).days
+    assert lines[:5] == [
+        "ВАШИ ПОЗИЦИИ (/bought):",
+        f"• GME: вход 23,10 (28.09), сейчас 24,05 (+4,1%), {days} дн.",
+        "   стоп 20,79 (−10% от максимума 23,10), до стопа 15,7%",
+        "   слежу за продажами: Ryan Cohen",
+        "   модель тоже держит"]
+    assert lines[5].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
+    assert lines[6].startswith("   стоп ")
+    assert lines[7] == "" and lines[8].startswith("Модельный портфель")        # then the model, as before
+    assert out.index("ВАШИ ПОЗИЦИИ") < out.index("Модельный портфель") < out.index("НАБЛЮДЕНИЕ:") \
+        < out.index("ПОКУПКИ СЕГОДНЯ:")
+
+
+def test_portfolio_prints_your_positions_as_plain_text(conn, my_prices):
+    _bought(conn, "GME", insiders='["A & B <Boss>"]')
+    out = analyst.portfolio(conn, scored=[])
+    assert "слежу за продажами: A & B <Boss>" in out
+    assert "<b>" not in out and "&amp;" not in out and "💼" not in out
+
+
+def test_portfolio_says_when_you_have_no_positions(conn):
+    out = analyst.portfolio(conn, scored=[])
+    assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): нет"
+    assert "НАБЛЮДЕНИЕ: нет" in out                                   # the model part is as before
+
+
+def test_portfolio_keeps_the_model_when_your_positions_cannot_be_read(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(positions, "portfolio_rows", boom)
+    out = analyst.portfolio(conn, scored=[])
+    assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): не посчитаны: RuntimeError"
+    assert "НАБЛЮДЕНИЕ: нет" in out and "ПОКУПКИ СЕГОДНЯ: нет" in out
+
+
+def test_the_analyst_uses_the_one_venue_split_the_bot_uses():
+    assert not hasattr(analyst, "_split_venue")
+    assert analyst._Spellings("EQNR.OL").venue == positions.split_venue("EQNR.OL") == ("EQNR", "NORWAY")
+    assert analyst._Spellings("VOLV-B.ST").venue == ("VOLV-B", "SWEDEN")
+    assert analyst._Spellings("EQNR").venue is None
+
+
 def test_news_prints_dated_headlines(monkeypatch):
     items = [{"title": f"Заголовок {i}", "publisher": "Reuters", "published": f"2026-09-{i + 1:02d}",
               "url": "u"} for i in range(12)]
@@ -988,6 +1052,16 @@ def test_the_method_names_every_allowed_tradingview_tool():
     method = _text("analyst_method.txt")
     for tool in analyst.TV_TOOLS:
         assert tool in method, tool
+
+
+def test_the_method_says_the_portfolio_command_covers_your_positions_and_the_model():
+    text = _text("analyst_method.txt")
+    method = " ".join(text.split())
+    [listed] = [ln for ln in text.splitlines() if ln.lstrip().startswith("`{ANALYST_CMD} portfolio`")]
+    assert "/bought" in listed
+    assert "the owner's own positions (what they bought and recorded with /bought)" in method
+    assert "run `{ANALYST_CMD} portfolio`: its output covers both" in method
+    assert "«ВАШИ ПОЗИЦИИ (/bought):»" in method and "then the model" in method
 
 
 def test_the_method_forbids_study_values_and_restores_the_chart():
