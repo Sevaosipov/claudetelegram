@@ -1,9 +1,13 @@
-"""Positions the user reports buying (/bought, /sold in telegram_bot.py), and when
-to close them.
+"""Positions the user reports buying (/bought, /sold in telegram_bot.py) or holds in the
+Trading 212 account, and when to close them.
 
-Only reported positions are tracked, at the user's own entry price -- the bot never
-reads or trades the brokerage account. They leave on the model's own exits (model.py),
-and a close alert fires once per position, on the first of:
+A position is either reported (origin 'manual': /bought, at the user's own entry price) or read
+from the Trading 212 account (origin 't212': t212_account.py keeps those in step with the
+account, with its quantity and average price, and closes one that was sold there). The bot
+only reads the account and never trades. A Trading 212 holding with a US listing is keyed and
+priced like a /bought one; any other is keyed by its ISIN with source T212_SOURCE and priced
+from the day prices the sync stores (t212_prices). Every position leaves on the model's own
+exits (model.py), and a close alert fires once per position, on the first of:
 
   insider_sell   one of the insiders behind the signal it came from sells
                  after the open date -- Form 4 (not a 10b5-1 planned sale), a Form 144
@@ -23,7 +27,8 @@ and a close alert fires once per position, on the first of:
   time           a year held;
   news           a red-flag headline on the ticker.
 
-The alert doesn't close the position; /sold does. The user stays in control.
+The alert doesn't close the position; /sold does (a Trading 212 holding closes when the account
+no longer has it). The user stays in control.
 
 position_status is the live view of one open position (its price, result, peak and stop),
 and portfolio_rows gathers it for all of them: what /portfolio shows in Telegram and what
@@ -33,6 +38,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import sys
 from dataclasses import dataclass
 
@@ -45,6 +51,8 @@ import model_score
 # that need them (model for the exit constants and its news seam, paper for the prices).
 
 CAUTION_LOOKBACK_DAYS = 7
+MANUAL, T212 = "manual", "t212"         # a position's origin: /bought, or the Trading 212 account
+T212_SOURCE = "T212"                    # the source of a Trading 212 holding with no Yahoo listing
 _CAUTION_TEXT = {"etf_flow": "отток из спот-ETF", "treasury": "компания продала монеты",
                  "exchange_flow": "монеты заводят на биржи"}
 
@@ -76,6 +84,10 @@ class Position:
     close_reason: str | None
     close_alerted_at: str | None
     stop_pct: float | None = None       # the trailing stop's distance, fixed at open
+    origin: str = MANUAL                # MANUAL (/bought) or T212 (read from the account)
+    quantity: float | None = None       # a Trading 212 holding's shares
+    t212_ticker: str | None = None      # its Trading 212 id: AAPL_US_EQ, SAPd_EQ
+    currency: str | None = None         # its instrument's currency (entry_price is in it)
 
 
 @dataclass
@@ -88,16 +100,47 @@ class CloseAlert:
 
 
 _COLS = ("id, ticker, source, opened_at, entry_price, insiders, signal_id, closed_at, "
-         "close_reason, close_alerted_at, stop_pct")
+         "close_reason, close_alerted_at, stop_pct, origin, quantity, t212_ticker, currency")
 
 
 def _row(r) -> Position:
-    return Position(r[0], r[1], r[2], r[3], r[4], json.loads(r[5] or "[]"), r[6], r[7], r[8], r[9], r[10])
+    return Position(r[0], r[1], r[2], r[3], r[4], json.loads(r[5] or "[]"), r[6], r[7], r[8], r[9], r[10],
+                    r[11] or MANUAL, r[12], r[13], r[14])
 
 
 def open_positions(conn) -> list[Position]:
     return [_row(r) for r in conn.execute(
         f"SELECT {_COLS} FROM positions WHERE closed_at IS NULL ORDER BY opened_at")]
+
+
+def find_open(conn, ticker: str) -> Position | None:
+    """The open position in `ticker`, of either origin, or None."""
+    ticker = ticker.strip().upper()
+    return next((p for p in open_positions(conn) if p.ticker == ticker), None)
+
+
+_EXCHANGE_SUFFIX = re.compile(r"[a-z]*_EQ$")
+
+
+def display_name(pos: Position) -> str:
+    """How the user knows a position: a coin by its symbol, a Trading 212 holding keyed by its
+    ISIN by its Trading 212 symbol (SAPd_EQ -> SAP), anything else by its ticker."""
+    if crypto.is_crypto(pos.ticker):
+        return crypto.symbol_of(pos.ticker)
+    if pos.source == T212_SOURCE and pos.t212_ticker:
+        return _EXCHANGE_SUFFIX.sub("", pos.t212_ticker) or pos.ticker
+    return pos.ticker
+
+
+def oslo_ticker(conn, isin: str) -> str | None:
+    """The Oslo ticker of an ISIN, when norway's ISIN cache (oslo_isins) knows it: Oslo's insider
+    rows name the company by that ticker, Trading 212 by the ISIN of its Frankfurt listing."""
+    isin = (isin or "").strip().upper()
+    if not isin:
+        return None
+    row = conn.execute("SELECT ticker FROM oslo_isins WHERE isin = ? ORDER BY fetched_at DESC LIMIT 1",
+                       (isin,)).fetchone()
+    return row[0] if row else None
 
 
 # A journal row that is a buy-side signal, whatever tier the model gave it that day (buy,
@@ -143,7 +186,15 @@ def _kind(ticker: str) -> str:
 def _buy_signal(conn, ticker: str, source: str | None):
     """(id, members) of the latest buy-side journal row for `ticker`, or None. On an Oslo or
     Stockholm listing only that source's rows count: the same letters are another company
-    on another exchange (NRC is National Research Corp in New York, NRC Group in Oslo)."""
+    on another exchange (NRC is National Research Corp in New York, NRC Group in Oslo). A
+    Trading 212 holding keyed by its ISIN takes the rows of that ISIN (BaFin and FI name an
+    issuer by it) and, when the ISIN is an Oslo listing's, the Oslo rows of its ticker."""
+    if source == T212_SOURCE:
+        return conn.execute(
+            f"SELECT id, members FROM signal_journal WHERE {_BUY_SIDE_ROW} "
+            "AND (ticker = ? OR (ticker = ? AND source = 'NORWAY')) "
+            "ORDER BY emitted_at DESC, id DESC LIMIT 1",
+            (ticker, oslo_ticker(conn, ticker) or "")).fetchone()
     venue = source if marketcap.SOURCE_VENUE.get(source or "") else None
     return conn.execute(
         f"SELECT id, members FROM signal_journal WHERE ticker = ? AND {_BUY_SIDE_ROW} "
@@ -221,21 +272,37 @@ def _yahoo_close(symbol: str) -> float | None:
     return float(hist.iloc[-1]) if len(hist) else None
 
 
-def last_close(ticker: str, source: str | None = None) -> float | None:
+def t212_closes(conn, ticker: str) -> list[tuple[str, float]]:
+    """The day prices the Trading 212 sync stored for `ticker` (t212_prices), oldest first: the
+    last price of each day, today's included (still in progress, like a Yahoo bar of today)."""
+    return [(d, float(p)) for d, p in conn.execute(
+        "SELECT date, price FROM t212_prices WHERE ticker = ? AND price IS NOT NULL ORDER BY date",
+        (ticker,))]
+
+
+def last_close(ticker: str, source: str | None = None, conn=None) -> float | None:
     """Most recent daily close from Yahoo for the listing `source` trades the
-    ticker on, or None (an ISIN, a delisting, no network)."""
+    ticker on, or None (an ISIN, a delisting, no network). A Trading 212 holding with no
+    Yahoo listing (source T212_SOURCE) has the last price the sync stored, given `conn`."""
     symbol = yahoo_symbol(ticker, source)
-    return _yahoo_close(symbol) if symbol else None
+    if symbol:
+        return _yahoo_close(symbol)
+    if source == T212_SOURCE and conn is not None:
+        bars = t212_closes(conn, ticker)
+        return bars[-1][1] if bars else None
+    return None
 
 
-def daily_closes(ticker: str, source: str | None = None) -> list[tuple[str, float]]:
+def daily_closes(ticker: str, source: str | None = None, conn=None) -> list[tuple[str, float]]:
     """The adjusted daily closes, oldest first, of the listing `source` trades the ticker
     on (paper._closes on its Yahoo symbol); [] when it has no reliable symbol or the fetch
-    fails. Imported here: paper imports this module."""
+    fails. A Trading 212 holding with no Yahoo listing (source T212_SOURCE) has the day
+    prices the sync stored instead (t212_closes), given `conn`. Imported here: paper imports
+    this module."""
     import paper
     symbol = yahoo_symbol(ticker, source)
     if not symbol:
-        return []
+        return t212_closes(conn, ticker) if source == T212_SOURCE and conn is not None else []
     try:
         return list(paper._closes(symbol, paper.PRICE_DAYS) or [])
     except Exception as e:
@@ -247,8 +314,12 @@ def _insider_sale(conn, pos: Position) -> str | None:
     keys = {cluster.name_key(n) for n in pos.insiders}
     if not keys:
         return None
+    # Oslo's rows name a company by its Oslo ticker; a Trading 212 holding of it, by the ISIN.
+    # (model.py hands in a namespace of a book's position, which has no source.)
+    oslo = oslo_ticker(conn, pos.ticker) if getattr(pos, "source", None) == T212_SOURCE else None
     for label, sql in _SALE_QUERIES:
-        for person, date in conn.execute(sql, (pos.ticker, pos.opened_at)):
+        key = oslo if label == "Oslo" and oslo else pos.ticker
+        for person, date in conn.execute(sql, (key, pos.opened_at)):
             if cluster.name_key(person) in keys:
                 return f"{person} — {label}, {date}"
     for person, date in conn.execute(
@@ -315,9 +386,23 @@ def _trailing_stop(pos: Position, bars: list[tuple[str, float]], price: float) -
     return None
 
 
-def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=None) -> dict:
+def _seams(conn, price_fn, closes_fn):
+    """(price_fn, closes_fn): the ones given, else last_close and daily_closes -- looked up when
+    called, so a replacement of the module's own counts -- with `conn` for a Trading 212 holding
+    with no Yahoo listing (source T212_SOURCE), whose prices are the sync's day prices."""
+    def price(ticker, source=None):
+        return last_close(ticker, source, conn=conn) if source == T212_SOURCE else last_close(ticker, source)
+
+    def closes(ticker, source=None):
+        return (daily_closes(ticker, source, conn=conn) if source == T212_SOURCE
+                else daily_closes(ticker, source))
+    return price_fn or price, closes_fn or closes
+
+
+def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=None, conn=None) -> dict:
     """How an open position stands, from the same price and history the exits read (`price_fn`
-    and `closes_fn`, `(ticker, source)` seams with check_exits' defaults):
+    and `closes_fn`, `(ticker, source)` seams with check_exits' defaults; `conn` prices a
+    Trading 212 holding with no Yahoo listing from the sync's day prices):
       last        the price, or None when there isn't one;
       result      last / entry price - 1, or None;
       days        days since the open;
@@ -329,8 +414,7 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
                   price now: 1 - stop_level / last (the price at its peak: the stop's own
                   distance). Zero at the stop level, negative below it (how far below, as
                   a share of the price now); None with no price."""
-    price_fn = price_fn or last_close
-    closes_fn = closes_fn or daily_closes
+    price_fn, closes_fn = _seams(conn, price_fn, closes_fn)
     last = price_fn(pos.ticker, pos.source) or None
     bars = _completed_bars(closes_fn(pos.ticker, pos.source), today)
     stop_pct, peak = _stop_and_peak(pos, bars)
@@ -362,12 +446,13 @@ def _model_names(conn) -> set[tuple[str, str, str]]:
             for code in model.BOOKS for p in paper.open_positions(conn, code)}
 
 
-def portfolio_rows(conn, today: dt.date) -> list[tuple[Position, dict, bool]]:
-    """What /portfolio shows: (position, position_status, model_holds) for each open position,
-    oldest first. `model_holds`: MODEL-S or MODEL-C has an open position in the same name."""
+def portfolio_rows(conn, today: dt.date, *, origin: str | None = None) -> list[tuple[Position, dict, bool]]:
+    """What /portfolio shows: (position, position_status, model_holds) for each open position
+    (of `origin` only, when given), oldest first. `model_holds`: MODEL-S or MODEL-C has an open
+    position in the same name."""
     held = _model_names(conn)
-    return [(pos, position_status(pos, today), _asset_key(pos.ticker, pos.source) in held)
-            for pos in open_positions(conn)]
+    return [(pos, position_status(pos, today, conn=conn), _asset_key(pos.ticker, pos.source) in held)
+            for pos in open_positions(conn) if origin is None or pos.origin == origin]
 
 
 def _pct(x: float) -> str:
@@ -417,12 +502,12 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None, trend_fn=None
     rule that holds (see the top of the file). Seams, all `(ticker, source)`: `price_fn`
     the current price (default last_close), `closes_fn` the history (default daily_closes),
     `news_fn` the recent headlines (default model.default_news); `trend_fn(conn, symbol)`
-    is the coin trend a caution is confirmed by."""
+    is the coin trend a caution is confirmed by. A Trading 212 holding with no Yahoo listing is
+    priced, by default, from the day prices the sync stored (t212_prices)."""
     import model
     today = today or dt.date.today()
-    price_fn = price_fn or last_close
+    price_fn, closes_fn = _seams(conn, price_fn, closes_fn)
     trend_fn = trend_fn or crypto.price_trend
-    closes_fn = closes_fn or daily_closes
     news_fn = news_fn or model.default_news
     alerts = []
     for pos in open_positions(conn):
