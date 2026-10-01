@@ -92,3 +92,14 @@ positions, and `/model` = the model.
   - `/bought VOLV-B.ST` → (`VOLV-B`, `SWEDEN`);
   - a US ticker and `BTC` are unchanged.
 - **analyst `portfolio`:** prints the user's positions section first, then the model.
+
+## Amendment (coordinator ruling, 2026-10-01): `to_stop`
+
+- `to_stop` is how far the price can still fall before the stop triggers, as a share of the price now:
+  `1 - stop_level/last`, or None with no price. The price at its peak with a 10% stop gives «до стопа 10,0%». This
+  replaces `last/stop_level - 1`, which read 11,1% in that case.
+- Below the stop it is negative. The line then reads «ниже стопа на X%» with X = −`to_stop` (how far below, as a
+  share of the price now).
+- Tests: `to_stop` at the peak, at the stop level and below it; a fall of `to_stop` from the price lands on
+  `stop_level`; `to_stop` ≤ 0 exactly where the trailing-stop alert fires; both wordings of the stop line, and the
+  line end to end (`/portfolio` of a calm stock at its peak).

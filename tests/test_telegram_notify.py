@@ -478,10 +478,17 @@ def test_a_position_with_no_price_says_so_and_has_no_stop_line():
 
 
 def test_a_price_below_the_stop_is_said_so():
-    st = _status(115.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=115.0 / 117.0 - 1)
+    """to_stop is how far the price can still fall (a share of the price now): below the stop it is
+    negative, and «ниже стопа на» shows the same quantity without its sign."""
+    st = _status(90.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=1 - 117.0 / 90.0)
     text = tn.format_my_portfolio([(_held(entry=100.0), st, False)])
-    assert "   стоп 117,00 (−10% от максимума 130,00), ниже стопа на 1,7%" in text
+    assert "   стоп 117,00 (−10% от максимума 130,00), ниже стопа на 30,0%" in text
     assert "до стопа" not in text
+
+
+def test_at_the_stop_level_there_is_nothing_left_to_fall():
+    st = _status(117.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=0.0)
+    assert "), до стопа 0,0%" in tn.format_my_portfolio([(_held(entry=100.0), st, False)])
 
 
 def test_the_average_is_the_equal_weighted_mean_of_the_known_results():

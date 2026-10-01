@@ -659,8 +659,19 @@ def test_portfolio_shows_your_own_positions_with_their_status(conn, replies, mon
     [text] = replies
     assert text.startswith("<b>💼 Ваш портфель — 1 позиция</b>\n\n• GRAB: вход 40,00 (")
     assert "сейчас 50,00 (+25,0%)" in text
-    assert "   стоп 34,00 (−15% от максимума 40,00), до стопа 47,1%" in text      # no history: the fallback
+    assert "   стоп 34,00 (−15% от максимума 40,00), до стопа 32,0%" in text      # no history: the fallback
     assert text.endswith("/sold TICKER — закрыть, /model — модельный портфель.")
+
+
+def test_a_price_at_the_peak_can_fall_by_the_stop_before_it_fires(conn, replies, monkeypatch):
+    """The 10% stop of a calm stock, the price at its peak: «до стопа 10,0%»."""
+    import paper
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 180.0)
+    monkeypatch.setattr(paper, "_closes", _august_closes)
+    tb._handle_message(conn, "/bought NVDA 180")
+    replies.clear()
+    tb._handle_message(conn, "/portfolio")
+    assert "   стоп 162,00 (−10% от максимума 180,00), до стопа 10,0%" in replies[0]
 
 
 def test_portfolio_and_positions_send_format_my_portfolio_of_the_rows(conn, sent, monkeypatch):

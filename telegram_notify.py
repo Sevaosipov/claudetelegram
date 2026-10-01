@@ -692,7 +692,9 @@ def _price(x: float) -> str:
 
 def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
     """One position: how it stands now, the stop, who it watches, and whether the model holds
-    it too. `st` is positions.position_status."""
+    it too. `st` is positions.position_status; its to_stop is how far the price can still fall
+    before the stop, and below the stop (negative) «ниже стопа на» shows the same figure
+    without its sign."""
     priced = st["last"] is not None
     now = (f"сейчас {_price(st['last'])} ({signed_pct(st['result'])})" if priced
            else "сейчас — цена недоступна")

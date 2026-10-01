@@ -325,7 +325,10 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
       stop_pct    the stop's distance: the stored one, else the closes before the open give,
                   else the model's fallback;
       stop_level  peak * (1 - stop_pct): the price the trailing stop fires at;
-      to_stop     last / stop_level - 1 (zero or below: the stop has fired), or None."""
+      to_stop     how far the price can still fall before the stop fires, as a share of the
+                  price now: 1 - stop_level / last (the price at its peak: the stop's own
+                  distance). Zero at the stop level, negative below it (how far below, as
+                  a share of the price now); None with no price."""
     price_fn = price_fn or last_close
     closes_fn = closes_fn or daily_closes
     last = price_fn(pos.ticker, pos.source) or None
@@ -336,7 +339,7 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
             "result": last / pos.entry_price - 1 if last else None,
             "days": (today - dt.date.fromisoformat(pos.opened_at)).days,
             "peak": peak, "stop_pct": stop_pct, "stop_level": stop_level,
-            "to_stop": last / stop_level - 1 if last else None}
+            "to_stop": 1 - stop_level / last if last else None}
 
 
 def _asset_key(ticker: str) -> tuple[str, str]:

@@ -795,7 +795,7 @@ def test_position_status_is_the_price_the_result_the_days_the_peak_and_the_stop(
     assert st["result"] == pytest.approx(0.20)
     assert (st["peak"], st["stop_pct"]) == (130.0, 0.10)
     assert st["stop_level"] == pytest.approx(117.0)
-    assert st["to_stop"] == pytest.approx(120.0 / 117.0 - 1)
+    assert st["to_stop"] == pytest.approx(1 - 117.0 / 120.0)
 
 
 def test_the_peak_is_the_entry_or_a_completed_close_since_the_open(conn):
@@ -827,11 +827,21 @@ def test_a_missing_stop_with_too_little_history_is_the_models_fallback(conn, tic
     assert _status_of(conn, 100.0, _held_bars([100.0] * 5, [100.0]))["stop_pct"] == fallback
 
 
-@pytest.mark.parametrize("price", [130.0, 117.0, 100.0])
-def test_to_stop_is_how_far_the_price_is_above_the_stop_level(conn, price):
+@pytest.mark.parametrize("price, to_stop", [(130.0, 0.10), (120.0, 1 - 117.0 / 120.0), (117.0, 0.0),
+                                            (100.0, 1 - 117.0 / 100.0)])
+def test_to_stop_is_how_far_the_price_can_still_fall_before_the_stop(conn, price, to_stop):
+    """As a share of the price now: at the peak with a 10% stop it can fall 10%; at the stop
+    level, nothing; below it the figure is negative."""
     _open(conn, price=100.0, stop=0.10)
     st = _status_of(conn, price, _held_bars([], [110.0, 130.0]))           # peak 130 -> level 117
-    assert st["to_stop"] == pytest.approx(price / 117.0 - 1)
+    assert st["to_stop"] == pytest.approx(to_stop)
+
+
+@pytest.mark.parametrize("price", [130.0, 120.0, 117.0, 100.0])
+def test_a_fall_of_to_stop_from_the_price_lands_on_the_stop_level(conn, price):
+    _open(conn, price=100.0, stop=0.10)
+    st = _status_of(conn, price, _held_bars([], [110.0, 130.0]))
+    assert price * (1 - st["to_stop"]) == pytest.approx(st["stop_level"])
 
 
 @pytest.mark.parametrize("price", [100.0, 116.9, 117.0, 117.1, 130.0])
