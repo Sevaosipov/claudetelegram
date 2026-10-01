@@ -7,8 +7,9 @@ valuation and the daily snapshot are paper.py's own; this module only decides wh
 
 The daily pass (run) fills and revalues both books, sells what an exit rule says, scores
 every fresh signal and both coins (score_today, which places nothing, so the menu and the
-analyst can use it too), buys what scores BUY -- sized by its own stop -- and snapshots. One
-sleeve failing is logged and skipped; the other carries on.
+analyst can use it too), buys what scores BUY -- sized by its own stop -- and snapshots. The
+buying happens only when run is asked to (`buy`): bot.py asks once a week. One sleeve failing
+is logged and skipped; the other carries on.
 
 Everything that touches the network sits behind a seam (fetch, news_fn, trend_fn,
 sector_fn, t212), so a test hands each its own stub.
@@ -531,9 +532,13 @@ def _bench_today(conn, today: dt.date) -> float | None:
 
 
 def run(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_fn=None,
-        sector_fn=None, signals=None, t212=None) -> DayReport:
+        sector_fn=None, signals=None, t212=None, buy: bool = True) -> DayReport:
     """One daily pass over both books (see the module docstring). Returns what was
-    ordered today, everything scored, and where the model stands against its benchmark."""
+    ordered today, everything scored, and where the model stands against its benchmark.
+    `buy=False` is a pass that places no buy (and records no skipped one): it still fills,
+    revalues, sells on the exit rules, scores and snapshots. bot.py runs the model that way on
+    every day but the week's first Friday-to-Sunday run (spec 2026-10-01): the buys the user
+    sees on Friday are then the only ones, and can be copied at the same fill."""
     today = today or dt.date.today()
     news_fn = _memoised(news_fn or default_news)
     trend_fn = trend_fn or crypto.price_trend
@@ -564,10 +569,10 @@ def run(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_f
             print(f"[model] scores not kept: {type(e).__name__}: {e}", file=sys.stderr)
     scored = scored or []
 
-    if STOCK_BOOK not in failed:
+    if buy and STOCK_BOOK not in failed:
         with _sleeve(conn, STOCK_BOOK, failed):
             _buy_stocks(conn, scored, today, sector_of, buys)
-    if CRYPTO_BOOK not in failed:
+    if buy and CRYPTO_BOOK not in failed:
         with _sleeve(conn, CRYPTO_BOOK, failed):
             _buy_coins(conn, scored, today, buys)
     for code in BOOKS:

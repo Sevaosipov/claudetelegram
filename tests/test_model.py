@@ -431,6 +431,40 @@ def test_a_watch_or_blocked_stock_is_not_bought(conn):
     assert report.decisions["BBB"] == model_score.BLOCK and report.decisions["WWW"] == model_score.SKIP
 
 
+# ------------------------------------------------ the weekly buys: run(buy=False)
+def test_a_run_without_buys_places_no_order_and_keeps_scoring_and_the_snapshot(conn):
+    series = {"AAA": _stock_bars(), "BTC-USD": _rising()}
+    report = _run(conn, [_sig("AAA"), _flow("BTC")], series, buy=False)
+    assert paper.orders(conn, S) == [] and paper.orders(conn, C) == []     # no buy, no skip row either
+    assert report.buys == []
+    assert report.decisions["AAA"] == model_score.BUY                      # ... but it was scored,
+    assert report.decisions["CRYPTO:BTC"] == model_score.BUY
+    assert [s.ticker for s in model.cached_scores(conn, TODAY)][:1] == ["CRYPTO:BTC"]      # ... and kept
+    assert conn.execute("SELECT COUNT(*) FROM paper_equity").fetchone()[0] == 2      # ... and stamped
+
+
+def test_a_run_without_buys_still_sells_on_an_exit_rule(conn):
+    _position(conn, "AAA", stop_pct=0.10)                     # the zigzag's peak 120 puts the line at 108
+    report = _run(conn, [_sig("BBB")], {"AAA": _stock_bars(), "BBB": _stock_bars()}, buy=False)
+    assert [t.reasons for t in report.sells] == [["стоп: −10% от максимума"]]
+    assert [(o["ticker"], o["side"], o["status"]) for o in paper.orders(conn, S)] == [("AAA", "sell", "pending")]
+    assert report.buys == []
+
+
+def test_a_run_without_buys_does_not_skip_a_blocked_candidate_either(conn):
+    _position(conn, "OLD", closed_days_ago=5)                 # sold 5 days ago: a buy would be «недавно продан»
+    _run(conn, [_sig("OLD")], {"OLD": _stock_bars()}, buy=False)
+    assert paper.orders(conn, S) == []
+
+
+def test_buys_are_on_unless_asked_off(conn):
+    series = {"AAA": _stock_bars(), "BTC-USD": _rising()}
+    report = _run(conn, [_sig("AAA"), _flow("BTC")], series)               # the default
+    assert sorted(t.ticker for t in report.buys) == ["AAA", "CRYPTO:BTC"]
+    explicit = _run(conn, [_sig("BBB")], {"BBB": _stock_bars()}, buy=True)
+    assert [t.ticker for t in explicit.buys] == ["BBB"]
+
+
 # ------------------------------------------------------------- stock exits
 PATH = [100, 105, 110, 120, 130, 128, 125, 122, 120]     # closes from the fill day (10 days ago) on
 

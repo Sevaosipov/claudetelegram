@@ -193,13 +193,6 @@ def test_send_text_still_skips_silently_without_credentials(monkeypatch, capsys)
     assert tn.send_text("hello") is False
 
 
-# ------------------------------------------------------------ the model's start money
-def test_the_messages_start_money_is_the_models():
-    """telegram_notify keeps its own copy (model is heavy to import): the two must agree."""
-    import model
-    assert tn._MODEL_START_EUR == model.STOCK_START_EUR + model.CRYPTO_START_EUR
-
-
 # ------------------------------------------------------ corroborated_by
 #
 # cluster.find_corroboration() sets `.corroborated_by` on a signal after the
@@ -313,8 +306,8 @@ def test_condensed_stock_reply_names_fallback_sources():
 # --------------------------------------------------------- caution signals
 #
 # A bearish coin signal is journaled as `caution` and reads as an outflow when shown (the
-# menu's Сигналы); it is never in the daily message, which takes the model's buys and
-# sales, close alerts and group exits only -- see bot._send_day.
+# menu's Сигналы); it is never in Telegram: the weekly message (paper_report.format_week) and
+# the daily close alerts (bot._send_closes) do not carry signals.
 
 def _caution_signal():
     return cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF США, фондов: 12",
@@ -325,10 +318,6 @@ def _caution_signal():
 def test_a_bearish_coin_signal_reads_as_an_outflow():
     text = telegram_notify.format_any_signal(_caution_signal(), html=False)
     assert "ОТТОК ИЗ СПОТ-ETF" in text and "3 дн. подряд оттока" in text
-
-
-def test_the_model_day_message_has_nothing_to_say_without_a_trade_a_close_or_an_exit():
-    assert telegram_notify.format_model_day(None, [], []) is None
 
 
 @pytest.mark.parametrize("trigger, reason", [
