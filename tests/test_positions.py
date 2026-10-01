@@ -741,3 +741,213 @@ def test_an_older_positions_table_gains_the_stop_column(tmp_path):
     [pos] = positions.open_positions(migrated)
     assert pos.ticker == "OLD" and pos.stop_pct is None
     migrated.close()
+
+
+# ---------------------------------------------------------------- the venue split
+@pytest.mark.parametrize("key, expected", [
+    ("EQNR.OL", ("EQNR", "NORWAY")), ("VOLV-B.ST", ("VOLV-B", "SWEDEN")),
+    ("ESSITY-B.ST", ("ESSITY-B", "SWEDEN")),
+    ("EQNR", None), (".OL", None), (".ST", None), ("EQNR.OLX", None), ("BRK.B", None),
+    ("SAP.DE", None), ("AAPL", None), ("CRYPTO:BTC", None)])
+def test_split_venue_names_the_bare_ticker_and_source_of_an_oslo_or_stockholm_listing(key, expected):
+    assert positions.split_venue(key) == expected
+
+
+def test_split_venue_is_the_inverse_of_the_yahoo_symbol_of_its_listing():
+    for key in ("EQNR.OL", "VOLV-B.ST"):
+        ticker, source = positions.split_venue(key)
+        assert positions.yahoo_symbol(ticker, source) == key
+
+
+def test_a_venue_listing_takes_its_insiders_from_that_listings_signal(conn):
+    """"NRC" is National Research Corp in New York and NRC Group in Oslo: /bought NRC.OL must not
+    watch the American company's insiders."""
+    _strong_journal(conn, "NRC", ["Oslo Boss"], source="NORWAY")
+    _strong_journal(conn, "NRC", ["US Boss"], source="SEC")                # the later row, another company
+    pos = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY",
+                                  closes_fn=lambda t, s=None: [])
+    assert (pos.insiders, pos.source) == (["Oslo Boss"], "NORWAY") and pos.signal_id is not None
+    positions.close_position(conn, "NRC")
+    pos = positions.open_position(conn, "NRC", 100.0, today=TODAY, closes_fn=lambda t, s=None: [])
+    assert (pos.insiders, pos.source) == (["US Boss"], "SEC")             # no source given: the latest signal's
+
+
+def test_an_oslo_listing_with_only_an_american_signal_has_no_insiders(conn):
+    _strong_journal(conn, "NRC", ["US Boss"], source="SEC")
+    pos = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY",
+                                  closes_fn=lambda t, s=None: [])
+    assert pos.insiders == [] and pos.signal_id is None and pos.source == "NORWAY"
+
+
+# ------------------------------------------------------------------ position_status
+def _status_of(conn, price=None, bars=(), pos=None):
+    """position_status of the (first) open position, the price and the history stubbed."""
+    pos = pos or positions.open_positions(conn)[0]
+    return positions.position_status(pos, TODAY, price_fn=lambda t, s=None: price,
+                                     closes_fn=lambda t, s=None: list(bars))
+
+
+def test_position_status_is_the_price_the_result_the_days_the_peak_and_the_stop(conn):
+    _open(conn, price=100.0, days_ago=5, stop=0.10)
+    st = _status_of(conn, 120.0, _held_bars([200.0] * 3, [110.0, 130.0, 125.0]))
+    assert set(st) == {"last", "result", "days", "peak", "stop_pct", "stop_level", "to_stop"}
+    assert st["last"] == 120.0 and st["days"] == 5
+    assert st["result"] == pytest.approx(0.20)
+    assert (st["peak"], st["stop_pct"]) == (130.0, 0.10)
+    assert st["stop_level"] == pytest.approx(117.0)
+    assert st["to_stop"] == pytest.approx(1 - 117.0 / 120.0)
+
+
+def test_the_peak_is_the_entry_or_a_completed_close_since_the_open(conn):
+    _open(conn, price=100.0, stop=0.10)
+    # every close since the open is under the entry, and the one before it (200) is not counted
+    assert _status_of(conn, 95.0, _held_bars([200.0] * 3, [95.0, 96.0]))["peak"] == 100.0
+    # the close on the opening day counts
+    assert _status_of(conn, 95.0, _held_bars([], [150.0, 100.0]))["peak"] == 150.0
+    # a bar dated today is still in progress: it sets no peak
+    bars = _held_bars([], [100.0, 130.0]) + [(TODAY.isoformat(), 300.0)]
+    assert _status_of(conn, 95.0, bars)["peak"] == 130.0
+
+
+def test_the_stored_stop_is_the_stop(conn):
+    _open(conn, price=100.0, stop=0.12)
+    assert _status_of(conn, 100.0, _held_bars(_CHOPPY, [100.0]))["stop_pct"] == 0.12
+
+
+def test_a_missing_stop_comes_from_the_closes_before_the_open(conn):
+    _open(conn, price=100.0)
+    st = _status_of(conn, 100.0, _held_bars(_CHOPPY, [100.0, 100.0]))
+    assert st["stop_pct"] == pytest.approx(model_score.stop_distance(_CHOPPY, "stock"))
+    assert st["stop_level"] == pytest.approx(100.0 * (1 - st["stop_pct"]))
+
+
+@pytest.mark.parametrize("ticker, fallback", [("AAA", 0.15), ("CRYPTO:BTC", 0.25)])
+def test_a_missing_stop_with_too_little_history_is_the_models_fallback(conn, ticker, fallback):
+    _open(conn, ticker, 100.0)
+    assert _status_of(conn, 100.0, _held_bars([100.0] * 5, [100.0]))["stop_pct"] == fallback
+
+
+@pytest.mark.parametrize("price, to_stop", [(130.0, 0.10), (120.0, 1 - 117.0 / 120.0), (117.0, 0.0),
+                                            (100.0, 1 - 117.0 / 100.0)])
+def test_to_stop_is_how_far_the_price_can_still_fall_before_the_stop(conn, price, to_stop):
+    """As a share of the price now: at the peak with a 10% stop it can fall 10%; at the stop
+    level, nothing; below it the figure is negative."""
+    _open(conn, price=100.0, stop=0.10)
+    st = _status_of(conn, price, _held_bars([], [110.0, 130.0]))           # peak 130 -> level 117
+    assert st["to_stop"] == pytest.approx(to_stop)
+
+
+@pytest.mark.parametrize("price", [130.0, 120.0, 117.0, 100.0])
+def test_a_fall_of_to_stop_from_the_price_lands_on_the_stop_level(conn, price):
+    _open(conn, price=100.0, stop=0.10)
+    st = _status_of(conn, price, _held_bars([], [110.0, 130.0]))
+    assert price * (1 - st["to_stop"]) == pytest.approx(st["stop_level"])
+
+
+@pytest.mark.parametrize("price", [100.0, 116.9, 117.0, 117.1, 130.0])
+def test_to_stop_reaches_zero_exactly_where_the_stop_alert_fires(conn, price):
+    _open(conn, price=100.0, stop=0.10)
+    bars = _held_bars([], [110.0, 130.0])
+    fires = bool(_check(conn, price=price, bars=bars))
+    assert (_status_of(conn, price, bars)["to_stop"] <= 0) == fires
+
+
+def test_the_alert_and_the_status_use_the_one_peak_and_stop_helper(conn, monkeypatch):
+    _open(conn, price=100.0, stop=0.10)
+    monkeypatch.setattr(positions, "_stop_and_peak", lambda pos, bars: (0.5, 400.0))
+    st = _status_of(conn, 250.0, _held_bars([], [100.0]))
+    assert (st["peak"], st["stop_pct"], st["stop_level"]) == (400.0, 0.5, 200.0)
+    [alert] = _check(conn, price=190.0, bars=_held_bars([], [100.0]))
+    assert alert.trigger == "trailing_stop" and alert.detail == "−50% от максимума 400.00"
+
+
+@pytest.mark.parametrize("price", [None, 0.0])
+def test_without_a_price_the_status_has_no_result_and_no_distance_to_the_stop(conn, price):
+    _open(conn, price=100.0, days_ago=5, stop=0.10)
+    st = _status_of(conn, price, _held_bars([], [100.0, 130.0]))
+    assert st["last"] is None and st["result"] is None and st["to_stop"] is None
+    assert (st["days"], st["peak"], st["stop_pct"]) == (5, 130.0, 0.10)
+    assert st["stop_level"] == pytest.approx(117.0)
+
+
+def test_position_status_reads_the_price_and_the_history_the_way_check_exits_does(conn, monkeypatch):
+    seen = []
+    monkeypatch.setattr(positions, "last_close", lambda t, s=None: seen.append(("price", t, s)) or 110.0)
+    monkeypatch.setattr(positions, "daily_closes", lambda t, s=None: seen.append(("closes", t, s))
+                        or _held_bars([], [100.0, 120.0]))
+    _open(conn, "NRC", 100.0, stop=0.10)
+    conn.execute("UPDATE positions SET source = 'NORWAY'")
+    [pos] = positions.open_positions(conn)
+    st = positions.position_status(pos, TODAY)
+    assert sorted(seen) == [("closes", "NRC", "NORWAY"), ("price", "NRC", "NORWAY")]
+    assert st["last"] == 110.0 and st["peak"] == 120.0
+
+
+# ------------------------------------------------------------------ portfolio_rows
+def _model_position(conn, book, ticker, closed=None, source="SEC"):
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx, closed_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (book, ticker, source, ticker, "USD", "2026-09-20", 1_000.0, 998.0, 10.0, 1.16, closed))
+    conn.commit()
+
+
+@pytest.fixture
+def priced(monkeypatch):
+    """Every position is priced at 110 and has no price history: the seams portfolio_rows reads
+    through, as check_exits does."""
+    monkeypatch.setattr(positions, "last_close", lambda t, s=None: 110.0)
+    monkeypatch.setattr(positions, "daily_closes", lambda t, s=None: [])
+
+
+def _rows(conn):
+    return positions.portfolio_rows(conn, TODAY)
+
+
+def test_portfolio_rows_are_the_open_positions_oldest_first_with_their_status(conn, priced):
+    _open(conn, "BBB", 50.0, days_ago=2, stop=0.10)
+    _open(conn, "AAA", 100.0, days_ago=9, stop=0.10)
+    closed = _open(conn, "CCC", 10.0, days_ago=20, stop=0.10)
+    positions.close_position(conn, closed.ticker, today=TODAY)
+    rows = _rows(conn)
+    assert [(p.ticker, st["days"], holds) for p, st, holds in rows] == [("AAA", 9, False), ("BBB", 2, False)]
+    assert rows[0][1]["last"] == 110.0 and rows[0][1]["result"] == pytest.approx(0.10)
+
+
+def test_portfolio_rows_of_no_positions_is_empty(conn, priced):
+    assert _rows(conn) == []
+
+
+def test_portfolio_rows_say_when_the_model_holds_the_same_name(conn, priced):
+    _model_position(conn, model.STOCK_BOOK, "AAA")
+    _model_position(conn, model.CRYPTO_BOOK, "CRYPTO:BTC")
+    _model_position(conn, model.STOCK_BOOK, "OLD", closed="2026-09-25")      # sold: not held
+    _model_position(conn, "R1-E1", "ZZZ")                                    # an archived book is not the model
+    for ticker in ("AAA", "CRYPTO:BTC", "BBB", "OLD", "ZZZ"):
+        _open(conn, ticker, 100.0, stop=0.10)
+    holds = {p.ticker: held for p, _st, held in _rows(conn)}
+    assert holds == {"AAA": True, "CRYPTO:BTC": True, "BBB": False, "OLD": False, "ZZZ": False}
+
+
+def test_a_stock_named_like_a_coin_is_not_the_coin_the_model_holds(conn, priced):
+    """The stock BTC (Grayscale's ETF) and the coin CRYPTO:BTC are two assets."""
+    _model_position(conn, model.CRYPTO_BOOK, "CRYPTO:BTC")
+    _open(conn, "BTC", 100.0, stop=0.10)
+    assert [held for _p, _st, held in _rows(conn)] == [False]
+
+
+def test_an_oslo_listing_is_not_the_us_stock_of_the_same_name_the_model_holds(conn, priced):
+    """Oslo's NRC and the US NRC are two companies: only a match on the venue too counts."""
+    _model_position(conn, model.STOCK_BOOK, "NRC")                       # the US NRC
+    oslo = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY",
+                                   closes_fn=lambda t, s=None: [])
+    us = positions.open_position(conn, "AAA", 100.0, today=TODAY, closes_fn=lambda t, s=None: [])
+    _model_position(conn, model.STOCK_BOOK, "AAA")
+    holds = {p.ticker: held for p, _st, held in _rows(conn)}
+    assert holds == {"NRC": False, "AAA": True} and oslo.source == "NORWAY" and us.source is None
+
+
+def test_an_oslo_listing_the_model_holds_on_oslo_too_counts(conn, priced):
+    _model_position(conn, model.STOCK_BOOK, "NRC", source="NORWAY")
+    positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY", closes_fn=lambda t, s=None: [])
+    assert [held for _p, _st, held in _rows(conn)] == [True]

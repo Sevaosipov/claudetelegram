@@ -19,7 +19,8 @@ only the TradingView MCP server, `--permission-mode dontAsk` (whatever is not al
 denied), and a shell allowed exactly three read commands, named by their absolute paths
 (ANALYST_CMD is `<BASE_DIR>/.venv/bin/python <BASE_DIR>/analyst.py`):
     ANALYST_CMD context 'TICKER'     the model's score, the positions, the dossier
-    ANALYST_CMD portfolio            the model summary, the watchlist, today's buys
+    ANALYST_CMD portfolio            the owner's /bought positions, the model summary, the
+                                     watchlist, today's buys
     ANALYST_CMD news 'QUERY'         up to 10 Google News headlines with dates
 Each Claude runs in a fresh empty folder outside the project, removed after the run: the
 read-only shell commands Claude may run in its working directory without a rule find nothing
@@ -52,7 +53,6 @@ from pathlib import Path
 
 import assets
 import db
-import marketcap
 import model
 import model_score
 import paper
@@ -494,15 +494,6 @@ def valid_ticker(text: str) -> str | None:
     return ticker.removeprefix("$") if TICKER_RE.match(ticker) else None
 
 
-def _split_venue(key: str) -> tuple[str, str] | None:
-    """("EQNR", "NORWAY") for "EQNR.OL": the signal tables know a Norwegian or Swedish stock as
-    the bare ticker with the source that disclosed it. None for any other key."""
-    for source, venue in marketcap.SOURCE_VENUE.items():
-        if venue and key.endswith(venue) and len(key) > len(venue):
-            return key[:-len(venue)], source
-    return None
-
-
 class _Spellings:
     """How the bot's tables may spell a ticker: "$NVDA" is NVDA, a bare "BTC" is BTC or
     CRYPTO:BTC, "EQNR.OL" is also the bare EQNR of the source NORWAY. `stock_only` is a "$" written
@@ -513,7 +504,7 @@ class _Spellings:
         key = ticker.strip().upper()
         self.stock_only = key.startswith("$")
         key = key.removeprefix("$")
-        self.venue = _split_venue(key)
+        self.venue = positions.split_venue(key)
         self.names = {key}
         if self.venue:
             self.names.add(self.venue[0])
@@ -554,7 +545,7 @@ def _quiet_lines(conn, ticker: str) -> list[str]:
         if asset is None or asset.kind != "stock" or asset.is_isin:
             return []
         if asset.exchange:      # EQNR.OL: the signal tables know it as EQNR with source NORWAY
-            venue = _split_venue(asset.symbol)
+            venue = positions.split_venue(asset.symbol)
             if venue is None:
                 return []
             name, source = venue
@@ -694,9 +685,20 @@ def _watchlist(scored: list) -> list[str]:
         for s in watch]
 
 
+def _own_positions(conn, today: dt.date) -> list[str]:
+    """«ВАШИ ПОЗИЦИИ (/bought):» and, for each position the owner recorded, the facts /portfolio
+    shows them in Telegram (as plain text); or why there is nothing to show."""
+    try:
+        blocks = telegram_notify.my_position_blocks(positions.portfolio_rows(conn, today), html=False)
+    except Exception as e:
+        return [f"ВАШИ ПОЗИЦИИ (/bought): не посчитаны: {type(e).__name__}"]
+    return ["ВАШИ ПОЗИЦИИ (/bought):"] + blocks if blocks else ["ВАШИ ПОЗИЦИИ (/bought): нет"]
+
+
 def portfolio(conn, *, scored=None) -> str:
-    """The model summary, the stocks and coins it is watching and today's buys. `scored` is
-    model.score_today's list; else today's kept scores, else everything is scored now."""
+    """The owner's own /bought positions, then the model: its summary, the stocks and coins it
+    is watching and today's buys. `scored` is model.score_today's list; else today's kept
+    scores, else everything is scored now."""
     today = dt.date.today()
     error = None
     if scored is None:
@@ -707,8 +709,8 @@ def portfolio(conn, *, scored=None) -> str:
                    else _watchlist(scored))
     buys = _buys_today(conn, today)
     buy_lines = ["ПОКУПКИ СЕГОДНЯ:"] + buys if buys else ["ПОКУПКИ СЕГОДНЯ: нет"]
-    return "\n".join([paper_report.format_summary(conn, today), ""] + watch_lines + [""]
-                     + buy_lines)
+    return "\n".join(_own_positions(conn, today) + ["", paper_report.format_summary(conn, today), ""]
+                     + watch_lines + [""] + buy_lines)
 
 
 def news(query: str) -> str:
@@ -751,7 +753,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("context", help="the model's score, positions and the dossier: context TICKER"
                    ).add_argument("ticker")
-    sub.add_parser("portfolio", help="model summary, watchlist, today's buys")
+    sub.add_parser("portfolio", help="your /bought positions, model summary, watchlist, today's buys")
     sub.add_parser("news", help="Google News headlines: news QUERY").add_argument("query", nargs="*")
     sub.add_parser("ask", help="ask the analyst from the terminal: ask TEXT").add_argument(
         "text", nargs="*")

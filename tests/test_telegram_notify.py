@@ -398,3 +398,147 @@ def test_redact_leaves_other_text_alone():
     assert telegram_notify._redact("timeout after 15 s", TOKEN) == "timeout after 15 s"
     assert telegram_notify._redact("timeout", None) == "timeout"
     assert telegram_notify._redact(f"a {TOKEN} b", TOKEN) == "a <token> b"
+
+
+# ------------------------------------------------------------ format_my_portfolio (/portfolio)
+def _held(ticker="GME", *, entry=23.10, opened="2026-10-01", insiders=(), stop_pct=0.10, pid=1,
+          source=None):
+    return positions.Position(pid, ticker, source, opened, entry, list(insiders), None, None, None,
+                              None, stop_pct)
+
+
+def _status(last=24.05, *, entry=23.10, days=3, peak=24.05, stop_pct=0.10, stop_level=21.65,
+            to_stop=0.10):
+    """A position_status() dict as positions.py builds it (the numbers are handed in whole)."""
+    return {"last": last, "result": None if last is None else last / entry - 1, "days": days,
+            "peak": peak, "stop_pct": stop_pct, "stop_level": stop_level,
+            "to_stop": None if last is None else to_stop}
+
+
+_SELL_LINE = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть, /model — модельный портфель."
+
+
+def test_my_portfolio_shows_a_position_in_full():
+    rows = [(_held(insiders=["Ryan Cohen", "Alice Smith"]), _status(), True)]
+    assert tn.format_my_portfolio(rows) == "\n\n".join([
+        "<b>💼 Ваш портфель — 1 позиция</b>",
+        "\n".join(["• GME: вход 23,10 (01.10), сейчас 24,05 (+4,1%), 3 дн.",
+                   "   стоп 21,65 (−10% от максимума 24,05), до стопа 10,0%",
+                   "   слежу за продажами: Ryan Cohen, Alice Smith",
+                   "   модель тоже держит"]),
+        "Средний результат: +4,1% по 1 позиции\n" + _SELL_LINE])
+
+
+@pytest.mark.parametrize("n, word", [(1, "позиция"), (2, "позиции"), (4, "позиции"), (5, "позиций"),
+                                     (11, "позиций"), (21, "позиция"), (22, "позиции")])
+def test_my_portfolio_header_counts_the_positions_in_russian(n, word):
+    rows = [(_held(f"T{i}", pid=i), _status(), False) for i in range(n)]
+    assert tn.format_my_portfolio(rows).startswith(f"<b>💼 Ваш портфель — {n} {word}</b>\n\n")
+
+
+@pytest.mark.parametrize("n, word", [(1, "позиции"), (2, "позициям"), (5, "позициям"),
+                                     (11, "позициям"), (21, "позиции")])
+def test_the_average_line_counts_the_positions_in_russian(n, word):
+    rows = [(_held(f"T{i}", pid=i), _status(), False) for i in range(n)]
+    assert f"Средний результат: +4,1% по {n} {word}\n" + _SELL_LINE in tn.format_my_portfolio(rows)
+
+
+def test_the_insiders_line_is_only_there_when_there_are_insiders():
+    with_ = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(), False)])
+    without = tn.format_my_portfolio([(_held(), _status(), False)])
+    assert "\n   слежу за продажами: Ryan Cohen" in with_
+    assert "слежу" not in without
+
+
+def test_the_model_line_is_only_there_when_the_model_holds_it_too():
+    text = tn.format_my_portfolio([(_held("GME"), _status(), True),
+                                   (_held("BBB", pid=2, opened="2026-10-02"), _status(), False)])
+    assert text.count("модель тоже держит") == 1
+    gme, bbb = text.split("\n\n")[1:3]
+    assert gme.endswith("\n   модель тоже держит") and "модель" not in bbb
+
+
+def test_a_coin_is_shown_by_its_symbol_with_thousands_and_the_model_line():
+    coin = _held("CRYPTO:BTC", entry=60_000.0, opened="2026-09-28", stop_pct=0.15, source="CRYPTO")
+    st = _status(61_200.0, entry=60_000.0, peak=61_200.0, stop_pct=0.15, stop_level=52_020.0,
+                 to_stop=0.176)
+    text = tn.format_my_portfolio([(coin, st, True)])
+    assert ("• BTC: вход 60 000,00 (28.09), сейчас 61 200,00 (+2,0%), 3 дн.\n"
+            "   стоп 52 020,00 (−15% от максимума 61 200,00), до стопа 17,6%\n"
+            "   модель тоже держит") in text
+    assert "CRYPTO" not in text
+
+
+def test_a_position_with_no_price_says_so_and_has_no_stop_line():
+    text = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(None), True)])
+    assert ("• GME: вход 23,10 (01.10), сейчас — цена недоступна, 3 дн.\n"
+            "   слежу за продажами: Ryan Cohen\n   модель тоже держит") in text
+    assert "стоп" not in text and "Средний результат" not in text      # nothing to average either
+    assert text.endswith(_SELL_LINE)
+
+
+def test_a_price_below_the_stop_is_said_so():
+    """to_stop is how far the price can still fall (a share of the price now): below the stop it is
+    negative, and «ниже стопа на» shows the same quantity without its sign."""
+    st = _status(90.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=1 - 117.0 / 90.0)
+    text = tn.format_my_portfolio([(_held(entry=100.0), st, False)])
+    assert "   стоп 117,00 (−10% от максимума 130,00), ниже стопа на 30,0%" in text
+    assert "до стопа" not in text
+
+
+def test_at_the_stop_level_there_is_nothing_left_to_fall():
+    st = _status(117.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=0.0)
+    assert "), до стопа 0,0%" in tn.format_my_portfolio([(_held(entry=100.0), st, False)])
+
+
+def test_the_average_is_the_equal_weighted_mean_of_the_known_results():
+    rows = [(_held("AAA", pid=1, entry=100.0), _status(110.0, entry=100.0), False),      # +10%
+            (_held("BBB", pid=2, entry=100.0), _status(95.0, entry=100.0), False),       # -5%
+            (_held("CCC", pid=3, entry=100.0), _status(None, entry=100.0), False)]       # no price: left out
+    text = tn.format_my_portfolio(rows)
+    assert "Средний результат: +2,5% по 2 позициям\n" + _SELL_LINE in text
+    assert text.startswith("<b>💼 Ваш портфель — 3 позиции</b>")                          # all three are held
+
+
+def test_a_loss_has_a_real_minus_sign():
+    text = tn.format_my_portfolio([(_held(entry=100.0), _status(95.0, entry=100.0), False)])
+    assert "сейчас 95,00 (−5,0%)" in text and "Средний результат: −5,0% по 1 позиции" in text
+
+
+def test_the_oldest_position_comes_first():
+    rows = [(_held("NEW", opened="2026-10-01", pid=2), _status(), False),
+            (_held("OLD", opened="2026-09-20", pid=1), _status(), False)]
+    text = tn.format_my_portfolio(rows)
+    assert text.index("• OLD") < text.index("• NEW")
+
+
+def test_no_positions_say_how_to_add_one():
+    assert tn.format_my_portfolio([]) == (
+        "Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
+        "Модельный портфель: /model.")
+
+
+def test_my_portfolio_escapes_every_dynamic_string():
+    rows = [(_held("A&B<C>", insiders=["X & <Y>", "Q>R"]), _status(), False)]
+    text = tn.format_my_portfolio(rows)
+    assert "• A&amp;B&lt;C&gt;:" in text and "слежу за продажами: X &amp; &lt;Y&gt;, Q&gt;R" in text
+    assert "<" not in text.replace("<b>", "").replace("</b>", "")      # only the header's bold is markup
+    assert ">" not in text.replace("<b>", "").replace("</b>", "")
+
+
+def test_my_portfolio_in_plain_text_has_no_markup_and_no_escaping():
+    rows = [(_held("A&B", insiders=["X & <Y>"]), _status(), False)]
+    text = tn.format_my_portfolio(rows, html=False)
+    assert text.startswith("💼 Ваш портфель — 1 позиция\n\n• A&B:")
+    assert "<b>" not in text and "&amp;" not in text and "слежу за продажами: X & <Y>" in text
+    assert tn.format_my_portfolio([], html=False).startswith("Ваших позиций нет.")
+
+
+def test_my_position_blocks_are_the_positions_alone():
+    """The analyst prints these under its own heading: no header, no average, no hint."""
+    rows = [(_held("GME", insiders=["Ryan Cohen"]), _status(), True),
+            (_held("BBB", pid=2, opened="2026-10-02"), _status(None), False)]
+    blocks = tn.my_position_blocks(rows, html=False)
+    assert len(blocks) == 2 and blocks[0].startswith("• GME: вход 23,10 (01.10)")
+    assert blocks[1] == "• BBB: вход 23,10 (02.10), сейчас — цена недоступна, 3 дн."
+    assert tn.my_position_blocks([], html=False) == []

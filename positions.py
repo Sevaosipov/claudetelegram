@@ -24,6 +24,10 @@ and a close alert fires once per position, on the first of:
   news           a red-flag headline on the ticker.
 
 The alert doesn't close the position; /sold does. The user stays in control.
+
+position_status is the live view of one open position (its price, result, peak and stop),
+and portfolio_rows gathers it for all of them: what /portfolio shows in Telegram and what
+`analyst.py portfolio` prints.
 """
 from __future__ import annotations
 
@@ -122,8 +126,29 @@ def position_source(conn, ticker: str) -> str | None:
     return row[0] if row else None
 
 
+def split_venue(key: str) -> tuple[str, str] | None:
+    """("EQNR", "NORWAY") for "EQNR.OL", ("VOLV-B", "SWEDEN") for "VOLV-B.ST": the signal tables
+    know an Oslo or Stockholm stock as the bare ticker with the source that disclosed it (the
+    inverse of yahoo_symbol). None for any other key."""
+    for source, venue in marketcap.SOURCE_VENUE.items():
+        if venue and key.endswith(venue) and len(key) > len(venue):
+            return key[:-len(venue)], source
+    return None
+
+
 def _kind(ticker: str) -> str:
     return "crypto" if crypto.is_crypto(ticker) else "stock"
+
+
+def _buy_signal(conn, ticker: str, source: str | None):
+    """(id, members) of the latest buy-side journal row for `ticker`, or None. On an Oslo or
+    Stockholm listing only that source's rows count: the same letters are another company
+    on another exchange (NRC is National Research Corp in New York, NRC Group in Oslo)."""
+    venue = source if marketcap.SOURCE_VENUE.get(source or "") else None
+    return conn.execute(
+        f"SELECT id, members FROM signal_journal WHERE ticker = ? AND {_BUY_SIDE_ROW} "
+        "AND (? IS NULL OR source = ?) ORDER BY emitted_at DESC, id DESC LIMIT 1",
+        (ticker, venue, venue)).fetchone()
 
 
 def open_position(conn, ticker: str, entry_price: float, today: dt.date | None = None,
@@ -139,11 +164,9 @@ def open_position(conn, ticker: str, entry_price: float, today: dt.date | None =
     ticker = ticker.strip().upper()
     if any(p.ticker == ticker for p in open_positions(conn)):
         raise ValueError(f"position in {ticker} is already open")
-    sig = conn.execute(
-        f"SELECT id, members FROM signal_journal WHERE ticker = ? AND {_BUY_SIDE_ROW} "
-        "ORDER BY emitted_at DESC, id DESC LIMIT 1", (ticker,)).fetchone()
-    signal_id, members = sig if sig else (None, "[]")
     source = source or position_source(conn, ticker)
+    sig = _buy_signal(conn, ticker, source)
+    signal_id, members = sig if sig else (None, "[]")
     closes = (closes_fn or daily_closes)(ticker, source)
     stop_pct = model_score.stop_distance([c for _d, c in closes], _kind(ticker))
     conn.execute(
@@ -261,10 +284,17 @@ def _crypto_caution(conn, pos: Position, today: dt.date, trend_fn) -> str | None
             f"ниже 20-дн. средней")
 
 
-def _trailing_stop(pos: Position, bars: list[tuple[str, float]], price: float) -> str | None:
-    """The price is the position's stop or more below its highest close since the open
-    (the entry price counts as one). A position with no stored stop takes the one the
-    closes before its open date give, else the model's fallback for its kind."""
+def _completed_bars(bars: list[tuple[str, float]], today: dt.date) -> list[tuple[str, float]]:
+    """The closes before `today`, as the model's paper.Prices(today) keeps them: a bar for today
+    is still in progress (a coin's always is) and must not set a peak or trip a stop or a trend."""
+    return [b for b in bars if b[0] < today.isoformat()]
+
+
+def _stop_and_peak(pos: Position, bars: list[tuple[str, float]]) -> tuple[float, float]:
+    """(the stop's distance, the highest close since the open -- the entry price counts as one)
+    of a position, from its completed closes `bars`. A position with no stored stop takes the
+    one the closes before its open date give, else the model's fallback for its kind. The one
+    computation behind the trailing-stop alert and the status /portfolio shows."""
     import model
     stop = pos.stop_pct
     if stop is None:
@@ -273,9 +303,71 @@ def _trailing_stop(pos: Position, bars: list[tuple[str, float]], price: float) -
         if stop is None:
             stop = model.FALLBACK_STOP[kind]
     peak = max([pos.entry_price] + [c for d, c in bars if d >= pos.opened_at])
+    return stop, peak
+
+
+def _trailing_stop(pos: Position, bars: list[tuple[str, float]], price: float) -> str | None:
+    """The price is the position's stop or more below its highest close since the open
+    (_stop_and_peak)."""
+    stop, peak = _stop_and_peak(pos, bars)
     if price <= peak * (1 - stop):
         return f"−{stop * 100:.0f}% от максимума {peak:,.2f}"
     return None
+
+
+def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=None) -> dict:
+    """How an open position stands, from the same price and history the exits read (`price_fn`
+    and `closes_fn`, `(ticker, source)` seams with check_exits' defaults):
+      last        the price, or None when there isn't one;
+      result      last / entry price - 1, or None;
+      days        days since the open;
+      peak        the entry price or the highest completed close since the open;
+      stop_pct    the stop's distance: the stored one, else the closes before the open give,
+                  else the model's fallback;
+      stop_level  peak * (1 - stop_pct): the price the trailing stop fires at;
+      to_stop     how far the price can still fall before the stop fires, as a share of the
+                  price now: 1 - stop_level / last (the price at its peak: the stop's own
+                  distance). Zero at the stop level, negative below it (how far below, as
+                  a share of the price now); None with no price."""
+    price_fn = price_fn or last_close
+    closes_fn = closes_fn or daily_closes
+    last = price_fn(pos.ticker, pos.source) or None
+    bars = _completed_bars(closes_fn(pos.ticker, pos.source), today)
+    stop_pct, peak = _stop_and_peak(pos, bars)
+    stop_level = peak * (1 - stop_pct)
+    return {"last": last,
+            "result": last / pos.entry_price - 1 if last else None,
+            "days": (today - dt.date.fromisoformat(pos.opened_at)).days,
+            "peak": peak, "stop_pct": stop_pct, "stop_level": stop_level,
+            "to_stop": 1 - stop_level / last if last else None}
+
+
+_VENUE_SOURCES = ("NORWAY", "SWEDEN")
+
+
+def _asset_key(ticker: str, source: str | None = None) -> tuple[str, str, str]:
+    """A name as the model's books and the user's positions share it: a coin by its symbol, a
+    stock by its ticker (the stock BTC and the coin BTC stay two assets), and an Oslo or
+    Stockholm listing with its venue (Oslo's NRC is not the US NRC)."""
+    if crypto.is_crypto(ticker):
+        return "coin", crypto.symbol_of(ticker).upper(), ""
+    return "stock", ticker.upper(), source if source in _VENUE_SOURCES else ""
+
+
+def _model_names(conn) -> set[tuple[str, str, str]]:
+    """What MODEL-S and MODEL-C hold now (_asset_key)."""
+    import model
+    import paper
+    return {_asset_key(p["ticker"], p["source"])
+            for code in model.BOOKS for p in paper.open_positions(conn, code)}
+
+
+def portfolio_rows(conn, today: dt.date) -> list[tuple[Position, dict, bool]]:
+    """What /portfolio shows: (position, position_status, model_holds) for each open position,
+    oldest first. `model_holds`: MODEL-S or MODEL-C has an open position in the same name."""
+    held = _model_names(conn)
+    return [(pos, position_status(pos, today), _asset_key(pos.ticker, pos.source) in held)
+            for pos in open_positions(conn)]
 
 
 def _pct(x: float) -> str:
@@ -291,9 +383,7 @@ def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes
     import model
     import paper
     coin = crypto.is_crypto(pos.ticker)
-    # Completed bars only, as the model's paper.Prices(today) does: a bar for today is still
-    # in progress (a coin's always is) and must not set a peak or trip a stop or a trend.
-    bars = [b for b in closes_fn(pos.ticker, pos.source) if b[0] < today.isoformat()]
+    bars = _completed_bars(closes_fn(pos.ticker, pos.source), today)
     if price is None:
         print(f"[positions] no price for {pos.ticker}; stop check skipped today")
     else:

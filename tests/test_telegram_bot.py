@@ -227,7 +227,7 @@ def test_positions_lists_open_positions(conn, replies, monkeypatch):
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
     tb._handle_message(conn, "/bought GRAB 40")
     tb._handle_message(conn, "/positions")
-    assert "GRAB" in replies[-1] and "+25.0%" in replies[-1]
+    assert "GRAB" in replies[-1] and "+25,0%" in replies[-1]
 
 
 @pytest.mark.parametrize("non_finite", ["nan", "inf", "-inf"])
@@ -350,6 +350,128 @@ def test_bought_oslo_ticker_without_a_price_uses_its_own_close(conn, monkeypatch
     tb._handle_message(conn, "/bought EQNR")
     [pos] = positions.open_positions(conn)
     assert pos.entry_price == 270.0 and pos.source == "NORWAY"
+
+
+# ------------------------------------------- Oslo and Stockholm listings, the Yahoo way
+def test_position_listing_splits_a_venue_and_leaves_the_rest_alone():
+    assert tb._position_listing("EQNR.OL") == ("EQNR", "NORWAY")
+    assert tb._position_listing("$volv-b.st") == ("VOLV-B", "SWEDEN")
+    assert tb._position_listing("ESSITY-B.ST") == ("ESSITY-B", "SWEDEN")      # 11 characters: still a ticker
+    assert tb._position_listing("GRAB") == ("GRAB", None)
+    assert tb._position_listing("BRK.B") == ("BRK.B", None)
+    assert tb._position_listing("btc") == ("CRYPTO:BTC", None)
+    assert tb._position_listing("CRYPTO:eth") == ("CRYPTO:ETH", None)
+    assert tb._position_listing("SE0000000001") == ("SE0000000001", None)     # an ISIN: its source comes from the journal
+    for bad in ("", ".OL", ".ST", "CRYPTO:ZZZ", "TOOLONGTICKER.OL", "TOOLONGTICKERX", "???"):
+        assert tb._position_listing(bad) is None, bad
+
+
+def test_bought_an_oslo_listing_stores_the_bare_ticker_with_its_source(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought EQNR.OL 150")
+    [pos] = positions.open_positions(conn)
+    assert (pos.ticker, pos.source, pos.entry_price) == ("EQNR", "NORWAY", 150.0)
+    assert replies[-1].startswith("Записал EQNR по 150,00; ")
+
+
+def test_bought_a_stockholm_listing_stores_the_bare_ticker_with_its_source(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought volv-b.st 270")
+    tb._handle_message(conn, "/bought ESSITY-B.ST 300")
+    assert [(p.ticker, p.source, p.entry_price) for p in positions.open_positions(conn)] == [
+        ("VOLV-B", "SWEDEN", 270.0), ("ESSITY-B", "SWEDEN", 300.0)]
+
+
+def test_bought_a_stockholm_listing_says_its_insiders_are_not_watched(conn, replies):
+    """Finansinspektionen's signals are keyed by ISIN: the reply must not claim there was no signal."""
+    tb._handle_message(conn, "/bought VOLV-B.ST 270")
+    assert "за продажами инсайдеров Стокгольма не слежу (сигналы идут по ISIN)" in replies[-1]
+    assert "сильного сигнала по нему не было" not in replies[-1]
+
+
+def test_sold_an_oslo_listing_closes_it(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought EQNR.OL 150")
+    tb._handle_message(conn, "/sold EQNR.OL")
+    assert positions.open_positions(conn) == [] and replies[-1] == "Позиция EQNR закрыта."
+    tb._handle_message(conn, "/sold eqnr.ol")
+    assert "нет открытой" in replies[-1]
+    tb._handle_message(conn, "/bought EQNR.OL 150")
+    tb._handle_message(conn, "/sold EQNR")                       # the bare ticker closes it as well
+    assert positions.open_positions(conn) == []
+
+
+def test_an_oslo_listing_is_priced_on_oslo_with_no_signal_to_say_so(conn, monkeypatch):
+    """/bought EQNR.OL used to store the ticker "EQNR.OL", which Yahoo reads as EQNR-OL. Now it is
+    the bare EQNR of NORWAY, priced on EQNR.OL -- not on the unrelated US EQNR -- with or without a
+    signal in the journal. (No `replies` fixture: this needs the real last_close.)"""
+    import positions
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: True)
+    prices = {"EQNR": 25.0, "EQNR.OL": 270.0}
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: prices.get(symbol))
+    tb._handle_message(conn, "/bought EQNR.OL")
+    [pos] = positions.open_positions(conn)
+    assert (pos.ticker, pos.source, pos.entry_price) == ("EQNR", "NORWAY", 270.0)
+    tb._handle_message(conn, "/sold EQNR.OL")
+    tb._handle_message(conn, "/bought EQNR.OL 275")              # the Oslo price is not "too far" from the Oslo close
+    assert positions.open_positions(conn)[0].entry_price == 275.0
+    tb._handle_message(conn, "/sold EQNR.OL")
+    tb._handle_message(conn, "/bought EQNR.OL 25")               # the US price is
+    assert positions.open_positions(conn) == []
+
+
+def test_portfolio_shows_an_oslo_position_at_its_oslo_price(conn, monkeypatch):
+    """The whole chain: /bought EQNR.OL, then /portfolio reads the price of EQNR.OL (not of the
+    unrelated US EQNR) for the stored EQNR of NORWAY."""
+    import positions
+    out = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: out.append(msg) or True)
+    prices = {"EQNR": 25.0, "EQNR.OL": 270.0}
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: prices.get(symbol))
+    tb._handle_message(conn, "/bought EQNR.OL 250")
+    out.clear()
+    tb._handle_message(conn, "/portfolio")
+    assert "• EQNR: вход 250,00 (" in out[0] and "сейчас 270,00 (+8,0%)" in out[0]
+
+
+def test_bought_an_oslo_listing_watches_the_oslo_insiders(conn, replies):
+    import db
+    import json
+    for source, who in (("NORWAY", "Oslo Boss"), ("SEC", "US Boss")):       # NRC: Oslo's and New York's
+        db.journal_signal(conn, {"source": source, "kind": "cluster", "ticker": "NRC", "tier": "buy",
+                                 "members": json.dumps([who])})
+    tb._handle_message(conn, "/bought NRC.OL 100")
+    assert "слежу за продажами: Oslo Boss" in replies[-1] and "US Boss" not in replies[-1]
+
+
+def test_with_no_price_to_be_found_the_hint_is_a_command_that_keeps_the_listing(conn, replies):
+    """The `replies` fixture has no quotes: the hint has to be something to copy, and /bought EQNR
+    would be the US EQNR."""
+    import positions
+    tb._handle_message(conn, "/bought EQNR.OL")
+    assert replies[-1] == "Не нашёл цену EQNR — укажите её: /bought EQNR.OL 12.34"
+    tb._handle_message(conn, "/bought volv-b.st")
+    assert replies[-1] == "Не нашёл цену VOLV-B — укажите её: /bought VOLV-B.ST 12.34"
+    tb._handle_message(conn, "/bought GRAB")
+    assert replies[-1] == "Не нашёл цену GRAB — укажите её: /bought GRAB 12.34"
+    assert positions.open_positions(conn) == []
+
+
+@pytest.mark.parametrize("text", ["/bought .OL 5", "/bought EQNR.OL abc", "/bought TOOLONGTICKER.OL 5",
+                                  "/bought EQNR.OL 0", "/sold .ST", "/bought"])
+def test_a_bad_listing_or_price_gets_the_usage(conn, replies, text):
+    import positions
+    tb._handle_message(conn, text)
+    assert positions.open_positions(conn) == [] and replies[-1] == tb.POSITIONS_USAGE
+
+
+def test_a_us_ticker_a_share_class_and_a_coin_are_unchanged(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought grab 18.40")
+    tb._handle_message(conn, "/bought brk.b 400")
+    tb._handle_message(conn, "/bought BTC 60000")
+    assert [(p.ticker, p.source) for p in positions.open_positions(conn)] == [
+        ("GRAB", None), ("BRK.B", None), ("CRYPTO:BTC", "CRYPTO")]
 
 
 # ------------------------------------------------------------- any-asset lookup
@@ -502,29 +624,106 @@ def test_two_identical_questions_are_two_rows(conn, analysis):
     assert len(db.pending_analysis(conn)) == 2 and len(analysis.labels) == 2
 
 
-# ------------------------------------------------------------ /portfolio, help
-def test_portfolio_sends_the_model_summary_without_claude(conn, analysis, sent, monkeypatch):
+# ------------------------------------------------------------ /model, /portfolio, help
+def test_model_sends_the_model_summary_without_claude(conn, analysis, sent, monkeypatch):
     import datetime as dt
     import paper_report
     seen = []
     monkeypatch.setattr(paper_report, "format_summary",
                         lambda c, today, **kw: seen.append((c, today, kw)) or "СВОДКА <b>x</b>")
-    tb._handle_message(conn, "/portfolio")
+    tb._handle_message(conn, "/model")
     assert sent == ["СВОДКА <b>x</b>"] and analysis.labels == []
     assert seen == [(conn, dt.date.today(), {"html": True})]
 
 
-def test_portfolio_before_any_run_says_so(conn, analysis, sent):
-    tb._handle_message(conn, "/portfolio@my_bot")
+def test_model_before_any_run_says_so(conn, analysis, sent):
+    tb._handle_message(conn, "/model@my_bot")
     assert len(sent) == 1 and "ещё не запущен" in sent[0]
 
 
-def test_portfolio_failure_is_a_reply_not_a_crash(conn, analysis, sent, monkeypatch):
+def test_model_failure_is_a_reply_not_a_crash(conn, analysis, sent, monkeypatch):
     import paper_report
 
     def boom(*a, **k):
         raise ValueError("bad row")
     monkeypatch.setattr(paper_report, "format_summary", boom)
+    tb._handle_message(conn, "/model")
+    assert len(sent) == 1 and "ValueError" in sent[0]
+
+
+def _never_the_model_summary(monkeypatch):
+    import paper_report
+    monkeypatch.setattr(paper_report, "format_summary",
+                        lambda *a, **k: pytest.fail("the model summary is /model's, not /portfolio's"))
+
+
+def test_portfolio_shows_your_own_positions_with_their_status(conn, replies, monkeypatch):
+    _never_the_model_summary(monkeypatch)
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
+    tb._handle_message(conn, "/bought GRAB 40")
+    replies.clear()
+    tb._handle_message(conn, "/portfolio")
+    [text] = replies
+    assert text.startswith("<b>💼 Ваш портфель — 1 позиция</b>\n\n• GRAB: вход 40,00 (")
+    assert "сейчас 50,00 (+25,0%)" in text
+    assert "   стоп 34,00 (−15% от максимума 40,00), до стопа 32,0%" in text      # no history: the fallback
+    assert text.endswith("/sold TICKER — закрыть, /model — модельный портфель.")
+
+
+def test_a_price_at_the_peak_can_fall_by_the_stop_before_it_fires(conn, replies, monkeypatch):
+    """The 10% stop of a calm stock, the price at its peak: «до стопа 10,0%»."""
+    import paper
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 180.0)
+    monkeypatch.setattr(paper, "_closes", _august_closes)
+    tb._handle_message(conn, "/bought NVDA 180")
+    replies.clear()
+    tb._handle_message(conn, "/portfolio")
+    assert "   стоп 162,00 (−10% от максимума 180,00), до стопа 10,0%" in replies[0]
+
+
+def test_portfolio_and_positions_send_format_my_portfolio_of_the_rows(conn, sent, monkeypatch):
+    import datetime as dt
+    import positions
+    status = {"last": 1.0}
+    seen = []
+    monkeypatch.setattr("positions.position_status", lambda pos, today, **kw: dict(status, d=pos.ticker))
+    monkeypatch.setattr("telegram_notify.format_my_portfolio", lambda rows, **kw: seen.append(rows) or "MINE")
+    positions.open_position(conn, "GRAB", 18.0, today=dt.date.today(), closes_fn=lambda t, s=None: [])
+    for text in ("/portfolio", "/positions", "/Portfolio@my_bot"):
+        tb._handle_message(conn, text)
+    assert sent == ["MINE"] * 3
+    [(pos, st, held)] = seen[0]
+    assert (pos.ticker, st, held) == ("GRAB", {"last": 1.0, "d": "GRAB"}, False)
+
+
+def test_portfolio_says_when_the_model_holds_the_same_name(conn, replies, monkeypatch):
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', 'GRAB', 'SEC', 'GRAB', 'USD', '2026-09-25', "
+        "1000, 998, 40, 1.16)")
+    conn.commit()
+    tb._handle_message(conn, "/bought GRAB 40")
+    tb._handle_message(conn, "/bought ORK 12")
+    replies.clear()
+    tb._handle_message(conn, "/portfolio")
+    [text] = replies
+    assert text.count("модель тоже держит") == 1
+    grab = next(block for block in text.split("\n\n") if block.startswith("• GRAB"))
+    assert grab.endswith("модель тоже держит")
+
+
+def test_portfolio_with_nothing_bought_says_how_to_add_one(conn, sent, monkeypatch):
+    _never_the_model_summary(monkeypatch)
+    tb._handle_message(conn, "/portfolio")
+    assert sent == ["Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
+                    "Модельный портфель: /model."]
+
+
+def test_portfolio_failure_is_a_reply_not_a_crash(conn, sent, monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("bad row")
+    monkeypatch.setattr("positions.portfolio_rows", boom)
     tb._handle_message(conn, "/portfolio")
     assert len(sent) == 1 and "ValueError" in sent[0]
 
@@ -539,17 +738,33 @@ def test_help_for_start_help_unknown_commands_and_empty(conn, analysis, sent, te
 def test_help_text_lists_questions_and_the_portfolio():
     assert "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком TradingView " \
            "и данными бота." in tb.HELP_TEXT
-    assert "/portfolio — модельный портфель." in tb.HELP_TEXT
+    assert "/portfolio — ваши позиции (/bought), /model — модельный портфель." in tb.HELP_TEXT.splitlines()
     assert "/backtest" in tb.HELP_TEXT and "/bought" in tb.HELP_TEXT
 
 
 def test_help_text_says_the_summary_comes_on_fridays():
-    assert ("Сводка модельного портфеля приходит по пятницам; /portfolio — в любой момент."
-            in tb.HELP_TEXT.splitlines())
+    assert "Сводка модельного портфеля приходит по пятницам." in tb.HELP_TEXT.splitlines()
+    assert "в любой момент" not in tb.HELP_TEXT
+
+
+def test_the_positions_usage_says_how_to_record_a_buy_and_a_sale():
+    assert tb.POSITIONS_USAGE.splitlines() == [
+        "/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
+        "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST",
+        "/sold TICKER — отметить продажу",
+        "/portfolio — ваши позиции"]
+    assert tb.POSITIONS_USAGE in tb.HELP_TEXT
 
 
 def test_the_module_docstring_mentions_questions():
     assert "/ask" in tb.__doc__ and "question" in tb.__doc__.lower()
+
+
+def test_the_module_docstring_says_what_portfolio_and_model_show():
+    doc = " ".join(tb.__doc__.split())
+    assert "/model sends the model portfolio's summary" in doc
+    assert "/portfolio" in doc and "/positions" in doc and "own positions" in doc
+    assert "/portfolio sends the model portfolio" not in doc
 
 
 def test_the_positions_commands_and_backtest_come_first(conn, analysis, sent, monkeypatch):
