@@ -92,6 +92,9 @@ class DayReport:
     value: float | None       # MODEL-S + MODEL-C value today
     bench: float | None       # the two books' benchmark values summed (the 70/30 mix)
     decisions: dict[str, str]  # ticker -> decision, for the journal
+    # True only when scoring succeeded and no sleeve failed in the pass. bot.py counts only a
+    # complete pass as the week's buying run: an incomplete one buys again on the next run.
+    complete: bool = True
 
 
 # ---------------------------------------------------------------- seams
@@ -534,7 +537,8 @@ def _bench_today(conn, today: dt.date) -> float | None:
 def run(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_fn=None,
         sector_fn=None, signals=None, t212=None, buy: bool = True) -> DayReport:
     """One daily pass over both books (see the module docstring). Returns what was
-    ordered today, everything scored, and where the model stands against its benchmark.
+    ordered today, everything scored, and where the model stands against its benchmark; its
+    `complete` says whether scoring and both sleeves got through.
     `buy=False` is a pass that places no buy (and records no skipped one): it still fills,
     revalues, sells on the exit rules, scores and snapshots. bot.py runs the model that way on
     every day but the week's first Friday-to-Sunday run (spec 2026-10-01): the buys the user
@@ -567,6 +571,7 @@ def run(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_f
             keep_scores(conn, today, scored)
         except Exception as e:  # the menu and the analyst then score for themselves
             print(f"[model] scores not kept: {type(e).__name__}: {e}", file=sys.stderr)
+    scoring_ok = scored is not None
     scored = scored or []
 
     if buy and STOCK_BOOK not in failed:
@@ -581,4 +586,5 @@ def run(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_f
                 paper._snapshot(conn, code, prices, today)
 
     return DayReport(buys=buys, sells=sells, scored=scored, value=model_value(conn),
-                     bench=_bench_today(conn, today), decisions={s.ticker: s.decision for s in scored})
+                     bench=_bench_today(conn, today), decisions={s.ticker: s.decision for s in scored},
+                     complete=scoring_ok and not failed)

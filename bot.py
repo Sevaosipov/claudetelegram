@@ -692,10 +692,11 @@ def main():
         buys, exits = collect_new_signals(conn, args)
         rest = _journal_cautions(conn, buys)          # a caution found today counts today
         # The model buys only on the week's first full run from Friday to Sunday; its key is
-        # set once that pass got through, so a crashed one buys on the next run instead.
+        # set once that pass got through completely (no crash, scoring done, no sleeve failed),
+        # so any other pass buys again on the next run of the window.
         buy = not filtered and _weekly_due(conn, today, BUYS_KEY)
         report = _run_model(conn, args, buy=buy)
-        if buy and report is not None:
+        if buy and report is not None and report.complete:
             _mark_week(conn, today, BUYS_KEY)
         _journal(conn, rest + exits, report)
         closes = positions.check_exits(conn)
@@ -709,8 +710,9 @@ def main():
                 # day of the window, so it goes out then whatever happened.
                 model_ok = _week_marked(conn, today, BUYS_KEY)
                 if model_ok or today.weekday() == LAST_WEEKLY_WEEKDAY:
-                    _run_source("WEEKLY", _send_weekly, conn, today, report, model_failed=not model_ok)
-                    _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, today)
+                    # The monthly report follows the weekly message: only once it was sent.
+                    if _run_source("WEEKLY", _send_weekly, conn, today, report, model_failed=not model_ok):
+                        _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, today)
                 else:
                     print("[telegram] weekly message waits for the week's model pass")
 

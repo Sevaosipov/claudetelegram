@@ -102,3 +102,12 @@ Rules: `<b>` and `<pre>` only, every dynamic string escaped, Russian, no disclai
 - The monthly report follows the weekly message, so it waits with it.
 - Tests: Friday with a crashed model -> no weekly message, buys key unset; Saturday with a good pass -> buys and
   the message; Sunday with the model still crashing -> the message with the warning line.
+
+## Amendment 2 (coordinator ruling, 2026-10-01): complete passes only; the monthly report follows a sent message
+
+- `DayReport.complete: bool` is True only when scoring succeeded and no sleeve failed in the pass. bot sets the
+  week's buys key only for a complete report, so an incomplete pass buys again on the next Fri-Sun run (a ticker
+  already held or pending is not bought twice). The Sunday warning line shows whenever the buys key is still
+  unset.
+- `maybe_send_monthly_report` is attempted only after the weekly message was sent successfully.
+- Tests: a pass with a failed sleeve -> buys key unset; a complete pass -> set; a failed weekly send -> no monthly.

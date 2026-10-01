@@ -5,6 +5,7 @@ model's decisions, the close alerts on the /bought positions go out as they fire
 network and the model itself are stubbed."""
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import sys
 import types
@@ -408,7 +409,9 @@ def main_run(monkeypatch, tmp_path):
 
     def run_model(conn, args, *, buy):
         calls.append(("model", buy))
-        return None if run.model_crashes else report
+        if run.model_crashes:
+            return None
+        return report if run.complete else dataclasses.replace(report, complete=False)
 
     def journal(conn, signals, rep):
         calls.append(("journal", signals, rep))
@@ -458,6 +461,7 @@ def main_run(monkeypatch, tmp_path):
     run.caution_sig, run.cautions = caution_sig, False
     run.today, run.send_ok, run.model_crashes, run.week_fails = FRI, True, False, False
     run.week_kwargs = []                                          # what format_week was asked for, per call
+    run.complete = True                                           # False: a pass with a failed sleeve
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 
@@ -544,9 +548,49 @@ def test_a_failed_friday_send_is_retried_on_the_next_run_of_the_window(main_run)
     assert "send" not in _kinds(calls)                                # sent: done for the week
 
 
-def test_the_monthly_report_is_still_tried_when_the_weekly_send_fails(main_run):
+def test_the_monthly_report_follows_only_a_weekly_message_that_was_sent(main_run):
     main_run.send_ok = False
-    assert ("monthly", FRI) in main_run()
+    calls = main_run()
+    assert ("send", "WEEK") in calls and "monthly" not in _kinds(calls)      # the send failed
+    main_run.send_ok = True
+    main_run.today = SAT
+    calls.clear()
+    main_run()
+    assert ("send", "WEEK") in calls and ("monthly", SAT) in calls            # sent: its monthly follows
+
+
+def test_the_monthly_report_is_not_tried_when_the_weekly_message_could_not_be_made(main_run):
+    main_run.week_fails = True
+    assert "monthly" not in _kinds(main_run())
+
+
+def test_an_incomplete_pass_does_not_use_up_the_weeks_buys_or_send_the_message(main_run):
+    """A pass with a failed sleeve (or failed scoring) returns a report but is incomplete: the buys
+    key waits, so the next run of the window buys again, and the message waits with it."""
+    main_run.complete = False
+    calls = main_run()
+    assert ("model", True) in calls and "send" not in _kinds(calls) and "monthly" not in _kinds(calls)
+    assert _week_keys(main_run, "model_buys_%") == 0 and _week_keys(main_run, "weekly_message_%") == 0
+    main_run.complete = True
+    main_run.today = SAT
+    calls.clear()
+    main_run()
+    assert ("model", True) in calls and ("send", "WEEK") in calls
+    assert _week_keys(main_run, "model_buys_%") == 1
+
+
+def test_a_complete_pass_sets_the_buys_key(main_run):
+    main_run()
+    assert _week_keys(main_run, "model_buys_%") == 1
+
+
+def test_sunday_with_a_pass_that_stayed_incomplete_sends_the_message_with_the_warning(main_run):
+    main_run.complete = False
+    for day in (FRI, SAT, SUN):
+        main_run.today = day
+        main_run()
+    assert main_run.week_kwargs == [{"model_failed": True}]
+    assert _week_keys(main_run, "model_buys_%") == 0 and _week_keys(main_run, "weekly_message_%") == 1
 
 
 def test_a_missed_friday_is_made_up_on_the_weekend_buys_and_message(main_run):

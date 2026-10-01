@@ -1045,5 +1045,52 @@ def test_a_failed_scoring_keeps_nothing(conn, monkeypatch):
     assert model.cached_scores(conn, TODAY) is None
 
 
+# ------------------------------------------------- the report says whether the pass was complete
+def test_a_clean_pass_is_complete(conn):
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is True
+    assert _run(conn, [], {}, buy=False).complete is True          # whether it buys does not matter
+
+
+def test_a_pass_with_a_failed_sleeve_is_not_complete(conn, monkeypatch):
+    real = paper.fill_orders
+
+    def flaky(conn_, code, prices, today):
+        if code == C:
+            raise RuntimeError("boom")
+        return real(conn_, code, prices, today)
+
+    monkeypatch.setattr(paper, "fill_orders", flaky)
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is False
+
+
+def test_a_failing_buy_in_one_sleeve_is_not_complete_though_the_other_buys(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("no sector")
+    monkeypatch.setattr(model, "_buy_coins", boom)
+    report = _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert report.complete is False and [t.ticker for t in report.buys] == ["AAA"]
+
+
+def test_a_failing_snapshot_is_not_complete(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("disk")
+    monkeypatch.setattr(paper, "_snapshot", boom)
+    assert _run(conn, [], {}).complete is False
+
+
+def test_a_failed_scoring_is_not_complete(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("finders down")
+    monkeypatch.setattr(model, "score_today", boom)
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is False
+
+
+def test_scores_that_could_not_be_kept_do_not_make_a_pass_incomplete(conn, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("cache")
+    monkeypatch.setattr(model, "keep_scores", boom)
+    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is True
+
+
 def test_no_run_today_means_no_kept_scores(conn):
     assert model.cached_scores(conn, TODAY) is None
