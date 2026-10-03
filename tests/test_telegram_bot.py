@@ -813,8 +813,9 @@ def _t212_synced(conn, *holdings, at=None):
     import datetime as dt
     import t212_account as ta
     summary = ta.T212Summary("EUR", 12345.67, 2000.0, 10345.67, 10000.0, 345.67, 12.5)
+    # Yahoo knows the symbol at about Trading 212's price (one close: too few to size a stop)
     return ta.sync(conn, fetch=lambda: (list(holdings), summary), notify=lambda text: True,
-                   now=at or dt.datetime.now(), closes_fn=lambda t, s=None: [])
+                   now=at or dt.datetime.now(), closes_fn=lambda t, s=None: [("2026-08-03", 24.0)])
 
 
 def test_bought_a_ticker_held_in_trading_212_says_it_is_already_tracked(conn, replies):

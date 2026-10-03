@@ -307,3 +307,25 @@ origin 't212' has the same `t212_ticker` and the same `t212_created`, that row i
 quantity and average price are updated. No «📥» is sent. A legacy holding (R1) therefore does not come back as a
 position bought years ago. Without a known purchase date nothing tells the same holding from a new purchase, so
 no row is restored. An open `/bought` position in the same name is taken over first.
+
+### I2. The market symbol of a US instrument
+
+Trading 212's `_US_EQ` codes are old ones for about one instrument in five (FB_US_EQ is Meta, PCLN_US_EQ Booking,
+UTX_US_EQ RTX). This replaces §1's "a `…_US_EQ` instrument becomes the US symbol".
+
+- **The symbol.** `position_key(t212_ticker, isin, conn)` takes a US instrument's market symbol from the cached
+  instrument list, `t212_instruments.short_name` for that Trading 212 ticker. With no row there (or an empty
+  name) it falls back to `trading212._symbol`.
+- **The price source is checked when the position is opened.** Yahoo's history is asked for under that symbol.
+  When Yahoo has no completed close for it, or its last completed close differs from Trading 212's `currentPrice`
+  by more than 20 %, the holding is keyed by its ISIN with source "T212" instead and priced from the sync's own
+  day prices. With no `currentPrice` there is nothing to compare, and a symbol Yahoo knows is taken. With no ISIN
+  to fall back on the symbol stays.
+- **Matching.** A tracked position is found on the list by the `t212_ticker` stored with it, never by a key
+  derived again, so an instrument whose key changes (a new market symbol, Yahoo starting or stopping to know it)
+  stays one position. Only a position stored without an id is found by its key. The day's price is stored under
+  the position's own ticker. One ISIN held on two exchanges stays one position, whichever is listed first.
+- `/portfolio`'s live call matches the same way. It stores the day's price of a holding it does not track yet only
+  when the key is certain (an ISIN); a US one is keyed by the sync.
+- A holding keyed by its ISIN is named by its Trading 212 symbol also when its code is a US one
+  (GME_US_EQ → GME).

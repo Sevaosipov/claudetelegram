@@ -232,18 +232,53 @@ def fetch_account(session=None) -> tuple[list[T212Position], T212Summary]:
 
 
 # ------------------------------------------------------------------ instrument -> position
-def position_key(t212_ticker: str | None, isin: str | None) -> tuple[str, str | None] | None:
+YAHOO_TOLERANCE = 0.20          # how far Yahoo's last close may be from Trading 212's price
+
+
+def _isin_key(isin: str | None) -> str | None:
+    isin = (isin or "").strip().upper()
+    return isin if len(isin) == 12 and isin[:2].isalpha() and isin[2:].isalnum() else None
+
+
+def _market_symbol(conn, t212_ticker: str | None) -> str:
+    """The market symbol of a US instrument, "" for any other. Trading 212's _US_EQ codes are old
+    ones for about one instrument in five (FB_US_EQ is Meta, PCLN_US_EQ Booking, UTX_US_EQ RTX):
+    the cached instrument list (t212_instruments.short_name) has the symbol it trades under. With
+    no row there -- or no `conn` -- the code itself is the symbol (trading212._symbol)."""
+    code = trading212._symbol({"ticker": t212_ticker or ""})
+    if not code or conn is None:
+        return code
+    row = conn.execute("SELECT short_name FROM t212_instruments WHERE ticker = ?", (t212_ticker,)).fetchone()
+    return (row[0] or "").strip().upper() if row and (row[0] or "").strip() else code
+
+
+def position_key(t212_ticker: str | None, isin: str | None, conn=None) -> tuple[str, str | None] | None:
     """The bot's (ticker, source) for a Trading 212 instrument: a US one (AAPL_US_EQ, BRK_B_US_EQ)
-    is its symbol (AAPL, BRK.B) with no source, priced from Yahoo like a /bought position; any
-    other (Frankfurt, London, Amsterdam ...) is its ISIN with source positions.T212_SOURCE,
-    priced from the day prices a sync stores. None when there is neither."""
-    symbol = trading212._symbol({"ticker": t212_ticker or ""})
+    is its market symbol (AAPL, BRK.B; _market_symbol) with no source, priced from Yahoo like a
+    /bought position; any other (Frankfurt, London, Amsterdam ...) is its ISIN with source
+    positions.T212_SOURCE, priced from the day prices a sync stores. None when there is neither.
+
+    This is the key by the instrument alone. A sync still checks, when it opens a US holding,
+    that Yahoo's price is that instrument's (_yahoo_is_its_own), and keys it by its ISIN if not."""
+    symbol = _market_symbol(conn, t212_ticker)
     if symbol:
         return symbol, None
-    isin = (isin or "").strip().upper()
-    if len(isin) == 12 and isin[:2].isalpha() and isin[2:].isalnum():
-        return isin, positions.T212_SOURCE
-    return None
+    isin = _isin_key(isin)
+    return (isin, positions.T212_SOURCE) if isin else None
+
+
+def _yahoo_is_its_own(closes, price: float | None, day: str) -> bool:
+    """Whether Yahoo's history under a US holding's symbol is that holding's: there is a completed
+    close (one before `day`), and the last one is within YAHOO_TOLERANCE of Trading 212's own
+    price. A symbol Yahoo does not know, or knows as another instrument, would price the holding
+    wrong -- or not at all -- for the stop. With no price from Trading 212 there is nothing to
+    compare, and a known symbol is taken."""
+    completed = [c for d, c in closes or [] if d < day and c and c > 0]
+    if not completed:
+        return False
+    if price is None or price <= 0:
+        return True
+    return abs(completed[-1] / price - 1) <= YAHOO_TOLERANCE
 
 
 # ------------------------------------------------------------------ the sync
@@ -274,33 +309,31 @@ def last_sync(conn) -> dt.datetime | None:
     return None if stamp is None else dt.datetime.fromtimestamp(stamp)
 
 
-def _keyed(holdings: list[T212Position]) -> tuple[list[tuple[str, str | None, T212Position]], int]:
-    """([(ticker, source, holding)], how many could not be keyed). The same key twice (one ISIN
-    held on two exchanges) keeps the first."""
-    keyed, seen, unkeyed = [], set(), 0
-    for h in holdings:
-        key = position_key(h.t212_ticker, h.isin)
-        if key is None:
-            unkeyed += 1
-        elif key[0] not in seen:
-            seen.add(key[0])
-            keyed.append((key[0], key[1], h))
-    return keyed, unkeyed
+def _store_price(conn, ticker: str, day: str, price: float | None) -> None:
+    """The day's price of a holding, under its position's ticker: one row a day, the last one of
+    the day replacing the earlier ones. Not committed here."""
+    if price is not None:
+        conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES (?,?,?)",
+                     (ticker, day, price))
 
 
-def _store_snapshot(conn, keyed, summary: T212Summary | None, day: str) -> None:
-    """The day's price of every holding and the day's account snapshot: one row a day each, the
-    last one of the day replacing the earlier ones. Not committed here."""
-    for key, _source, h in keyed:
-        if h.current_price is not None:
-            conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES (?,?,?)",
-                         (key, day, h.current_price))
+def _store_equity(conn, summary: T212Summary | None, day: str) -> None:
+    """The day's account snapshot: one row a day, the last of the day. Not committed here."""
     if summary is not None and summary.total_value is not None:
         conn.execute(
             "INSERT OR REPLACE INTO t212_equity (date, total_value, invested_value, invested_cost, "
             "cash_free, currency) VALUES (?,?,?,?,?,?)",
             (day, summary.total_value, summary.invested_value, summary.invested_cost,
              summary.cash_free, summary.currency))
+
+
+def _store_snapshot(conn, priced: list[tuple[str, T212Position]], summary: T212Summary | None,
+                    day: str) -> None:
+    """The day's price of each (ticker, holding) and the day's account snapshot (/portfolio's live
+    call keeps them like a sync does). Not committed here."""
+    for ticker, h in priced:
+        _store_price(conn, ticker, day, h.current_price)
+    _store_equity(conn, summary, day)
 
 
 def _entry(h: T212Position) -> float | None:
@@ -530,27 +563,63 @@ def _restore(conn, h: T212Position, in_use: set[str]) -> positions.Position | No
     return next(p for p in positions.open_positions(conn) if p.id == row[0])
 
 
+@dataclass
+class _Plan:
+    """What a sync settled about one listed holding before it took the lock: the ticker and source
+    a position for it would be opened under (None: it can't be keyed), and -- for a US holding the
+    bot does not track yet -- Yahoo's history, which also sizes its stop."""
+    holding: T212Position
+    key: str | None = None
+    source: str | None = None
+    closes: list | None = None
+
+
+def _plan(conn, h: T212Position, tracked_ids: set, bought: set, closes_fn, day: str) -> _Plan:
+    """The key of a holding. A US one the bot does not track yet has Yahoo asked for its history
+    (here, before the lock: the database is not kept locked while Yahoo answers), and is keyed by
+    its symbol only when Yahoo's price is its own (_yahoo_is_its_own): else by its ISIN, priced
+    from the sync's own day prices. A holding that is tracked already, or goes to an open /bought
+    position, is not put to Yahoo: its position has its key."""
+    key = position_key(h.t212_ticker, h.isin, conn)
+    if key is None:
+        return _Plan(h)
+    ticker, source = key
+    if source == positions.T212_SOURCE or h.t212_ticker in tracked_ids or ticker in bought:
+        return _Plan(h, ticker, source)
+    closes = closes_fn(ticker, None)
+    if not _yahoo_is_its_own(closes, h.current_price, day):
+        isin = _isin_key(h.isin)
+        if isin is not None:
+            return _Plan(h, isin, positions.T212_SOURCE)
+    return _Plan(h, ticker, None, closes)
+
+
 def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now: dt.datetime,
            closes_fn, result: SyncResult, silent: bool) -> list[str]:
     """Bring the database in step with what the account holds, in one transaction the caller
     commits. Fills `result` and returns the messages to send once it is committed (none when
-    `silent`)."""
+    `silent`).
+
+    A tracked position is found on the list by the Trading 212 id stored with it (t212_ticker),
+    never by a key derived again: the key of an instrument can change (its code gets a new market
+    symbol, Yahoo starts or stops knowing it), and the holding must stay one position. Only a
+    position stored without an id is found by its key."""
     day = now.date().isoformat()
-    keyed, unkeyed = _keyed(holdings)
-    # A new US holding's history comes from Yahoo. It is asked for here, on a first look at what is
-    # open and before the write lock: the database is not kept locked while Yahoo answers.
-    known = {p.ticker for p in positions.open_positions(conn)}
     closes_fn = closes_fn or positions.daily_closes
-    histories = {key: closes_fn(key, source) for key, source, _h in keyed
-                 if key not in known and source != positions.T212_SOURCE}
+    first_look = positions.open_positions(conn)
+    plans = [_plan(conn, h, {p.t212_ticker for p in first_look if p.origin == positions.T212},
+                   {p.ticker for p in first_look if p.origin != positions.T212}, closes_fn, day)
+             for h in holdings]
 
     # From here the database is this sync's: the Telegram bot and the daily run are two processes,
     # and what is open is read again under the lock, so a holding the other one has just opened
-    # is not opened twice. (A history that wasn't fetched for it then counts as none.)
+    # is not opened twice. (It then has no Yahoo history: its stop is sized later.)
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
     open_now = positions.open_positions(conn)
-    tracked = {p.ticker: p for p in open_now if p.origin == positions.T212}
+    tracked = [p for p in open_now if p.origin == positions.T212]
+    by_id = {p.t212_ticker: p for p in tracked if p.t212_ticker}
+    by_key = {p.ticker: p for p in tracked}
     manual = {p.ticker: p for p in open_now if p.origin != positions.T212}
     first = db.get_cached_value(conn, SYNCED_ONCE_KEY, _KV_FOREVER) is None
     # No holding was ever stored (open or since sold): what the account holds now was there before
@@ -558,25 +627,47 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
     legacy = conn.execute("SELECT 1 FROM positions WHERE origin = ? LIMIT 1",
                           (positions.T212,)).fetchone() is None
 
-    _store_snapshot(conn, keyed, summary, day)
-    new_texts, names, legacy_days = [], [], []
-    for key, source, h in keyed:
+    _store_equity(conn, summary, day)
+    listed: set[int] = set()            # the tracked positions the list shows
+    taken = set(by_key)                 # tickers that have their position: one position a ticker
+    new_texts, names, legacy_days, unkeyed = [], [], [], 0
+    for plan in plans:
+        h = plan.holding
+        pos = by_id.get(h.t212_ticker) if h.t212_ticker else None
+        if pos is None and plan.key in by_key and not by_key[plan.key].t212_ticker:
+            pos = by_key[plan.key]      # stored without its Trading 212 id: its key is all there is
+        if pos is not None:
+            if pos.id in listed:
+                continue
+            listed.add(pos.id)
+            _store_price(conn, pos.ticker, day, h.current_price)
+            if _update_holding(conn, pos, h):
+                result.updated.append(pos.ticker)
+            if pos.stop_base is not None:
+                legacy_days.append(pos.opened_at)
+            names.append(positions.name_of(pos.ticker, pos.source, h.t212_ticker or pos.t212_ticker))
+            continue
+        if plan.key is None:
+            unkeyed += 1
+            continue
+        key, source = plan.key, plan.source
+        if key in taken:                # a second listing of a name that has its position
+            continue                    # (one ISIN held on two exchanges): the first one is it
         name = positions.name_of(key, source, h.t212_ticker)
-        if key in tracked:
-            if _update_holding(conn, tracked[key], h):
-                result.updated.append(key)
-            if tracked[key].stop_base is not None:
-                legacy_days.append(tracked[key].opened_at)
-        elif key in manual:
+        if key in manual:
+            _store_price(conn, key, day, h.current_price)
             _take_over(conn, manual[key], source, h)
             result.updated.append(key)
-        elif (back := _restore(conn, h, set(tracked) | set(manual))) is not None:
+        elif (back := _restore(conn, h, taken | set(manual))) is not None:
+            key = back.ticker
+            _store_price(conn, key, day, h.current_price)
             _update_holding(conn, back, h)
-            result.updated.append(back.ticker)
+            result.updated.append(key)
             if back.stop_base is not None:
                 legacy_days.append(back.opened_at)
         else:
-            insiders = _open_holding(conn, key, source, h, day, histories.get(key), legacy)
+            _store_price(conn, key, day, h.current_price)
+            insiders = _open_holding(conn, key, source, h, day, plan.closes, legacy)
             if insiders is None:
                 print(f"[t212] {name}: no price to enter it at, not tracked yet", file=sys.stderr)
                 continue
@@ -584,10 +675,10 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
             new_texts.append(_new_text(name, h, _watched(conn, key, source, insiders)))
             if legacy:
                 legacy_days.append(day)
+        taken.add(key)
         names.append(name)
 
-    listed = {key for key, _source, _h in keyed}
-    missing = [pos for key, pos in tracked.items() if key not in listed]
+    missing = [pos for pos in tracked if pos.id not in listed]
     sold_texts = _close_missing(conn, missing, holdings, summary, unkeyed, day, result)
 
     db.save_cached_value(conn, SYNCED_AT_KEY, now.timestamp(), commit=False)
@@ -795,8 +886,22 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
         return _stored_view(conn, today, now, str(e), KEY_HINT if e.needs_key else None)
     except ValueError:              # its text is not shown: only what this module wrote is safe
         return _stored_view(conn, today, now, BAD_ANSWER, None)
+    tracked = [p for p in positions.open_positions(conn) if p.origin == positions.T212]
+    by_id = {p.t212_ticker: p for p in tracked if p.t212_ticker}
+    by_key = {p.ticker: p for p in tracked if not p.t212_ticker}
+    found = []                      # (holding, its key by the instrument, its position or None)
+    for h in holdings:
+        key = position_key(h.t212_ticker, h.isin, conn)
+        pos = by_id.get(h.t212_ticker) if h.t212_ticker else None
+        if pos is None and key is not None:
+            pos = by_key.get(key[0])
+        found.append((h, key, pos))
+    # The day's price goes under the position's own ticker; a holding not tracked yet has one only
+    # when its key is certain (its ISIN): a US one is keyed by the sync, after it asked Yahoo.
+    priced = [(pos.ticker if pos else key[0], h) for h, key, pos in found
+              if pos is not None or (key is not None and key[1] == positions.T212_SOURCE)]
     try:
-        _store_snapshot(conn, _keyed(holdings)[0], summary, now.date().isoformat())
+        _store_snapshot(conn, priced, summary, now.date().isoformat())
         conn.commit()
     except sqlite3.Error as e:      # the database is busy (the daily run): still worth showing
         conn.rollback()
@@ -804,19 +909,21 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
     except BaseException:
         conn.rollback()
         raise
-    tracked = {p.ticker: p for p in positions.open_positions(conn) if p.origin == positions.T212}
     held = positions._model_names(conn)
     rows = []
-    for h in holdings:
-        key = position_key(h.t212_ticker, h.isin)
-        pos = tracked.get(key[0]) if key else None
+    for h, key, pos in found:
         created = _created_date(h.created_at) or (pos.t212_created if pos else None)
+        if pos is not None:
+            name, where = positions.display_name(pos), (pos.ticker, pos.source)
+        else:
+            name = positions.name_of(key[0], key[1], h.t212_ticker) if key else _untracked_name(h)
+            where = key
         rows.append(Holding(
-            name=positions.name_of(key[0], key[1], h.t212_ticker) if key else _untracked_name(h),
-            quantity=h.quantity, avg_price=h.avg_price, price=h.current_price, currency=h.currency,
-            pnl=h.pnl_eur, pnl_currency=h.account_currency or (summary.currency if summary else None),
+            name=name, quantity=h.quantity, avg_price=h.avg_price, price=h.current_price,
+            currency=h.currency, pnl=h.pnl_eur,
+            pnl_currency=h.account_currency or (summary.currency if summary else None),
             position=pos, status=_status(conn, pos, today, h.current_price) if pos else None,
-            model_holds=bool(key) and _model_holds(conn, key[0], key[1], held),
+            model_holds=bool(where) and _model_holds(conn, where[0], where[1], held),
             opened=created or (pos.opened_at if pos else ""), days=_days_held(created, today)))
     return PortfolioView(rows, summary=summary)
 

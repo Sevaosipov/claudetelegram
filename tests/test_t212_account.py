@@ -329,7 +329,12 @@ def test_the_instrument_refresh_logs_no_error_text(conn, keyed, capsys):
 # ------------------------------------------------------------------ sync
 NOW = dt.datetime(2026, 10, 1, 14, 5)
 SUMMARY = ta.T212Summary("EUR", 12345.67, 2000.0, 10345.67, 10000.0, 345.67, 12.5)
-GME_DAYS = [((NOW.date() - dt.timedelta(days=60 - i)).isoformat(), 100.0) for i in range(40)]
+def _flat(price=100.0):
+    """Forty flat closes, the last one three weeks before NOW: a calm stock at `price`."""
+    return [((NOW.date() - dt.timedelta(days=60 - i)).isoformat(), price) for i in range(40)]
+
+
+GME_DAYS = _flat()
 
 
 def _holding(t212_ticker="GME_US_EQ", isin="US36467W1099", *, qty=10.0, avg=23.10, price=24.05,
@@ -347,17 +352,28 @@ SAP = dict(t212_ticker="SAPd_EQ", isin="DE0007164600", avg=120.0, price=125.0, c
 
 
 class _Run:
-    """One sync with a stub fetch: the messages it sent and the histories it asked for."""
+    """One sync with a stub fetch: the messages it sent and the histories it asked for.
+
+    Yahoo is a stub too: by default a calm history at the holding's own Trading 212 price (so the
+    symbol is taken for the same instrument); a test sets `yahoo` (symbol -> closes) for its own."""
 
     def __init__(self, conn):
-        self.conn, self.sent, self.histories = conn, [], []
+        self.conn, self.sent, self.histories, self.yahoo = conn, [], [], None
 
     def __call__(self, *holdings, now=NOW, summary=None, fetch=None, notify=None, silent=False):
         """`summary`: the account summary of the same sync; by default one that agrees with the
         list (so what is missing from the list was sold)."""
+        prices = {}
+        for h in holdings:
+            key = ta.position_key(h.t212_ticker, h.isin, self.conn)
+            if key is not None and key[1] is None:
+                prices[key[0]] = h.current_price
+
         def closes(ticker, source=None):
             self.histories.append((ticker, source))
-            return GME_DAYS
+            if self.yahoo is not None:
+                return self.yahoo(ticker)
+            return _flat(prices.get(ticker) or 100.0)
         summary = _agreeing(holdings) if summary is None else summary
         return ta.sync(self.conn, fetch=fetch or (lambda: (list(holdings), summary)),
                        notify=notify or (lambda text: self.sent.append(text) or True), now=now,
@@ -584,8 +600,8 @@ def test_two_syncs_at_once_do_not_open_the_same_holding_twice(tmp_path):
 
     def while_yahoo_answers(ticker, source=None):
         ta.sync(other, fetch=lambda: ([_holding()], SUMMARY), notify=sent.append, now=NOW,
-                closes_fn=lambda t, s=None: [])
-        return GME_DAYS
+                closes_fn=lambda t, s=None: _flat(24.0))
+        return _flat(24.0)
     result = ta.sync(mine, fetch=lambda: ([_holding()], SUMMARY), notify=sent.append, now=NOW,
                      closes_fn=while_yahoo_answers)
     assert result.opened == [] and len(sent) == 1                   # the other one announced it
@@ -601,11 +617,11 @@ def test_a_sync_that_cannot_get_the_database_changes_nothing(tmp_path, capsys):
     other.execute("BEGIN IMMEDIATE")                                # another writer holds it
     with pytest.raises(sqlite3.OperationalError):
         ta.sync(mine, fetch=lambda: ([_holding()], SUMMARY), notify=lambda t: pytest.fail("nothing to say"),
-                now=NOW, closes_fn=lambda t, s=None: [])
+                now=NOW, closes_fn=lambda t, s=None: _flat(24.0))
     other.rollback()
     assert mine.execute("SELECT COUNT(*) FROM positions").fetchone() == (0,)
     assert ta.sync(mine, fetch=lambda: ([_holding()], SUMMARY), notify=lambda t: True, now=NOW,
-                   closes_fn=lambda t, s=None: []).opened == ["GME"]          # and the next one goes through
+                   closes_fn=lambda t, s=None: _flat(24.0)).opened == ["GME"]   # and the next one goes through
     mine.close()
     other.close()
 
@@ -613,7 +629,7 @@ def test_a_sync_that_cannot_get_the_database_changes_nothing(tmp_path, capsys):
 def test_the_sync_reads_through_the_client_and_only_gets(conn, keyed):
     session = _account()
     result = ta.sync(conn, fetch=lambda: ta.fetch_account(session), notify=lambda t: True, now=NOW,
-                     closes_fn=lambda t, s=None: [])
+                     closes_fn=lambda t, s=None: _flat(24.0))
     assert result.opened == ["GME"]
     assert session.calls == [("get", ta.POSITIONS_URL), ("get", ta.SUMMARY_URL)]
 
@@ -843,6 +859,159 @@ def test_a_bought_position_recorded_meanwhile_is_taken_over_rather_than_the_old_
     assert len(positions.open_positions(conn)) == 1
 
 
+# ---------------------------------------------- I2: the market symbol of a US instrument
+FB = dict(t212_ticker="FB_US_EQ", isin="US30303M1027", avg=300.0, price=500.0)     # Meta, under its old code
+
+
+def _instrument(conn, ticker, short_name, isin="US30303M1027"):
+    """A row of the cached instrument list (trading212.availability keeps it)."""
+    conn.execute("INSERT OR REPLACE INTO t212_instruments (ticker, isin, type, short_name, currency) "
+                 "VALUES (?,?,?,?,?)", (ticker, isin, "STOCK", short_name, "USD"))
+    conn.commit()
+
+
+def _closes(*values, ends_days_ago=1):
+    """Yahoo's closes on consecutive days, the last one `ends_days_ago` days before NOW."""
+    start = NOW.date() - dt.timedelta(days=ends_days_ago + len(values) - 1)
+    return [((start + dt.timedelta(days=i)).isoformat(), v) for i, v in enumerate(values)]
+
+
+@pytest.mark.parametrize("short_name, key", [("META", ("META", None)), (" meta ", ("META", None)),
+                                             ("", ("FB", None)), (None, ("FB", None))])
+def test_a_us_instruments_market_symbol_comes_from_the_instrument_list(conn, short_name, key):
+    """Trading 212's _US_EQ codes are old for one instrument in five (FB_US_EQ is Meta)."""
+    if short_name is not None:
+        _instrument(conn, "FB_US_EQ", short_name)
+    assert ta.position_key("FB_US_EQ", "US30303M1027", conn) == key
+    assert ta.position_key("FB_US_EQ", "US30303M1027") == ("FB", None)      # no database: the code itself
+
+
+def test_the_instrument_list_keeps_a_class_share_and_leaves_other_instruments_alone(conn):
+    _instrument(conn, "BRK_B_US_EQ", "BRK.B", isin="US0846707026")
+    _instrument(conn, "SAPd_EQ", "SAP", isin="DE0007164600")
+    assert ta.position_key("BRK_B_US_EQ", "US0846707026", conn) == ("BRK.B", None)
+    assert ta.position_key("SAPd_EQ", "DE0007164600", conn) == ("DE0007164600", "T212")
+
+
+def test_a_holding_under_an_old_code_is_opened_and_priced_under_its_market_symbol(conn, run):
+    _synced_before(conn)
+    _instrument(conn, "FB_US_EQ", "META")
+    result = run(_holding(**FB))
+    pos = positions.find_open(conn, "META")
+    assert result.opened == ["META"] and (pos.t212_ticker, pos.source) == ("FB_US_EQ", None)
+    assert run.histories == [("META", None)]                        # Yahoo is asked for META, not FB
+    assert run.sent[0].startswith("📥 Вижу в Trading 212: META — ")
+    assert conn.execute("SELECT ticker FROM t212_prices").fetchall() == [("META",)]
+
+
+def test_without_an_instrument_row_the_code_is_the_symbol(conn, run):
+    _synced_before(conn)
+    assert run(_holding(**FB)).opened == ["FB"] and run.histories == [("FB", None)]
+
+
+@pytest.mark.parametrize("yahoo, by_isin", [
+    ([], True),                                                     # Yahoo has no close for the symbol
+    (_closes(480.0, 500.0), True),                                  # another instrument's price (24,05 here)
+    (_closes(19.0), True), (_closes(29.0), True),                   # more than 20 % away
+    (_closes(20.5), False), (_closes(28.0), False),                 # within 20 %
+    (_closes(24.0, ends_days_ago=0), True),                         # only today's bar: no completed close
+    (_closes(500.0, 24.0), False)])                                 # the LAST completed close counts
+def test_a_us_holding_is_keyed_by_its_symbol_only_when_yahoos_price_is_its_own(conn, run, yahoo, by_isin):
+    _synced_before(conn)
+    run.yahoo = lambda ticker: yahoo
+    result = run(_holding())                                        # GME, 24,05 at Trading 212
+    [pos] = positions.open_positions(conn)
+    if by_isin:
+        assert result.opened == ["US36467W1099"]
+        assert (pos.ticker, pos.source, pos.t212_ticker) == ("US36467W1099", "T212", "GME_US_EQ")
+        assert conn.execute("SELECT ticker, price FROM t212_prices").fetchall() == [("US36467W1099", 24.05)]
+        assert run.sent[-1].startswith("📥 Вижу в Trading 212: GME — ")       # still named by its code
+        assert run.sent[-1].endswith("Слежу: стоп и срок.")         # and watched as what it now is
+    else:
+        assert result.opened == ["GME"] and (pos.ticker, pos.source) == ("GME", None)
+
+
+def test_a_us_holding_with_no_price_from_trading_212_keeps_its_symbol_when_yahoo_knows_it(conn, run):
+    _synced_before(conn)
+    run.yahoo = lambda ticker: _closes(500.0)                       # nothing to compare it with
+    assert run(_holding(price=None)).opened == ["GME"]
+
+
+def test_a_us_holding_with_no_isin_to_fall_back_on_keeps_its_symbol(conn, run):
+    _synced_before(conn)
+    run.yahoo = lambda ticker: []
+    assert run(_holding("GME_US_EQ", None)).opened == ["GME"]
+
+
+def test_a_holding_keyed_by_its_isin_is_priced_from_the_days_prices_and_trips_its_stop_there(conn, run):
+    _synced_before(conn)
+    run.yahoo = lambda ticker: []
+    run(_holding(avg=100.0, price=100.0))
+    run(_holding(avg=100.0, price=130.0), now=NOW + dt.timedelta(days=1))
+    run(_holding(avg=100.0, price=110.0), now=NOW + dt.timedelta(days=2))
+    [alert] = positions.check_exits(conn, today=NOW.date() + dt.timedelta(days=2), news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 110.0
+
+
+def test_a_tracked_position_is_found_by_its_stored_trading_212_id_not_by_the_key(conn, run):
+    """Tracked as FB before the instrument list had the rename. The list now says META: it is the
+    same holding -- no second position, no «📥», no «📤»."""
+    _synced_before(conn)
+    run(_holding(**FB))
+    _instrument(conn, "FB_US_EQ", "META")
+    run.sent.clear()
+    result = run(_holding(**dict(FB, qty=11.0, price=510.0)), now=NOW + dt.timedelta(hours=1))
+    assert (result.opened, result.closed, result.updated, run.sent) == ([], [], ["FB"], [])
+    [pos] = positions.open_positions(conn)
+    assert (pos.ticker, pos.t212_ticker, pos.quantity) == ("FB", "FB_US_EQ", 11.0)
+    assert conn.execute("SELECT ticker, price FROM t212_prices").fetchall() == [("FB", 510.0)]   # its own ticker
+
+
+def test_a_holding_keyed_by_its_isin_at_open_stays_one_position_when_yahoo_knows_it_later(conn, run):
+    _synced_before(conn)
+    run.yahoo = lambda ticker: []
+    run(_holding())
+    run.yahoo = None
+    result = run(_holding(), now=NOW + dt.timedelta(hours=1))
+    assert (result.opened, result.closed) == ([], [])
+    assert [p.ticker for p in positions.open_positions(conn)] == ["US36467W1099"]
+
+
+def test_one_isin_on_two_exchanges_stays_one_position_whichever_is_listed_first(conn, run):
+    _synced_before(conn)
+    london = _holding("VUSAl_EQ", "IE00B3XXRP09", currency="GBP", price=80.0)
+    xetra = _holding("VUSAd_EQ", "IE00B3XXRP09", currency="EUR", price=95.0)
+    run(london, xetra)
+    result = run(xetra, london, now=NOW + dt.timedelta(hours=1))    # the other way round
+    assert (result.opened, result.closed) == ([], [])
+    [pos] = positions.open_positions(conn)
+    assert pos.t212_ticker == "VUSAl_EQ"
+    assert conn.execute("SELECT price FROM t212_prices").fetchall() == [(80.0,)]     # the tracked listing's price
+
+
+def test_a_position_stored_without_its_trading_212_id_is_matched_by_its_key_and_learns_the_id(conn, run):
+    _synced_before(conn)
+    run(ta.T212Position(None, None, "DE0007164600", "EUR", 10.0, 120.0, 125.0, None, 100.0, None, 5.0, "EUR"))
+    assert positions.find_open(conn, "DE0007164600").t212_ticker is None
+    result = run(_holding(**SAP))
+    assert (result.opened, result.closed) == ([], [])
+    assert positions.find_open(conn, "DE0007164600").t212_ticker == "SAPd_EQ"
+
+
+def test_a_sold_holding_is_told_from_the_list_by_its_trading_212_id(conn, run):
+    _synced_before(conn)
+    run(_holding(**FB), _holding(**SAP))
+    _instrument(conn, "FB_US_EQ", "META")                           # the derived key changes; the id does not
+    result = run(_holding(**FB))
+    assert result.closed == ["DE0007164600"] and positions.find_open(conn, "FB") is not None
+
+
+@pytest.mark.parametrize("t212_ticker, name", [("GME_US_EQ", "GME"), ("BRK_B_US_EQ", "BRK.B"),
+                                               ("SAPd_EQ", "SAP"), (None, "US36467W1099")])
+def test_a_holding_keyed_by_its_isin_is_named_by_its_trading_212_symbol(t212_ticker, name):
+    assert positions.name_of("US36467W1099", "T212", t212_ticker) == name
+
+
 # ---------------------------------------------- R1: holdings that pre-date tracking ("legacy")
 def _exits(conn, today, price, closes=()):
     return positions.check_exits(conn, today=today, price_fn=lambda t, s=None: price,
@@ -1049,7 +1218,7 @@ def test_a_silent_sync_after_the_first_message_says_nothing_either(conn, run):
 
 
 def test_a_silent_sync_never_calls_notify(conn):
-    result = ta.sync(conn, fetch=lambda: ([_holding()], SUMMARY), now=NOW, closes_fn=lambda t, s=None: [],
+    result = ta.sync(conn, fetch=lambda: ([_holding()], SUMMARY), now=NOW, closes_fn=lambda t, s=None: _flat(24.0),
                      notify=lambda text: pytest.fail("a silent sync sends nothing"), silent=True)
     assert result.opened == ["GME"]
 
@@ -1114,6 +1283,21 @@ def test_the_days_are_left_out_when_the_purchase_date_is_not_known(conn, run, no
     [stored] = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status"))).holdings
     assert stored.days is None and stored.opened == TODAY.isoformat()      # ordered by its tracking start then
     assert _view(conn, _holding(created="2026-09-30T08:00:00Z")).holdings[0].days == 1   # told live: known
+
+
+def test_the_live_view_finds_a_tracked_holding_by_its_trading_212_id(conn, run, no_yahoo):
+    _synced_before(conn)
+    run(_holding(**FB))                                             # tracked as FB
+    _instrument(conn, "FB_US_EQ", "META")
+    [h] = _view(conn, _holding(**dict(FB, price=510.0))).holdings
+    assert h.position is not None and (h.position.ticker, h.name) == ("FB", "FB")
+    assert conn.execute("SELECT ticker, price FROM t212_prices").fetchall() == [("FB", 510.0)]
+
+
+def test_the_live_view_names_a_holding_it_does_not_track_yet_by_its_market_symbol(conn, no_yahoo):
+    _instrument(conn, "FB_US_EQ", "META")
+    [h] = _view(conn, _holding(**FB)).holdings
+    assert (h.name, h.position) == ("META", None)
 
 
 def test_the_live_view_stores_the_days_prices_and_account_but_is_not_a_sync(conn, run, no_yahoo):
@@ -1289,7 +1473,7 @@ def test_the_sync_command_runs_one_sync_and_sends_nothing(keyed, monkeypatch, ca
     _wire(monkeypatch, session)
     monkeypatch.setattr(ta, "DB_PATH", tmp_path / "data" / "d.db")       # the folder is made
     monkeypatch.setattr(ta.telegram_notify, "send_text", lambda text: pytest.fail("--sync must not send"))
-    monkeypatch.setattr(positions, "daily_closes", lambda ticker, source=None: [])   # the stop's history
+    monkeypatch.setattr(positions, "daily_closes", lambda ticker, source=None: _flat(24.0))   # Yahoo's GME
     assert ta.main(["--sync"]) == 0
     assert capsys.readouterr().out == "Trading 212: синхронизация прошла — открыто 1, обновлено 0, закрыто 0\n"
     stored = db.connect(tmp_path / "data" / "d.db")

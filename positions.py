@@ -125,15 +125,24 @@ def find_open(conn, ticker: str) -> Position | None:
 
 
 _EXCHANGE_SUFFIX = re.compile(r"[a-z]*_EQ$")
+_US_CODE = "_US_EQ"
+
+
+def us_symbol(t212_ticker: str | None) -> str:
+    """The symbol in a Trading 212 US code -- AAPL_US_EQ -> AAPL, BRK_B_US_EQ -> BRK.B -- and ""
+    for any other instrument. (For one instrument in five the code is an old one, FB_US_EQ for
+    Meta: t212_account.position_key takes the market symbol from the instrument list.)"""
+    code = t212_ticker or ""
+    return code[:-len(_US_CODE)].replace("_", ".").upper() if code.endswith(_US_CODE) else ""
 
 
 def name_of(ticker: str, source: str | None = None, t212_ticker: str | None = None) -> str:
     """How the user knows a name: a coin by its symbol, a Trading 212 holding keyed by its ISIN
-    by its Trading 212 symbol (SAPd_EQ -> SAP), anything else by its ticker."""
+    by its Trading 212 symbol (SAPd_EQ -> SAP, GME_US_EQ -> GME), anything else by its ticker."""
     if crypto.is_crypto(ticker):
         return crypto.symbol_of(ticker)
     if source == T212_SOURCE and t212_ticker:
-        return _EXCHANGE_SUFFIX.sub("", t212_ticker) or ticker
+        return us_symbol(t212_ticker) or _EXCHANGE_SUFFIX.sub("", t212_ticker) or ticker
     return ticker
 
 

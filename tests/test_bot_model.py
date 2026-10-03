@@ -874,6 +874,8 @@ _FIRST_MESSAGE = ("send", "📥 Слежу за вашими позициями 
 def _real_sync(monkeypatch):
     monkeypatch.setattr(bot.t212_account, "sync", REAL_T212_SYNC)
     monkeypatch.setattr(bot.t212_account, "fetch_account", lambda session=None: ([_HOLDING], _SUMMARY))
+    # Yahoo knows GME at about Trading 212's price (one close: too few to size a stop)
+    monkeypatch.setattr(positions, "daily_closes", lambda ticker, source=None: [("2026-08-03", 24.0)])
 
 
 def test_a_no_telegram_run_opens_the_holding_and_leaves_the_first_message_for_a_run_with_telegram(
