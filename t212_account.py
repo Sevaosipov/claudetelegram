@@ -474,6 +474,20 @@ def account_value(conn, day: dt.date) -> tuple[float, str | None] | None:
     return (row[0], row[1]) if row else None
 
 
+def stored_account_line(conn) -> str | None:
+    """The latest account snapshot as one line of plain text, «Счёт Trading 212 на 01.10: €X ·
+    вложено €Y · P/L ±€Z (±W%) · свободно €C» (the profit or loss is the holdings' value less
+    their cost), or None before the first one."""
+    row = conn.execute("SELECT date, total_value, invested_value, invested_cost, cash_free, currency "
+                       "FROM t212_equity WHERE total_value IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
+    if row is None:
+        return None
+    day, total, value, cost, cash, currency = row
+    pnl = value - cost if value is not None and cost is not None else None
+    figures = telegram_notify.format_t212_account(total, cost, pnl, cash, currency).removeprefix("Счёт: ")
+    return f"Счёт Trading 212 на {dt.date.fromisoformat(day):%d.%m}: {figures}"
+
+
 # ------------------------------------------------------------------ what /portfolio shows
 @dataclass
 class Holding:

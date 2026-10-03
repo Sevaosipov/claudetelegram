@@ -19,7 +19,8 @@ only the TradingView MCP server, `--permission-mode dontAsk` (whatever is not al
 denied), and a shell allowed exactly three read commands, named by their absolute paths
 (ANALYST_CMD is `<BASE_DIR>/.venv/bin/python <BASE_DIR>/analyst.py`):
     ANALYST_CMD context 'TICKER'     the model's score, the positions, the dossier
-    ANALYST_CMD portfolio            the owner's /bought positions, the model summary, the
+    ANALYST_CMD portfolio            the owner's positions (the Trading 212 account as the bot
+                                     last stored it, and /bought), the model summary, the
                                      watchlist, today's buys
     ANALYST_CMD news 'QUERY'         up to 10 Google News headlines with dates
 Each Claude runs in a fresh empty folder outside the project, removed after the run: the
@@ -60,6 +61,7 @@ import paper_report
 import positions
 import research
 import sources
+import t212_account
 import telegram_notify
 from telegram_notify import money_eur, signed_pct
 
@@ -602,8 +604,11 @@ def _position_lines(conn, ticker: str) -> list[str]:
                              f"{signed_pct(result)}, {_stop(p['stop_pct'])}")
     for p in positions.open_positions(conn):
         if keys.matches(p.ticker, p.source):
-            lines.append(f"ВАША ПОЗИЦИЯ (/bought): с {p.opened_at}, вход {p.entry_price:,.2f}, "
-                         f"{_stop(p.stop_pct)}")
+            held = p.origin == positions.T212         # read from the Trading 212 account, not /bought
+            shares = (f", {telegram_notify.quantity(p.quantity)} шт."
+                      if held and p.quantity is not None else "")
+            lines.append(f"ВАША ПОЗИЦИЯ ({'Trading 212' if held else '/bought'}): с {p.opened_at}{shares}, "
+                         f"вход {p.entry_price:,.2f}, {_stop(p.stop_pct)}")
     return lines
 
 
@@ -685,19 +690,40 @@ def _watchlist(scored: list) -> list[str]:
         for s in watch]
 
 
+def _t212_lines(conn, today: dt.date) -> list[str]:
+    """The owner's Trading 212 account as the bot last stored it -- no call to Trading 212 is made
+    from here: the latest account snapshot, then each holding with its quantity, average price,
+    last stored price and profit or loss, and the status lines of a /bought position. [] when the
+    bot has stored nothing of the account."""
+    account = t212_account.stored_account_line(conn)
+    holdings = t212_account.stored_holdings(conn, today)
+    if account is None and not holdings:
+        return []
+    blocks = telegram_notify.t212_blocks(holdings, html=False)
+    return ([account] if account else []) + (["В Trading 212:"] + blocks if blocks
+                                             else ["В Trading 212: позиций нет"])
+
+
 def _own_positions(conn, today: dt.date) -> list[str]:
     """«ВАШИ ПОЗИЦИИ (/bought):» and, for each position the owner recorded, the facts /portfolio
-    shows them in Telegram (as plain text); or why there is nothing to show."""
+    shows them in Telegram (as plain text); or why there is nothing to show. When the bot tracks
+    the owner's Trading 212 account the section is «ВАШИ ПОЗИЦИИ (Trading 212 и /bought):» and
+    opens with the account (_t212_lines); the /bought positions follow."""
     try:
-        blocks = telegram_notify.my_position_blocks(positions.portfolio_rows(conn, today), html=False)
+        account = _t212_lines(conn, today)
+        blocks = telegram_notify.my_position_blocks(
+            positions.portfolio_rows(conn, today, origin=positions.MANUAL), html=False)
     except Exception as e:
         return [f"ВАШИ ПОЗИЦИИ (/bought): не посчитаны: {type(e).__name__}"]
-    return ["ВАШИ ПОЗИЦИИ (/bought):"] + blocks if blocks else ["ВАШИ ПОЗИЦИИ (/bought): нет"]
+    if not account:
+        return ["ВАШИ ПОЗИЦИИ (/bought):"] + blocks if blocks else ["ВАШИ ПОЗИЦИИ (/bought): нет"]
+    return (["ВАШИ ПОЗИЦИИ (Trading 212 и /bought):"] + account
+            + (["Вне Trading 212 (/bought):"] + blocks if blocks else ["Вне Trading 212 (/bought): нет"]))
 
 
 def portfolio(conn, *, scored=None) -> str:
-    """The owner's own /bought positions, then the model: its summary, the stocks and coins it
-    is watching and today's buys. `scored` is model.score_today's list; else today's kept
+    """The owner's own positions (the Trading 212 account as stored, and /bought), then the model:
+    its summary, the stocks and coins it is watching and today's buys. `scored` is model.score_today's list; else today's kept
     scores, else everything is scored now."""
     today = dt.date.today()
     error = None
@@ -753,7 +779,8 @@ def _parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("context", help="the model's score, positions and the dossier: context TICKER"
                    ).add_argument("ticker")
-    sub.add_parser("portfolio", help="your /bought positions, model summary, watchlist, today's buys")
+    sub.add_parser("portfolio", help="your positions (Trading 212 as stored, /bought), model summary, "
+                                     "watchlist, today's buys")
     sub.add_parser("news", help="Google News headlines: news QUERY").add_argument("query", nargs="*")
     sub.add_parser("ask", help="ask the analyst from the terminal: ask TEXT").add_argument(
         "text", nargs="*")
