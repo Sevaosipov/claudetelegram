@@ -779,3 +779,19 @@ def test_the_command_line_takes_exactly_one_of_check_and_sync(argv, capsys):
     with pytest.raises(SystemExit) as stop:
         ta.main(argv)
     assert stop.value.code == 2
+
+
+# ------------------------------------------------------------------ the README
+def test_the_readme_says_what_is_read_how_often_and_that_nothing_is_traded():
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    for phrase in ("`/equity/positions`", "`/equity/account/summary`", "только чтение",     # what is read
+                   "Каждые 15 минут", "ежедневном прогоне",                                # how often
+                   "📥 Слежу за вашими позициями", "📥 Вижу в Trading 212", "📤",            # the notifications
+                   "`/portfolio` — живой", "💼 Trading 212", "✍️ Вне Trading 212",
+                   "python t212_account.py --check",
+                   "никогда не размещает"):                                                # no orders, ever
+        assert phrase in section, phrase
+    key = " ".join(readme[readme.index("### Ключ Trading 212\n"):].split())[:1500]
+    assert "Portfolio" in key and "Account data" in key and "не включайте" in key   # a read-only key
