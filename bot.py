@@ -4,7 +4,9 @@ The model scores and sells on every run but buys only on the week's first full r
 Friday to Sunday, and the week's one Telegram message (what the model bought and sold, holds
 and watches, the groups that started selling) goes out once that pass has got through -- on
 Sunday regardless, with a warning if the model never did. Every other day Telegram gets only
-the close alerts on your /bought positions, as they fire, and the breakage warnings.
+the close alerts on your positions (/bought and the Trading 212 account), as they fire, and the
+breakage warnings. A full run also syncs the Trading 212 account (t212_account.py, read only)
+right before the close alerts are checked.
 
 Sources:
     SEC Form 4        US insider purchases and sales (sec_edgar.py)
@@ -56,6 +58,7 @@ import paper_report
 import positions
 import sec_edgar
 import strategy
+import t212_account
 import universe
 import telegram_notify
 from passes import (
@@ -346,6 +349,22 @@ def _journal(conn, signals: list, report) -> None:
     for sig in signals:
         print(telegram_notify.format_any_signal(sig))
     _commit_signals(conn, signals)
+
+
+def _log_only(text: str) -> bool:
+    """What a --no-telegram run does with a message: it goes to the log, not to Telegram."""
+    print(text)
+    return False
+
+
+def _sync_t212(conn, args) -> None:
+    """Bring the positions in step with the Trading 212 account (t212_account.sync: read only)
+    before the exits are checked, so a holding bought or sold there today counts today. Only on a
+    full run -- a filtered one leaves the positions alone, as it leaves the model. Without a key
+    it does nothing; a crash is reported like a failed source."""
+    if _filtered_run(args):
+        return
+    _run_source("T212", t212_account.sync, conn, notify=_log_only if args.no_telegram else None)
 
 
 def _send_closes(conn, closes: list) -> bool:
@@ -699,6 +718,7 @@ def main():
         if buy and report is not None and report.complete:
             _mark_week(conn, today, BUYS_KEY)
         _journal(conn, rest + exits, report)
+        _sync_t212(conn, args)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))

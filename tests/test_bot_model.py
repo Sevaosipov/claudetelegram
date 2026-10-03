@@ -19,8 +19,11 @@ import model
 import paper_report
 import positions
 import strategy
+import t212_account
 import telegram_notify
 from conftest import add_sec_purchase, add_sec_sale
+
+REAL_T212_SYNC = t212_account.sync        # the main_run fixture stubs it
 
 TODAY = dt.date.today()
 RECENT = (TODAY - dt.timedelta(days=1)).isoformat()
@@ -450,6 +453,15 @@ def main_run(monkeypatch, tmp_path):
     monkeypatch.setattr(bot.telegram_notify, "send_text", send_text)
     monkeypatch.setattr(bot.telegram_notify, "format_close_alert", lambda a, html=False: str(a))
 
+    def t212_sync(conn, *, notify=None):
+        # kept apart from `calls` (the order the day's own steps happen in): where in that order it
+        # ran -- how many steps were before it -- and what it was told to notify through
+        run.syncs.append(len(calls))
+        run.sync_notify.append(notify)
+        if run.sync_crashes:
+            raise RuntimeError("t212 is down")
+    monkeypatch.setattr(bot.t212_account, "sync", t212_sync)
+
     def run(*argv):
         monkeypatch.setattr(sys, "argv", ["bot.py", "--once", *argv])
         monkeypatch.setattr(sys, "stdout", sys.stdout)     # main() wraps the streams: restore them after
@@ -462,6 +474,7 @@ def main_run(monkeypatch, tmp_path):
     run.today, run.send_ok, run.model_crashes, run.week_fails = FRI, True, False, False
     run.week_kwargs = []                                          # what format_week was asked for, per call
     run.complete = True                                           # False: a pass with a failed sleeve
+    run.syncs, run.sync_notify, run.sync_crashes = [], [], False  # the Trading 212 sync (stubbed)
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 
@@ -818,3 +831,69 @@ def test_a_failing_monthly_report_does_not_escape_main(main_run, monkeypatch, ca
     main_run()                                                    # no exception
     assert "[PAPER_REPORT] pass failed: RuntimeError: report" in capsys.readouterr().err
     assert db.get_cached_value(main_run.db(), "last_successful_run", float("inf")) is not None
+
+
+# ------------------------------------------------------------------ the Trading 212 sync in the daily run
+def test_main_syncs_trading_212_after_the_journal_and_right_before_the_exits(main_run):
+    """A holding bought or sold in the account today is opened or closed before the exits are
+    checked, so the check sees the account as it is."""
+    calls = main_run()
+    assert main_run.syncs == [calls.index("check_exits")] == [3]    # collect, model, journal, then the sync
+    assert main_run.sync_notify == [None]                           # its messages go to Telegram
+
+
+@pytest.mark.parametrize("day", [MON, SAT])
+def test_main_syncs_trading_212_on_every_full_run(main_run, day):
+    main_run.today = day
+    main_run()
+    main_run()
+    assert len(main_run.syncs) == 2
+
+
+@pytest.mark.parametrize("flag", ["--sec-only", "--house-only", "--bafin-only", "--norway-only",
+                                  "--sweden-only", "--crypto-only", "--min-score=35",
+                                  "--min-liquidity=1000000"])
+def test_a_filtered_run_does_not_sync_trading_212(main_run, flag):
+    kinds = _kinds(main_run(flag))
+    assert main_run.syncs == [] and "check_exits" in kinds          # the exits are still checked
+
+
+def test_with_no_telegram_the_sync_runs_but_its_messages_stay_in_the_log(main_run, capsys):
+    main_run("--no-telegram")
+    [notify] = main_run.sync_notify
+    assert notify is not None and notify("📥 Вижу в Trading 212: GME") is False
+    assert "📥 Вижу в Trading 212: GME" in capsys.readouterr().out
+    assert not [c for c in main_run() if c[0] == "send" and "Trading 212" in c[1]]
+
+
+def test_a_crashing_sync_is_reported_like_a_failed_source_and_the_run_goes_on(main_run, capsys):
+    main_run.sync_crashes = True
+    calls = main_run()
+    assert "check_exits" in calls and ("send", "WEEK") in calls
+    assert "[T212] pass failed: RuntimeError" in capsys.readouterr().err
+    assert db.get_cached_value(main_run.db(), "last_successful_run", float("inf")) is not None
+
+
+def test_the_real_sync_without_a_key_leaves_the_daily_run_as_it_was(main_run, monkeypatch):
+    """main calls the sync the way it takes, and with no key it is a no-op: the day's steps are
+    exactly what they were."""
+    monkeypatch.setattr(bot.t212_account, "sync", REAL_T212_SYNC)
+    calls = main_run()
+    assert _kinds(calls) == ["collect", "model", "journal", "check_exits", "closes", "week", "send", "monthly"]
+    conn = main_run.db()
+    for table in ("positions", "t212_prices", "t212_equity"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+
+
+def test_a_holding_the_daily_sync_finds_is_opened_and_announced_before_the_exits(main_run, monkeypatch):
+    holding = t212_account.T212Position("GME_US_EQ", None, "US36467W1099", "USD", 10.0, 23.10, 24.05,
+                                        None, None, None, 8.3, "EUR")
+    summary = t212_account.T212Summary("EUR", 1000.0, 100.0, 900.0, 800.0, 100.0, 0.0)
+    monkeypatch.setattr(bot.t212_account, "sync", REAL_T212_SYNC)
+    monkeypatch.setattr(bot.t212_account, "fetch_account", lambda session=None: ([holding], summary))
+    calls = main_run()
+    announced = ("send", "📥 Слежу за вашими позициями в Trading 212 (1): GME")
+    assert calls.index(("journal", [main_run.buy_sig, main_run.exit_sig], main_run.report)) \
+        < calls.index(announced) < calls.index("check_exits")
+    [pos] = positions.open_positions(main_run.db())
+    assert (pos.ticker, pos.origin, pos.quantity) == ("GME", "t212", 10.0)
