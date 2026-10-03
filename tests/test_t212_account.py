@@ -1538,6 +1538,192 @@ def test_a_silent_sync_neither_warns_about_the_list_nor_uses_up_the_days_warning
     assert run.sent == [LIST_GAP_WARNING]
 
 
+# ---------------------------------------------- F8: a sync that raises while applying is a failed sync
+def _crashes(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("disk full: secret text")
+    monkeypatch.setattr(ta, "_apply", boom)
+
+
+def test_a_sync_that_raises_while_applying_counts_for_the_days_warning(conn, run, monkeypatch):
+    """F8: a failure inside _apply is recorded like a failed fetch -- after a day without a sync that got
+    through the owner is told, once a day, with the error's type and never its text -- and the error still
+    goes up to the caller (the bot loop logs it, the daily run reports it)."""
+    run(_holding())                                                 # got through at NOW
+    run.sent.clear()
+    _crashes(monkeypatch)
+    with pytest.raises(RuntimeError):
+        run(_holding(), now=_hours(23))
+    assert run.sent == []                                           # not a day yet
+    with pytest.raises(RuntimeError):
+        run(_holding(), now=_hours(25))
+    assert run.sent == [_silent_for_a_day("сбой синхронизации: RuntimeError")]
+    with pytest.raises(RuntimeError):
+        run(_holding(), now=_hours(26))                             # the same day: said once
+    assert len(run.sent) == 1 and "secret" not in run.sent[0]
+    assert positions.find_open(conn, "GME") is not None             # and nothing of it was kept
+
+
+def test_a_sync_that_raises_while_applying_is_ended_by_one_that_gets_through(conn, run, monkeypatch):
+    run(_holding())
+    with monkeypatch.context() as broken:
+        _crashes(broken)
+        with pytest.raises(RuntimeError):
+            run(_holding(), now=_hours(25))
+    run(_holding(), now=_hours(26))                                 # it works again
+    run.sent.clear()
+    with monkeypatch.context() as broken:
+        _crashes(broken)
+        with pytest.raises(RuntimeError):
+            run(_holding(), now=_hours(27))                         # an hour without one is not a day
+    assert run.sent == []
+
+
+def test_a_silent_sync_that_raises_while_applying_says_nothing(conn, run, monkeypatch):
+    run(_holding())
+    run.sent.clear()
+    _crashes(monkeypatch)
+    with pytest.raises(RuntimeError):
+        run(_holding(), now=_hours(25), silent=True)
+    assert run.sent == []
+
+
+def test_a_sync_that_raises_before_any_got_through_says_nothing(conn, run, monkeypatch):
+    _crashes(monkeypatch)
+    with pytest.raises(RuntimeError):
+        run(_holding(), now=_hours(48))
+    assert run.sent == []
+
+
+def test_a_failure_to_record_the_failure_does_not_hide_the_error(conn, run, monkeypatch, capsys):
+    run(_holding())
+    _crashes(monkeypatch)
+
+    def cannot(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(ta, "_failed", cannot)
+    with pytest.raises(RuntimeError, match="disk full"):             # the sync's own error is the one raised
+        run(_holding(), now=_hours(25))
+    assert "OperationalError" in capsys.readouterr().err
+
+
+# ---------------------------------------------- F9: a warning's mark is written before it is sent
+def _tracked_two(run):
+    run(_holding(), _holding(**SAP))
+
+
+def _list_off_since_an_hour_in(run):
+    _tracked_two(run)
+    _off(run, 1)
+
+
+# name -> (the prefix of its mark in kv, what a sync has to meet before it, the sync that says it
+# `hours` after the first one that could: all of them tell the same warning every day, so any later
+# hour does as well)
+WARNINGS = {
+    "silent for a day": ("t212_silent_", lambda run: run(_holding()),
+                         lambda run, hours, **kw: run(fetch=_down(), now=_hours(25 + hours), **kw)),
+    "key removed": ("t212_key_removed", lambda run: run(_holding()),
+                    lambda run, hours, **kw: run(fetch=_no_key, now=_hours(2 + hours), **kw)),
+    "list gap": ("t212_gap_", _list_off_since_an_hour_in,
+                 lambda run, hours, **kw: _off(run, 25 + hours, **kw)),
+}
+ALL_WARNINGS = (_silent_for_a_day(), KEY_REMOVED, LIST_GAP_WARNING)
+
+
+def _said(run):
+    return [text for text in run.sent if text in ALL_WARNINGS]
+
+
+@pytest.mark.parametrize("name", WARNINGS)
+def test_a_warnings_mark_is_stored_before_the_warning_goes_out(conn, run, name):
+    prefix, setup, trigger = WARNINGS[name]
+    marks = []
+
+    def spy(text):
+        marks.append(conn.execute("SELECT COUNT(*) FROM kv_cache WHERE key LIKE ?", (prefix + "%",)).fetchone()[0])
+        return True
+    setup(run)
+    trigger(run, 0, notify=spy)
+    assert marks == [1]
+
+
+@pytest.mark.parametrize("name", WARNINGS)
+def test_a_warning_whose_mark_cannot_be_written_is_not_sent_and_not_repeated(conn, run, monkeypatch, name):
+    """A failing mark write -- a full disk, a database in trouble -- must not turn into a warning sent at
+    every sync: nothing goes out until the mark can be stored, and then it goes out once."""
+    prefix, setup, trigger = WARNINGS[name]
+    real = db.save_cached_value
+
+    def failing(c, key, value, **kw):
+        if key.startswith(prefix):
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(c, key, value, **kw)
+    setup(run)
+    monkeypatch.setattr(db, "save_cached_value", failing)
+    for hours in (0, 1, 2):                                         # sync after sync, the same trouble
+        trigger(run, hours)
+    assert _said(run) == []
+    monkeypatch.setattr(db, "save_cached_value", real)             # the trouble is over
+    for hours in (3, 4):
+        trigger(run, hours)
+    assert len(_said(run)) == 1
+
+
+def _shared(tmp_path):
+    path = tmp_path / "shared.db"
+    mine, other = db.connect(path), db.connect(path)
+    mine.execute("PRAGMA busy_timeout = 50")
+    return mine, other
+
+
+def _got_through(conn, now=NOW):
+    holding = _holding()
+    ta.sync(conn, fetch=lambda: ([holding], _agreeing([holding])), notify=lambda t: True, now=now,
+            closes_fn=lambda t, s=None: _flat(24.0))
+
+
+@pytest.mark.parametrize("fetch, hours, text", [
+    (_down(), 25, _silent_for_a_day()), (_no_key, 2, KEY_REMOVED)], ids=["silent for a day", "key removed"])
+def test_a_locked_database_does_not_repeat_a_warning(tmp_path, fetch, hours, text):
+    """F9: the daily run holds the database for a while. The warning used to go out first and then raise
+    at its mark, so every sync -- every 15 minutes -- sent it again for as long as the lock lasted. Now
+    nothing is sent while the mark cannot be written, and no sync raises for it."""
+    mine, other = _shared(tmp_path)
+    _got_through(mine)
+    sent = []
+    other.execute("BEGIN IMMEDIATE")                                # the other process holds the database
+    for quarter in range(4):
+        result = ta.sync(mine, fetch=fetch, notify=lambda t: sent.append(t) or True,
+                         now=_hours(hours) + dt.timedelta(minutes=15 * quarter))
+        assert result.error                                         # failed as before, with no OperationalError
+    assert sent == []
+    other.rollback()                                                # the lock is released
+    for later in (1, 2, 3):
+        ta.sync(mine, fetch=fetch, notify=lambda t: sent.append(t) or True, now=_hours(hours + later))
+    assert sent == [text]                                           # once
+    mine.close()
+    other.close()
+
+
+def test_a_message_whose_mark_cannot_be_given_back_is_not_repeated(tmp_path):
+    """Telegram refuses the warning; meanwhile the other process takes the database, so the mark cannot be
+    given back for a retry. It stays, and the warning is not repeated."""
+    mine, other = _shared(tmp_path)
+    _got_through(mine)
+
+    def refused(text):
+        other.execute("BEGIN IMMEDIATE")
+        return False
+    ta.sync(mine, fetch=_down(), notify=refused, now=_hours(25))
+    other.rollback()
+    sent = []
+    ta.sync(mine, fetch=_down(), notify=lambda t: sent.append(t) or True, now=_hours(26))
+    assert sent == []
+    mine.close()
+    other.close()
+
+
 # ---------------------------------------------- M3: a price of zero is not a price
 def test_a_price_of_zero_is_not_stored_and_drives_no_stop(conn, run):
     _synced_before(conn)
@@ -2283,3 +2469,13 @@ def test_the_readme_says_what_a_list_that_cannot_be_checked_and_one_that_keeps_d
     assert LIST_GAP_WARNING in section and "а раньше сходился" in section                       # F4
     assert "в другой валюте, чем в сводке" in section                                           # F5
     assert "не раньше чем через 10 минут после первой" in section                              # F6
+
+
+def test_the_readme_says_how_a_foreign_yahoo_series_a_failed_sync_and_a_locked_database_are_treated():
+    """F7, F8, F9."""
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    assert "расходится с сохранённой свежей ценой Trading 212 больше чем на 20%" in section          # F7
+    assert "и про сбой самой синхронизации" in section                                              # F8
+    assert "помечается в базе до отправки" in section                                               # F9

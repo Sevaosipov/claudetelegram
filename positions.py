@@ -56,6 +56,7 @@ CAUTION_LOOKBACK_DAYS = 7
 MANUAL, T212 = "manual", "t212"         # a position's origin: /bought, or the Trading 212 account
 T212_SOURCE = "T212"                    # the source of a Trading 212 holding with no Yahoo listing
 T212_STALE_DAYS = 3                     # a stored Trading 212 day price older than this is not a price
+YAHOO_TOLERANCE = 0.20                  # how far Yahoo's last close may be from Trading 212's own price
 _CAUTION_TEXT = {"etf_flow": "отток из спот-ETF", "treasury": "компания продала монеты",
                  "exchange_flow": "монеты заводят на биржи"}
 
@@ -451,10 +452,34 @@ def _pricing(conn, price_fn, closes_fn, today: dt.date | None = None):
     Yahoo is down -- falls back on the day prices the sync stored for it (the same instrument,
     the same currency), each of the two on its own: its stop still works. The stored history
     obeys the completed-bars rule like any other, and a stored price that is stale (t212_stale,
-    as of `today`) is no price. A /bought position never reads the account's prices."""
+    as of `today`) is no price. A /bought position never reads the account's prices.
+
+    Yahoo's series is not always the holding's: a symbol the instrument list vouched for may
+    later get a series on Yahoo that is another instrument's (an old code's). When Yahoo's last
+    completed close and a fresh stored day price both exist and differ by more than
+    YAHOO_TOLERANCE, the stored Trading 212 series is used, price and history, and Yahoo's is
+    not -- it must not drive a stop. Yahoo's history is fetched once per position."""
+    yahoo_bars: dict[tuple[str, str | None], list] = {}
+
+    def yahoo_history(pos):
+        key = (pos.ticker, pos.source)
+        if key not in yahoo_bars:
+            yahoo_bars[key] = daily_closes(pos.ticker, pos.source)
+        return yahoo_bars[key]
+
+    def not_its_own(pos):
+        """Yahoo's series for a Trading 212 holding is another instrument's (see above)."""
+        if pos.origin != T212 or conn is None:
+            return False
+        stored = t212_price(conn, pos.ticker, today)
+        done = _completed_bars(yahoo_history(pos), today or dt.date.today()) if stored else []
+        return bool(done) and abs(done[-1][1] / stored - 1) > YAHOO_TOLERANCE
+
     def price_of(pos):
         if price_fn is not None:
             return price_fn(pos.ticker, pos.source)
+        if not_its_own(pos):
+            return t212_price(conn, pos.ticker, today)
         price = last_close(pos.ticker, pos.source)
         if not price and pos.origin == T212 and conn is not None:
             price = t212_price(conn, pos.ticker, today)
@@ -463,7 +488,9 @@ def _pricing(conn, price_fn, closes_fn, today: dt.date | None = None):
     def closes_of(pos):
         if closes_fn is not None:
             return closes_fn(pos.ticker, pos.source)
-        bars = daily_closes(pos.ticker, pos.source)
+        if not_its_own(pos):
+            return t212_closes(conn, pos.ticker)
+        bars = yahoo_history(pos)
         if not bars and pos.origin == T212 and conn is not None:
             bars = t212_closes(conn, pos.ticker)
         return bars
@@ -480,7 +507,8 @@ def last_price(conn, ticker: str, source: str | None = None) -> float | None:
 def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=None, conn=None) -> dict:
     """How an open position stands, from the same price and history the exits read (`price_fn`
     and `closes_fn`, `(ticker, source)` seams with check_exits' defaults; `conn` lets a Trading
-    212 holding Yahoo has nothing for fall back on the sync's day prices: _pricing):
+    212 holding Yahoo has nothing for -- or whose Yahoo series is another instrument's -- read the
+    sync's day prices: _pricing):
       last        the price, or None when there isn't one;
       result      last / entry price - 1, or None;
       days        days since the open;
@@ -585,8 +613,9 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None, trend_fn=None
     rule that holds (see the top of the file). Seams, all `(ticker, source)`: `price_fn`
     the current price (default last_close), `closes_fn` the history (default daily_closes),
     `news_fn` the recent headlines (default model.default_news); `trend_fn(conn, symbol)`
-    is the coin trend a caution is confirmed by. A Trading 212 holding Yahoo has nothing for is
-    priced, by default, from the day prices the sync stored (t212_prices): _pricing."""
+    is the coin trend a caution is confirmed by. A Trading 212 holding Yahoo has nothing for --
+    or whose Yahoo series is far from the day price the sync stored, so another instrument's --
+    is priced, by default, from the day prices the sync stored (t212_prices): _pricing."""
     import model
     today = today or dt.date.today()
     price_of, closes_of = _pricing(conn, price_fn, closes_fn, today)

@@ -69,6 +69,7 @@ BAD_KEY = "ключ Trading 212 не подходит"
 NO_RIGHTS = "ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта"
 TOO_OFTEN = "Trading 212 просит реже: слишком много запросов (429)"
 BAD_ANSWER = "ответ не разобран"
+SYNC_CRASHED = "сбой синхронизации"      # the reason of a sync that raised while it was applied
 KEY_HINT = ("Создайте в Trading 212 → Настройки → API ключ только для чтения (Portfolio, Account data) "
             "и положите в .env")
 EMPTY_LIST = "пустой список позиций при вложенных средствах"
@@ -246,7 +247,7 @@ def fetch_account(session=None) -> tuple[list[T212Position], T212Summary]:
 
 
 # ------------------------------------------------------------------ instrument -> position
-YAHOO_TOLERANCE = 0.20          # how far Yahoo's last close may be from Trading 212's price
+YAHOO_TOLERANCE = positions.YAHOO_TOLERANCE   # how far Yahoo's last close may be from Trading 212's price
 
 
 def _isin_key(isin: str | None) -> str | None:
@@ -836,30 +837,22 @@ def _warn_about_the_list(conn, notify, now: dt.datetime) -> None:
 
 def _warn_when_silent_for_a_day(conn, reason: str, notify, now: dt.datetime) -> None:
     """A sync has got through before, and none has for SILENT_AFTER: the positions are not being
-    updated, and the owner is told -- once a day (the day is marked in kv once the message went
-    out, so one that did not go out is tried again at the next sync)."""
+    updated, and the owner is told -- once a day (_say_once: the day is marked in kv before the
+    message goes out, and given back when it did not, so one that did not go out is tried again at
+    the next sync)."""
     last = last_sync(conn)
     if last is None or now - last < SILENT_AFTER:
         return
-    key = WARNED_KEY.format(day=now.date().isoformat())
-    if db.get_cached_value(conn, key, _KV_FOREVER) is not None:
-        return
     text = (f"⚠️ Trading 212 не отвечает уже сутки ({telegram_notify._esc(reason)}): "
             f"позиции не обновляются.")
-    try:
-        sent = (notify or telegram_notify.send_text)(text)
-    except Exception as e:
-        print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
-        return
-    if sent:
-        db.save_cached_value(conn, key, 1.0)
+    _say_once(conn, WARNED_KEY.format(day=now.date().isoformat()), text, notify)
 
 
 def _say_key_removed(conn, notify, now: dt.datetime) -> None:
     """The account was tracked (a sync has got through) and now no key is configured: the key was
-    taken away, which is the owner's doing and not an outage. They are told once -- the mark is
-    kept in kv from the moment the message went out, so one that did not go out is tried again --
-    and then nothing more is said, no daily warning either, until a key is there again.
+    taken away, which is the owner's doing and not an outage. They are told once (_say_once: the
+    mark is kept in kv from before the message goes out, and given back when it did not) and then
+    nothing more is said, no daily warning either, until a key is there again.
 
     Not while a sync got through in the last KEY_HELD_FOR, whichever process made it: the bot is
     two processes, and the always-on Telegram agent keeps the key it was started with in its
@@ -868,15 +861,7 @@ def _say_key_removed(conn, notify, now: dt.datetime) -> None:
     last = last_sync(conn)
     if last is None or now - last < KEY_HELD_FOR:
         return
-    if db.get_cached_value(conn, KEY_REMOVED_KEY, _KV_FOREVER) is not None:
-        return
-    try:
-        sent = (notify or telegram_notify.send_text)(KEY_REMOVED)
-    except Exception as e:
-        print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
-        return
-    if sent:
-        db.save_cached_value(conn, KEY_REMOVED_KEY, 1.0)
+    _say_once(conn, KEY_REMOVED_KEY, KEY_REMOVED, notify)
 
 
 def _key_is_there(conn, *, commit: bool) -> None:
@@ -912,6 +897,17 @@ def _failed(conn, result: SyncResult, reason: str, kind: str, notify, silent: bo
     if not silent:
         _warn_when_silent_for_a_day(conn, reason, notify, result.at)
     return result
+
+
+def _crashed(conn, result: SyncResult, error: Exception, notify, silent: bool) -> None:
+    """A sync that raised while it was being applied (a bug, a database error) is a failed one,
+    recorded like a failed fetch: the day-long warning counts it (_failed). Then the error goes on
+    up to the caller, as it always did. Only its type is named -- its text is not safe to show --
+    and recording it must never hide it: whatever this raises is logged and dropped."""
+    try:
+        _failed(conn, result, f"{SYNC_CRASHED}: {type(error).__name__}", "internal", notify, silent)
+    except Exception as e:
+        print(f"[t212] the failure was not recorded: {type(e).__name__}", file=sys.stderr)
 
 
 def _say_no_key() -> None:
@@ -966,8 +962,10 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     try:
         messages = _apply(conn, holdings, summary, now, closes_fn, result, silent)
         conn.commit()
-    except BaseException:
+    except BaseException as e:
         conn.rollback()
+        if isinstance(e, Exception):
+            _crashed(conn, result, e, notify, silent)
         raise
     notify = notify or telegram_notify.send_text
     for text in messages:
