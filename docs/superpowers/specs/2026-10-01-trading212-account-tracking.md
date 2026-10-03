@@ -420,3 +420,21 @@ insiders and its news. This narrows I2's check and widens §4's pricing.
   ISIN; a US-keyed holding with no Yahoo data trips its trailing stop on the stored day prices (peak from
   completed stored days); the price and the history fall back independently; a stale stored price gives no
   price; a `/bought` position is not priced from them; handed-in seams are not second-guessed.
+
+### K2. A key removed on purpose is not an outage (ruling on I3, 2026-10-03)
+
+Under I3 a key that was removed after the account had been tracked produced the daily «не отвечает уже сутки»
+warning for ever. Removing the key is the owner's decision.
+
+- When no key is configured and a sync had got through before, a sync sends ONE message: «Ключ Trading 212 убран —
+  слежение за счётом остановлено. Позиции из Trading 212 остаются в /portfolio по последним данным.» It is marked
+  in kv (`t212_key_removed`) once it went out, so a message that did not go out is tried again at the next sync.
+- After that the sync stays quiet: no daily warning for a missing key.
+- When a key is configured again the mark is cleared — by a sync that gets through, and by one that reaches
+  Trading 212 and fails. A later removal is then said again.
+- A silent sync says nothing and marks nothing.
+- With no key and no sync ever having got through, nothing is said (the quiet no-op of §2).
+- API errors — 401, 403, timeouts, other statuses, a bad answer — keep I3's daily warning.
+- **Tests:** the message once over 30 days of syncs with no key; nothing without an earlier sync; the mark
+  cleared by a sync that gets through and by one that fails with a key; a silent sync; a message that did not go
+  out; the daily warning for 401, 403, a timeout and a 502.

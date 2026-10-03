@@ -82,6 +82,9 @@ SYNCED_AT_KEY = "t212_synced_at"        # kv: when the last one did, epoch secon
 MISSING_KEY = "t212_missing"            # kv (JSON): ids of the positions missing at the last sync
                                         # that had no summary to check the list against
 WARNED_KEY = "t212_silent_{day}"        # kv: the day's «не отвечает уже сутки» warning went out
+KEY_REMOVED_KEY = "t212_key_removed"    # kv: «ключ убран» was said; cleared when a key is there again
+KEY_REMOVED = ("Ключ Trading 212 убран — слежение за счётом остановлено. "
+               "Позиции из Trading 212 остаются в /portfolio по последним данным.")
 SILENT_AFTER = dt.timedelta(hours=24)   # no sync has got through for this long: say so, once a day
 STALE_DAYS = positions.T212_STALE_DAYS  # an account snapshot or a day price older than this is not current
 _KV_FOREVER = 100 * 365 * 86400         # these two never go stale
@@ -710,6 +713,7 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
     missing = [pos for pos in tracked if pos.id not in listed]
     sold_texts = _close_missing(conn, missing, holdings, summary, unkeyed, day, result)
 
+    _key_is_there(conn, commit=False)
     db.save_cached_value(conn, SYNCED_AT_KEY, now.timestamp(), commit=False)
     if silent:          # nothing is said, and the one-time first message is left for a sync that can
         return []
@@ -742,14 +746,46 @@ def _warn_when_silent_for_a_day(conn, reason: str, notify, now: dt.datetime) -> 
         db.save_cached_value(conn, key, 1.0)
 
 
+def _say_key_removed(conn, notify) -> None:
+    """The account was tracked (a sync has got through) and now no key is configured: the key was
+    taken away, which is the owner's doing and not an outage. They are told once -- the mark is
+    kept in kv from the moment the message went out, so one that did not go out is tried again --
+    and then nothing more is said, no daily warning either, until a key is there again."""
+    if last_sync(conn) is None or db.get_cached_value(conn, KEY_REMOVED_KEY, _KV_FOREVER) is not None:
+        return
+    try:
+        sent = (notify or telegram_notify.send_text)(KEY_REMOVED)
+    except Exception as e:
+        print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
+        return
+    if sent:
+        db.save_cached_value(conn, KEY_REMOVED_KEY, 1.0)
+
+
+def _key_is_there(conn, *, commit: bool) -> None:
+    """A key is configured again (the call got as far as Trading 212, whatever it answered): the
+    «ключ убран» mark is cleared, so that a later removal is said again. With no mark nothing is
+    written: a sync that fails every 15 minutes takes no write lock for it."""
+    if db.get_cached_value(conn, KEY_REMOVED_KEY, _KV_FOREVER) is None:
+        return
+    conn.execute("DELETE FROM kv_cache WHERE key = ?", (KEY_REMOVED_KEY,))
+    if commit:
+        conn.commit()
+
+
 def _failed(conn, result: SyncResult, reason: str, kind: str, notify, silent: bool) -> SyncResult:
-    """A sync that changed nothing: the result carries why, the log says it (a missing key once
-    per process), and after a day without a sync that got through the owner is told."""
+    """A sync that changed nothing: the result carries why and the log says it (a missing key once
+    per process). A key that is gone after the account was tracked is said once (_say_key_removed)
+    and is not an outage. Any other failure is one: after a day without a sync that got through
+    the owner is told, once a day."""
     result.error, result.error_kind = reason, kind
     if kind == "no_key":
         _say_no_key()
-    else:
-        print(f"[t212] sync failed: {reason}", file=sys.stderr)
+        if not silent:
+            _say_key_removed(conn, notify)
+        return result
+    _key_is_there(conn, commit=True)
+    print(f"[t212] sync failed: {reason}", file=sys.stderr)
     if not silent:
         _warn_when_silent_for_a_day(conn, reason, notify, result.at)
     return result
@@ -781,7 +817,9 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     ValueError for an answer of the wrong shape -- changes nothing: the result carries the
     reason. So does an empty list while the summary says money is invested. A failure is not
     announced -- until a sync has got through before and none has for a day: then the owner is
-    told once a day (_warn_when_silent_for_a_day; never by a silent sync).
+    told once a day (_warn_when_silent_for_a_day; never by a silent sync). A key that is gone
+    after the account was tracked is not such a failure: it is said once (_say_key_removed), and
+    the sync then stays quiet until a key is configured again.
 
     A holding that is not on the list is closed only when the list can be believed
     (_close_missing): result.held and result.note say what was not closed and why."""

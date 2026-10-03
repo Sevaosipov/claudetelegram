@@ -1146,7 +1146,7 @@ def test_a_sync_that_gets_through_again_ends_the_warning(conn, run):
 @pytest.mark.parametrize("fetch, reason", [
     (_down("ключ Trading 212 не подходит", "unauthorized"), "ключ Trading 212 не подходит"),
     (_down(ta.NO_RIGHTS, "forbidden"), ta.NO_RIGHTS),
-    (_down(ta.NO_KEY, "no_key"), ta.NO_KEY),                        # the key was there, and is gone
+    (_down("ReadTimeout", "network"), "ReadTimeout"),
     (_bad_payload, "ответ не разобран"),
     (_empty_but_invested, "пустой список позиций при вложенных средствах")])
 def test_the_warning_gives_the_reason_whatever_kind_of_failure_it_is(conn, run, fetch, reason):
@@ -1174,6 +1174,103 @@ def test_a_warning_that_did_not_go_out_is_tried_again_at_the_next_sync(conn, run
     run(fetch=_down(), now=_hours(26), notify=broken)
     run(fetch=_down(), now=_hours(27))
     assert run.sent == [_silent_for_a_day()]
+
+
+# ---------------------------------------------- K2: a key removed on purpose is not an outage
+KEY_REMOVED = ("Ключ Trading 212 убран — слежение за счётом остановлено. "
+               "Позиции из Trading 212 остаются в /portfolio по последним данным.")
+_no_key = _down("ключ Trading 212 не задан", "no_key")
+
+
+def test_a_removed_key_is_said_once_and_then_the_bot_stays_quiet(conn, run):
+    run(_holding())                                                 # tracked, with a key
+    run.sent.clear()
+    for hours in (1, 2, 25, 26, 49, 24 * 30):
+        assert run(fetch=_no_key, now=_hours(hours)).error == ta.NO_KEY
+    assert run.sent == [KEY_REMOVED]                                # once -- and no daily «не отвечает»
+    assert positions.find_open(conn, "GME") is not None             # the positions stay as they were
+
+
+def test_with_no_key_and_no_sync_ever_nothing_is_said(conn, run):
+    run(fetch=_no_key)
+    run(fetch=_no_key, now=_hours(48))
+    assert run.sent == []
+
+
+def test_a_key_that_is_configured_again_clears_the_mark(conn, run):
+    run(_holding())
+    run(fetch=_no_key, now=_hours(1))
+    assert db.get_cached_value(conn, ta.KEY_REMOVED_KEY, 10**9) is not None
+    run(_holding(), now=_hours(2))                                  # the key is back, and works
+    assert db.get_cached_value(conn, ta.KEY_REMOVED_KEY, 10**9) is None
+    run.sent.clear()
+    run(fetch=_no_key, now=_hours(3))                               # removed again: said again
+    run(fetch=_no_key, now=_hours(4))
+    assert run.sent == [KEY_REMOVED]
+
+
+def test_a_key_that_is_back_but_fails_is_an_outage_again(conn, run):
+    """A key is configured, so the account is meant to be tracked: an API error is an API error."""
+    run(_holding())
+    run(fetch=_no_key, now=_hours(1))
+    run.sent.clear()
+    run(fetch=_down(ta.BAD_KEY, "unauthorized"), now=_hours(26))    # a day since the last sync that got through
+    assert run.sent == [_silent_for_a_day(ta.BAD_KEY)]
+    assert db.get_cached_value(conn, ta.KEY_REMOVED_KEY, 10**9) is None
+    run(fetch=_no_key, now=_hours(27))                              # and removed once more
+    assert run.sent == [_silent_for_a_day(ta.BAD_KEY), KEY_REMOVED]
+
+
+def test_a_silent_sync_with_no_key_leaves_the_message_for_one_that_may_notify(conn, run):
+    run(_holding())
+    run.sent.clear()
+    run(fetch=_no_key, now=_hours(1), silent=True)                  # --sync: says nothing, marks nothing
+    assert run.sent == []
+    run(fetch=_no_key, now=_hours(2))
+    assert run.sent == [KEY_REMOVED]
+
+
+def test_the_removed_key_message_is_tried_again_when_it_did_not_go_out(conn, run):
+    def broken(text):
+        raise RuntimeError("telegram is down")
+    run(_holding())
+    run.sent.clear()
+    run(fetch=_no_key, now=_hours(1), notify=lambda text: False)
+    run(fetch=_no_key, now=_hours(2), notify=broken)
+    run(fetch=_no_key, now=_hours(3))
+    run(fetch=_no_key, now=_hours(4))
+    assert run.sent == [KEY_REMOVED]
+
+
+def test_a_failing_sync_writes_nothing_when_there_is_no_mark_to_clear(tmp_path):
+    """During an outage the sync fails every 15 minutes: it must not take the database's write lock
+    each time for a mark that is not there (the daily run may be holding it)."""
+    path = tmp_path / "shared.db"
+    mine, other = db.connect(path), db.connect(path)
+    mine.execute("PRAGMA busy_timeout = 50")
+    other.execute("BEGIN IMMEDIATE")                                # another writer holds the database
+    result = ta.sync(mine, fetch=_down("HTTP 502", "status"), notify=lambda text: True, now=NOW)
+    assert result.error == "HTTP 502"                               # no OperationalError: nothing was written
+    other.rollback()
+    mine.close()
+    other.close()
+
+
+@pytest.mark.parametrize("failure", [("ключ Trading 212 не подходит", "unauthorized"), (ta.NO_RIGHTS, "forbidden"),
+                                     ("ReadTimeout", "network"), ("HTTP 502", "status")])
+def test_an_api_error_keeps_the_daily_warning(conn, run, failure):
+    run(_holding())
+    run.sent.clear()
+    for hours in (25, 49):
+        run(fetch=_down(*failure), now=_hours(hours))
+    assert run.sent == [_silent_for_a_day(failure[0])] * 2
+
+
+def test_the_real_client_without_a_key_after_a_sync_says_the_key_was_removed(conn, run):
+    run(_holding())
+    run.sent.clear()
+    result = ta.sync(conn, notify=lambda text: run.sent.append(text) or True, now=_hours(1))   # no key in the tests
+    assert result.error == ta.NO_KEY and run.sent == [KEY_REMOVED]
 
 
 def test_the_result_says_what_kind_of_failure_it_was(conn, run):
@@ -1854,3 +1951,11 @@ def test_the_readme_says_what_happens_when_yahoo_has_nothing_for_a_us_holding():
     section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
     assert "Если Yahoo не ответил или не знает тикер, бумага остаётся под своим тикером" in section
     assert "если Yahoo не знает такого тикера или" not in section    # that no longer keys it by its ISIN
+
+
+def test_the_readme_says_a_removed_key_is_said_once():
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    assert "«Ключ Trading 212 убран — слежение за счётом остановлено." in section
+    assert "один раз" in section and "пока ключ не появится снова" in section
