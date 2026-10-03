@@ -583,6 +583,15 @@ _CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution":
                  "time": "год в позиции", "trend_down": "тренд вниз", "news": "плохие новости"}
 
 
+def _alert_name(pos) -> str:
+    """What a close alert calls its position: the ticker -- but a Trading 212 holding keyed by its
+    ISIN by its Trading 212 symbol (SAP, not DE0007164600), the name its owner knows."""
+    import positions        # light, and positions never imports this module
+    if pos.source == positions.T212_SOURCE:
+        return positions.name_of(pos.ticker, pos.source, pos.t212_ticker)
+    return pos.ticker
+
+
 def format_close_alert(alert, *, html: bool = True) -> str:
     pos = alert.position
     reason = _CLOSE_REASON.get(alert.trigger, alert.trigger)
@@ -590,7 +599,7 @@ def format_close_alert(alert, *, html: bool = True) -> str:
     if alert.last_price:
         change = (alert.last_price / pos.entry_price - 1) * 100
         price = f" · вход {pos.entry_price:,.2f} → {alert.last_price:,.2f} ({change:+.1f}%)"
-    head = f"🚪 {pos.ticker} — {reason}"
+    head = f"🚪 {_alert_name(pos)} — {reason}"
     detail = f"{alert.detail}{price} · открыта {datefmt.fmt(pos.opened_at)}"
     return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
 
@@ -613,10 +622,22 @@ def format_positions(positions: list, price_fn) -> str:
 _MAX_OTHER_STOCKS = 15
 
 
+_CURRENCY_SIGN = {"EUR": "€", "USD": "$", "GBP": "£"}
+
+
+def money(x: float, currency: str | None = "EUR") -> str:
+    """Whole units of `currency`, a space between thousands, a real minus sign: «€9 800», «$120»,
+    and «9 800 CHF» for a currency with no sign of its own. No currency told is the euro."""
+    n = round(abs(x))
+    amount = f"{n:,}".replace(",", " ")
+    minus = "−" if x < 0 and n else ""
+    sign = _CURRENCY_SIGN.get(currency or "EUR")
+    return f"{minus}{sign}{amount}" if sign else f"{minus}{amount} {currency}"
+
+
 def money_eur(x: float) -> str:
     """«€9 800»: a space between thousands, a real minus sign."""
-    n = round(abs(x))
-    return f"{'−' if x < 0 and n else ''}€{n:,}".replace(",", " ")
+    return money(x, "EUR")
 
 
 def signed_pct(x: float | None) -> str:
@@ -696,17 +717,13 @@ def quantity(x: float) -> str:
     return text.replace(",", " ").replace(".", ",")
 
 
-def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
-    """One position: how it stands now, the stop, who it watches, and whether the model holds
-    it too. `st` is positions.position_status; its to_stop is how far the price can still fall
-    before the stop, and below the stop (negative) «ниже стопа на» shows the same figure
-    without its sign."""
-    priced = st["last"] is not None
-    now = (f"сейчас {_price(st['last'])} ({signed_pct(st['result'])})" if priced
-           else "сейчас — цена недоступна")
-    lines = [f"• {crypto.symbol_of(pos.ticker)}: вход {_price(pos.entry_price)} "
-             f"({dt.date.fromisoformat(pos.opened_at):%d.%m}), {now}, {st['days']} дн."]
-    if priced:
+def _status_lines(pos, st: dict, model_holds: bool) -> list[str]:
+    """What stands under a position's own line: the stop (when there is a price), who it watches,
+    and whether the model holds it too. `st` is positions.position_status; its to_stop is how far
+    the price can still fall before the stop, and below the stop (negative) «ниже стопа на» shows
+    the same figure without its sign."""
+    lines = []
+    if st["last"] is not None:
         gap = (f"до стопа {share_pct(st['to_stop'])}" if st["to_stop"] >= 0
                else f"ниже стопа на {share_pct(-st['to_stop'])}")
         lines.append(f"   стоп {_price(st['stop_level'])} (−{st['stop_pct'] * 100:.0f}% от максимума "
@@ -715,7 +732,16 @@ def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
         lines.append(f"   слежу за продажами: {', '.join(pos.insiders)}")
     if model_holds:
         lines.append("   модель тоже держит")
-    return "\n".join(_e(line, html) for line in lines)
+    return lines
+
+
+def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
+    """One position: how it stands now, then its status lines (_status_lines)."""
+    now = (f"сейчас {_price(st['last'])} ({signed_pct(st['result'])})" if st["last"] is not None
+           else "сейчас — цена недоступна")
+    lines = [f"• {crypto.symbol_of(pos.ticker)}: вход {_price(pos.entry_price)} "
+             f"({dt.date.fromisoformat(pos.opened_at):%d.%m}), {now}, {st['days']} дн."]
+    return "\n".join(_e(line, html) for line in lines + _status_lines(pos, st, model_holds))
 
 
 def my_position_blocks(rows: list, *, html: bool = True) -> list[str]:
@@ -725,19 +751,131 @@ def my_position_blocks(rows: list, *, html: bool = True) -> list[str]:
     return [_my_block(pos, st, held, html) for pos, st, held in ordered]
 
 
-def format_my_portfolio(rows: list, *, html: bool = True) -> str:
+# ---- the Trading 212 account in /portfolio (t212_account.portfolio_view builds what is shown)
+_T212_HEADER = "💼 Trading 212"
+_OUTSIDE_T212 = "✍️ Вне Trading 212"
+
+
+def _signed_money(x: float, currency: str | None) -> str:
+    """An account's profit or loss in whole units: «+€346», «−€120»."""
+    text = money(x, currency)
+    return text if text.startswith("−") else f"+{text}"
+
+
+def _signed_cents(x: float, currency: str | None) -> str:
+    """One holding's profit or loss to the cent, the sign after the currency's: «€+8,30»,
+    «€−8,30», and «+8,30 CHF» for a currency with no sign of its own."""
+    amount = ("−" if x < 0 and round(abs(x), 2) else "+") + _price(abs(x))
+    sign = _CURRENCY_SIGN.get(currency or "EUR")
+    return f"{sign}{amount}" if sign else f"{amount} {currency}"
+
+
+def format_t212_account(total: float | None, invested: float | None, pnl: float | None,
+                        cash: float | None, currency: str | None = None) -> str:
+    """«Счёт: €X · вложено €Y · P/L ±€Z (±W%) · свободно €C»: the account's value, what its
+    holdings cost, what they have made or lost (and as a share of that cost), the free cash. A
+    figure that isn't known is left out; "" when none is."""
+    parts = []
+    if total is not None:
+        parts.append(f"Счёт: {money(total, currency)}")
+    if invested is not None:
+        parts.append(f"вложено {money(invested, currency)}")
+    if pnl is not None:
+        share = f" ({signed_pct(pnl / invested)})" if invested else ""
+        parts.append(f"P/L {_signed_money(pnl, currency)}{share}")
+    if cash is not None:
+        parts.append(f"свободно {money(cash, currency)}")
+    return " · ".join(parts)
+
+
+def _summary_line(summary) -> str:
+    """format_t212_account of a t212_account.T212Summary; the profit or loss is the holdings'
+    value less their cost when the account didn't tell it."""
+    pnl = summary.unrealized_pnl
+    if pnl is None and summary.invested_value is not None and summary.invested_cost is not None:
+        pnl = summary.invested_value - summary.invested_cost
+    return format_t212_account(summary.total_value, summary.invested_cost, pnl, summary.cash_free,
+                               summary.currency)
+
+
+def _t212_result(h) -> float | None:
+    """A holding's result: the price now against the average price paid."""
+    return h.price / h.avg_price - 1 if h.price is not None and h.avg_price else None
+
+
+def _t212_block(h, html: bool) -> str:
+    """One Trading 212 holding (t212_account.Holding): «• GME — 10 шт., средняя 23,10, сейчас
+    24,05 USD (+4,1%), €+8,30», then -- for one the bot tracks -- the status lines of a /bought
+    position. What isn't known is left out."""
+    parts = []
+    if h.quantity is not None:
+        parts.append(f"{quantity(h.quantity)} шт.")
+    if h.avg_price is not None:
+        parts.append(f"средняя {_price(h.avg_price)}")
+    if h.price is None:
+        parts.append("сейчас — цена недоступна")
+    else:
+        result = _t212_result(h)
+        parts.append(f"сейчас {_price(h.price)}" + (f" {h.currency}" if h.currency else "")
+                     + (f" ({signed_pct(result)})" if result is not None else ""))
+    if h.pnl is not None:
+        parts.append(_signed_cents(h.pnl, h.pnl_currency))
+    lines = [f"• {h.name} — " + ", ".join(parts)]
+    if h.position is not None and h.status is not None:
+        lines += _status_lines(h.position, h.status, h.model_holds)
+    elif h.model_holds:
+        lines.append("   модель тоже держит")
+    return "\n".join(_e(line, html) for line in lines)
+
+
+def t212_blocks(holdings: list, *, html: bool = True) -> list[str]:
+    """The Trading 212 holdings, oldest first, one block each."""
+    return [_t212_block(h, html) for h in sorted(holdings, key=lambda h: (h.opened, h.name))]
+
+
+def _t212_head(view) -> list[str]:
+    """What stands under «💼 Trading 212»: the account line of a live answer; or why there is no
+    live answer -- with the time the stored holdings shown are from, and the hint when what is
+    missing is a key."""
+    if view.error is None:
+        line = _summary_line(view.summary) if view.summary is not None else ""
+        return [line] if line else []
+    if view.hint:
+        line = f"⚠️ {view.error[:1].upper()}{view.error[1:]}"
+    else:
+        line = f"⚠️ Trading 212 не ответил ({view.error})"
+    if view.holdings and view.as_of:
+        line += f" — данные на {view.as_of} последней синхронизации"
+    return [line] + ([view.hint] if view.hint else [])
+
+
+def format_my_portfolio(rows: list, *, html: bool = True, t212=None) -> str:
     """/portfolio: the positions the user recorded with /bought, with how each stands now (a
     block per position, a blank line between), their average result and the hint that a
-    signal to sell comes by itself. `rows` as in my_position_blocks."""
-    if not rows:
-        return _NO_POSITIONS
-    n = len(rows)
-    header = _b(f"💼 Ваш портфель — {n} {_plural(n, 'позиция', 'позиции', 'позиций')}", html)
-    footer = []
+    signal to sell comes by itself. `rows` as in my_position_blocks.
+
+    With `t212` (t212_account.PortfolioView) the message opens with «💼 Trading 212» -- the
+    account line and a block per holding, or why Trading 212 gave no answer -- and `rows`, the
+    positions that are not in the account, follow under «✍️ Вне Trading 212». The average is
+    then over both."""
     results = [st["result"] for _pos, st, _held in rows if st["result"] is not None]
+    if t212 is None:
+        if not rows:
+            return _NO_POSITIONS
+        n = len(rows)
+        parts = [_b(f"💼 Ваш портфель — {n} {_plural(n, 'позиция', 'позиции', 'позиций')}", html)]
+    else:
+        parts = ["\n".join([_b(_T212_HEADER, html)] + [_e(line, html) for line in _t212_head(t212)])]
+        parts += t212_blocks(t212.holdings, html=html)
+        results += [r for r in map(_t212_result, t212.holdings) if r is not None]
+        if not rows and not t212.holdings:
+            return "\n\n".join(parts + [_NO_POSITIONS])
+        if rows:
+            parts.append(_b(_OUTSIDE_T212, html))
+    footer = []
     if results:
         k = len(results)
         footer.append(f"Средний результат: {signed_pct(sum(results) / k)} по {k} "
                       f"{_plural(k, 'позиции', 'позициям', 'позициям')}")
     footer.append(_SELL_HINT)
-    return "\n\n".join([header, *my_position_blocks(rows, html=html), "\n".join(footer)])
+    return "\n\n".join(parts + my_position_blocks(rows, html=html) + ["\n".join(footer)])

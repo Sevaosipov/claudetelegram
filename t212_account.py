@@ -18,6 +18,10 @@ that is gone is closed and announced, and each sync stores the day's price of ev
 (t212_prices) and the day's account snapshot (t212_equity). It runs every 15 minutes in
 telegram_bot.py and once in the daily run (bot.py). All of a sync's changes are committed
 together, and only after both reads succeeded: an API error changes nothing.
+
+portfolio_view() is what /portfolio shows of the account: one live call (it stores the day's
+prices and snapshot like a sync, but opens and closes nothing), or -- when the call fails --
+the holdings as the last sync left them (stored_holdings), with the reason.
 """
 from __future__ import annotations
 
@@ -460,3 +464,118 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
         except Exception as e:
             print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
     return result
+
+
+# ------------------------------------------------------------------ what /portfolio shows
+@dataclass
+class Holding:
+    """One line of «💼 Trading 212» (telegram_notify.t212_blocks): a holding by the name the user
+    knows it by, its shares, average price and price now (in the instrument's `currency`) and the
+    money it has made or lost (`pnl`, in `pnl_currency`). One the bot tracks comes with its
+    position and positions.position_status at that price; `opened` (an ISO date) orders them."""
+    name: str
+    quantity: float | None
+    avg_price: float | None
+    price: float | None
+    currency: str | None
+    pnl: float | None = None
+    pnl_currency: str | None = None
+    position: positions.Position | None = None
+    status: dict | None = None
+    model_holds: bool = False
+    opened: str = ""
+
+
+@dataclass
+class PortfolioView:
+    """The account for /portfolio: the holdings and the live `summary`; or, when the live call
+    failed, the stored holdings with why (`error`), the hint when the cure is a key (`hint`) and
+    the time of the last sync the stored data are from (`as_of`: «14:05», or «30.09 14:05» on
+    another day)."""
+    holdings: list[Holding]
+    summary: T212Summary | None = None
+    error: str | None = None
+    hint: str | None = None
+    as_of: str | None = None
+
+
+def _status(conn, pos: positions.Position, today: dt.date, price: float | None) -> dict:
+    """positions.position_status at Trading 212's own price (the history is the exits')."""
+    return positions.position_status(pos, today, price_fn=lambda ticker, source=None: price, conn=conn)
+
+
+def _model_holds(conn, ticker: str, source: str | None, held: set) -> bool:
+    """MODEL-S or MODEL-C holds the same name: the same key, or -- for a holding keyed by the ISIN
+    of an Oslo listing -- that listing, which is how the model holds a Norwegian company."""
+    if positions._asset_key(ticker, source) in held:
+        return True
+    oslo = positions.oslo_ticker(conn, ticker) if source == positions.T212_SOURCE else None
+    return bool(oslo) and positions._asset_key(oslo, "NORWAY") in held
+
+
+def stored_holdings(conn, today: dt.date) -> list[Holding]:
+    """The holdings as the last sync left them, without a call to Trading 212: quantity and
+    average from the positions, the price from the last stored day price, the profit or loss in
+    the instrument's own currency (the account's is only known live)."""
+    held = positions._model_names(conn)
+    rows = []
+    for pos in positions.open_positions(conn):
+        if pos.origin != positions.T212:
+            continue
+        bars = positions.t212_closes(conn, pos.ticker)
+        price = bars[-1][1] if bars else None
+        known = price is not None and pos.quantity is not None and pos.currency
+        rows.append(Holding(
+            name=positions.display_name(pos), quantity=pos.quantity, avg_price=pos.entry_price,
+            price=price, currency=pos.currency,
+            pnl=(price - pos.entry_price) * pos.quantity if known else None,
+            pnl_currency=pos.currency if known else None, position=pos,
+            status=_status(conn, pos, today, price),
+            model_holds=_model_holds(conn, pos.ticker, pos.source, held), opened=pos.opened_at))
+    return rows
+
+
+def _stored_view(conn, today: dt.date, now: dt.datetime, error: str, hint: str | None) -> PortfolioView:
+    at = last_sync(conn)
+    as_of = None if at is None else f"{at:%H:%M}" if at.date() == now.date() else f"{at:%d.%m %H:%M}"
+    return PortfolioView(stored_holdings(conn, today), error=error, hint=hint, as_of=as_of)
+
+
+def _untracked_name(h: T212Position) -> str:
+    """A holding with neither a US ticker nor an ISIN, by whatever does name it."""
+    return positions.name_of(h.t212_ticker or "", positions.T212_SOURCE, h.t212_ticker) or h.name or "?"
+
+
+def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None = None) -> PortfolioView:
+    """«💼 Trading 212» of /portfolio: one live call for the positions and the summary (`fetch`,
+    fetch_account by default). Its prices and account snapshot are stored like a sync's, but it is
+    not a sync: a holding bought since the last one is shown without the bot's status lines, and
+    nothing is opened or closed. When the call fails the view is the stored holdings, with the
+    reason and their time."""
+    now = now or dt.datetime.now()
+    try:
+        holdings, summary = (fetch or fetch_account)()
+    except T212Error as e:
+        return _stored_view(conn, today, now, str(e), KEY_HINT if e.needs_key else None)
+    except ValueError:              # its text is not shown: only what this module wrote is safe
+        return _stored_view(conn, today, now, BAD_ANSWER, None)
+    try:
+        _store_snapshot(conn, _keyed(holdings)[0], summary, now.date().isoformat())
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    tracked = {p.ticker: p for p in positions.open_positions(conn) if p.origin == positions.T212}
+    held = positions._model_names(conn)
+    rows = []
+    for h in holdings:
+        key = position_key(h.t212_ticker, h.isin)
+        pos = tracked.get(key[0]) if key else None
+        rows.append(Holding(
+            name=positions.name_of(key[0], key[1], h.t212_ticker) if key else _untracked_name(h),
+            quantity=h.quantity, avg_price=h.avg_price, price=h.current_price, currency=h.currency,
+            pnl=h.pnl_eur, pnl_currency=h.account_currency or (summary.currency if summary else None),
+            position=pos, status=_status(conn, pos, today, h.current_price) if pos else None,
+            model_holds=bool(key) and _model_holds(conn, key[0], key[1], held),
+            opened=pos.opened_at if pos else (h.created_at or "")[:10]))
+    return PortfolioView(rows, summary=summary)

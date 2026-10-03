@@ -558,3 +558,138 @@ def test_a_sync_opens_no_position_twice_and_reopens_one_bought_back(conn, run):
     assert result.opened == ["GME"] and len(run.sent) == 1 and run.sent[0].startswith("📥 Вижу")
     rows = conn.execute("SELECT closed_at FROM positions WHERE ticker = 'GME' ORDER BY id").fetchall()
     assert rows == [(NOW.date().isoformat(),), (None,)]
+
+
+# ------------------------------------------------------------------ /portfolio's live view
+TODAY = NOW.date()
+
+
+@pytest.fixture
+def no_yahoo(monkeypatch):
+    """A US holding's stop line reads Yahoo's closes: none here, and no Yahoo price is asked for
+    (Trading 212's own price is what /portfolio shows)."""
+    import paper
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+
+    def refuse(symbol):
+        raise AssertionError("the price of a Trading 212 holding is Trading 212's")
+    monkeypatch.setattr(positions, "_yahoo_close", refuse)
+
+
+def _view(conn, *holdings, summary=SUMMARY, fetch=None, now=NOW):
+    return ta.portfolio_view(conn, now.date(), fetch=fetch or (lambda: (list(holdings), summary)), now=now)
+
+
+def _fails(error):
+    def fetch():
+        raise error
+    return fetch
+
+
+def test_the_live_view_is_what_the_account_holds_now_with_each_tracked_holdings_status(conn, run, no_yahoo):
+    _synced_before(conn)
+    _journal(conn, "GME", ["Ryan Cohen"])
+    run(_holding(price=24.05))
+    view = _view(conn, _holding(qty=12.0, avg=23.50, price=25.00, pnl=15.5))
+    assert (view.error, view.hint, view.as_of, view.summary) == (None, None, None, SUMMARY)
+    [h] = view.holdings
+    assert (h.name, h.quantity, h.avg_price, h.price, h.currency, h.pnl, h.pnl_currency, h.opened) == \
+        ("GME", 12.0, 23.50, 25.00, "USD", 15.5, "EUR", "2026-09-28")     # the account's own figures, now
+    assert h.position.ticker == "GME" and h.position.insiders == ["Ryan Cohen"]
+    assert h.status["last"] == 25.00 and h.status["stop_pct"] == 0.10     # the stop the sync fixed
+    assert h.model_holds is False
+
+
+def test_the_live_view_stores_the_days_prices_and_account_but_is_not_a_sync(conn, run, no_yahoo):
+    _synced_before(conn)
+    run(_holding(price=24.05), now=NOW.replace(hour=9))
+    synced = ta.last_sync(conn)
+    view = _view(conn, _holding(price=25.00), _holding(**SAP),
+                 summary=dataclasses.replace(SUMMARY, total_value=13000.0))
+    assert conn.execute("SELECT ticker, price FROM t212_prices ORDER BY ticker").fetchall() == \
+        [("DE0007164600", 125.0), ("GME", 25.0)]
+    assert conn.execute("SELECT total_value FROM t212_equity").fetchall() == [(13000.0,)]
+    # SAP was bought since the last sync: it is shown, but opening it is the sync's job
+    assert [p.ticker for p in positions.open_positions(conn)] == ["GME"] and ta.last_sync(conn) == synced
+    sap = next(h for h in view.holdings if h.name == "SAP")
+    assert (sap.position, sap.status, sap.quantity, sap.price, sap.currency) == (None, None, 10.0, 125.0, "EUR")
+
+
+def test_the_live_view_does_not_show_a_holding_that_was_sold_since_the_sync(conn, run, no_yahoo):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    view = _view(conn, _holding(**SAP))
+    assert [h.name for h in view.holdings] == ["SAP"]
+    assert positions.find_open(conn, "GME") is not None            # closing it is the sync's job
+
+
+def test_when_the_call_fails_the_view_is_the_stored_holdings_with_the_reason_and_their_time(conn, run, no_yahoo):
+    _synced_before(conn)
+    run(_holding(qty=10.0, avg=23.10, price=24.05), _holding(**SAP))
+    view = _view(conn, fetch=_fails(ta.T212Error("HTTP 502", "status")), now=NOW.replace(hour=15, minute=30))
+    assert (view.error, view.hint, view.as_of, view.summary) == ("HTTP 502", None, "14:05", None)
+    by = {h.name: h for h in view.holdings}
+    gme = by["GME"]
+    assert (gme.quantity, gme.avg_price, gme.price, gme.currency) == (10.0, 23.10, 24.05, "USD")
+    assert gme.pnl == pytest.approx(9.5) and gme.pnl_currency == "USD"      # 10 x (24,05 - 23,10), in its own currency
+    assert gme.status["last"] == 24.05 and gme.position.origin == "t212"
+    assert (by["SAP"].price, by["SAP"].pnl, by["SAP"].pnl_currency) == (125.0, pytest.approx(50.0), "EUR")
+    assert conn.execute("SELECT COUNT(*) FROM t212_equity").fetchone() == (1,)     # nothing new stored
+
+
+def test_the_stored_datas_time_names_the_day_when_it_is_not_today(conn, run, no_yahoo):
+    run(_holding())
+    view = _view(conn, fetch=_fails(ta.T212Error("ReadTimeout", "network")), now=NOW + dt.timedelta(days=1))
+    assert view.as_of == "01.10 14:05"
+    assert _view(sqlite_empty := db.connect(":memory:"), fetch=_fails(ta.T212Error("x", "network"))).as_of is None
+    sqlite_empty.close()
+
+
+@pytest.mark.parametrize("error, reason, hint", [
+    (ta.T212Error(ta.NO_RIGHTS, "forbidden"), ta.NO_RIGHTS, ta.KEY_HINT),
+    (ta.T212Error(ta.NO_KEY, "no_key"), ta.NO_KEY, ta.KEY_HINT),
+    (ta.T212Error(ta.BAD_KEY, "unauthorized"), ta.BAD_KEY, None),
+    (ValueError("unexpected positions payload: dict with secrets"), "ответ не разобран", None)])
+def test_a_key_problem_carries_the_hint_and_a_bad_answer_a_fixed_reason(conn, error, reason, hint):
+    view = _view(conn, fetch=_fails(error))
+    assert (view.error, view.hint, view.holdings) == (reason, hint, [])
+
+
+def test_with_no_key_the_view_asks_nothing_and_says_so(conn):
+    view = ta.portfolio_view(conn, TODAY, now=NOW)                  # the real client: no key in the tests
+    assert (view.error, view.hint) == (ta.NO_KEY, ta.KEY_HINT)
+
+
+def _model_holds(conn, ticker, source="SEC"):
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', ?, ?, ?, 'USD', '2026-09-25', 1000, 998, 40, 1.16)",
+        (ticker, source, ticker))
+    conn.commit()
+
+
+def test_the_view_says_when_the_model_holds_the_same_name(conn, run, no_yahoo):
+    _synced_before(conn)
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    _model_holds(conn, "GME")
+    _model_holds(conn, "EQNR", source="NORWAY")                     # the model holds Equinor in Oslo
+    held = [_holding(), _holding(**SAP), _holding("EQNRd_EQ", "NO0010096985", currency="EUR")]
+    run(*held)
+    assert {h.name: h.model_holds for h in _view(conn, *held).holdings} == \
+        {"GME": True, "SAP": False, "EQNR": True}
+    stored = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status")))
+    assert {h.name: h.model_holds for h in stored.holdings} == {"GME": True, "SAP": False, "EQNR": True}
+
+
+def test_the_view_shows_a_holding_it_cannot_key_by_whatever_names_it(conn, no_yahoo):
+    odd = ta.T212Position("ODDd_EQ", "Odd Plc", None, "GBX", 3.0, 100.0, 110.0, None, None, None, 1.0, "EUR")
+    nameless = ta.T212Position(None, None, None, None, 1.0, 5.0, 6.0, None, None, None, None, None)
+    view = _view(conn, odd, nameless)
+    assert [h.name for h in view.holdings] == ["ODD", "?"] and all(h.position is None for h in view.holdings)
+
+
+def test_the_live_view_only_gets(conn, keyed, no_yahoo):
+    session = _account()
+    view = ta.portfolio_view(conn, TODAY, fetch=lambda: ta.fetch_account(session), now=NOW)
+    assert view.error is None and session.calls == [("get", ta.POSITIONS_URL), ("get", ta.SUMMARY_URL)]
