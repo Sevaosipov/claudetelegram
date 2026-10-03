@@ -445,3 +445,5 @@ Ten small fixes, F1-F10. They narrow K2 (F1), I1 (F3, F5, F6), I3 (F8, F9), §6 
 they differ from the text above, they win. `trading212._setting` is unchanged.
 
 - **F1.** «Ключ убран» no longer repeats daily in the two-process setup: `_say_key_removed` is quiet while any sync got through in the last hour (some process still holds a key), and the mark is cleared only by a sync of a process that was itself keyless before; README: restart the Telegram agent after changing the key.
+- **F2.** `/portfolio`'s live call stores a day price only under a position's own ticker and skips an untracked holding whose key is an open position's ticker (one ISIN held on two exchanges), in either order of the list; a ticker gets one price, the first listing's.
+- **F3.** The empty-list guard of I1 refuses only when `invested_value` is above `LIST_TOLERANCE_MONEY` (€5): a float residue after selling everything is an empty account and no longer blocks the close for ever.

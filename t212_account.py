@@ -832,7 +832,8 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
 
     With no key it is a quiet no-op, said once per process. A failed fetch -- T212Error, or a
     ValueError for an answer of the wrong shape -- changes nothing: the result carries the
-    reason. So does an empty list while the summary says money is invested. A failure is not
+    reason. So does an empty list while the summary says more than LIST_TOLERANCE_MONEY is
+    invested (less is the residue of an empty account). A failure is not
     announced -- until a sync has got through before and none has for a day: then the owner is
     told once a day (_warn_when_silent_for_a_day; never by a silent sync). A key that is gone
     after the account was tracked is not such a failure: it is said once (_say_key_removed), and
@@ -848,9 +849,10 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
         return _failed(conn, result, str(e), e.kind, notify, silent)
     except ValueError:              # its text is not printed: only what this module wrote is safe
         return _failed(conn, result, BAD_ANSWER, "answer", notify, silent)
-    if not holdings and (_invested(summary) or 0) > 0:
+    if not holdings and (_invested(summary) or 0) > LIST_TOLERANCE_MONEY:
         # Money is invested and no position is listed: the list is wrong, not the account empty.
-        # Believing it would call every holding sold.
+        # Believing it would call every holding sold. A residue within the money tolerance (a float
+        # left over after the last sale) is an empty account: it must not keep the close away.
         return _failed(conn, result, EMPTY_LIST, "answer", notify, silent)
     try:
         messages = _apply(conn, holdings, summary, now, closes_fn, result, silent)
@@ -1010,7 +1012,8 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
         return _stored_view(conn, today, now, str(e), KEY_HINT if e.needs_key else None)
     except ValueError:              # its text is not shown: only what this module wrote is safe
         return _stored_view(conn, today, now, BAD_ANSWER, None)
-    tracked = [p for p in positions.open_positions(conn) if p.origin == positions.T212]
+    open_now = positions.open_positions(conn)
+    tracked = [p for p in open_now if p.origin == positions.T212]
     by_id = {p.t212_ticker: p for p in tracked if p.t212_ticker}
     by_key = {p.ticker: p for p in tracked if not p.t212_ticker}
     found = []                      # (holding, its key by the instrument, its position or None)
@@ -1021,9 +1024,22 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
             pos = by_key.get(key[0])
         found.append((h, key, pos))
     # The day's price goes under the position's own ticker; a holding not tracked yet has one only
-    # when its key is certain (its ISIN): a US one is keyed by the sync, after it asked Yahoo.
-    priced = [(pos.ticker if pos else key[0], h) for h, key, pos in found
-              if pos is not None or (key is not None and key[1] == positions.T212_SOURCE)]
+    # when its key is certain (its ISIN): a US one is keyed by the sync, after it asked Yahoo. A
+    # ticker gets one price, the first listing's -- the sync's own rule for one ISIN held on two
+    # exchanges -- and an untracked holding whose key is an open position's ticker is another
+    # listing of that position: its price, in another currency, must not replace the tracked one's.
+    owned = {p.ticker for p in open_now}
+    priced, stored = [], set()
+    for h, key, pos in found:
+        if pos is not None:
+            ticker = pos.ticker
+        elif key is not None and key[1] == positions.T212_SOURCE and key[0] not in owned:
+            ticker = key[0]
+        else:
+            continue
+        if ticker not in stored:
+            priced.append((ticker, h))
+            stored.add(ticker)
     try:
         _store_snapshot(conn, priced, summary, now.date().isoformat())
         conn.commit()

@@ -756,6 +756,23 @@ def test_a_genuinely_empty_account_closes_what_was_held(conn, run):
                                 "📤 SAP больше нет в Trading 212 — слежение закрыто."]
 
 
+@pytest.mark.parametrize("invested, closes", [(0.0, True), (0.004, True), (5.0, True), (5.01, False), (200.0, False)])
+def test_a_float_residue_after_selling_everything_does_not_block_the_close(conn, run, invested, closes):
+    """F3: the empty-list guard refuses only when more than LIST_TOLERANCE_MONEY is invested. A residue
+    of a cent or two in the summary after the last sale is an empty account, not a bad answer: it must
+    not keep the sold positions open for ever."""
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    result = run(summary=_invested(invested), now=NOW + dt.timedelta(hours=1))
+    if closes:
+        assert sorted(result.closed) == ["DE0007164600", "GME"] and result.error is None
+        assert positions.open_positions(conn) == [] and len(run.sent) == 2
+    else:
+        assert result.error == ta.EMPTY_LIST and result.closed == [] and run.sent == []
+        assert len(positions.open_positions(conn)) == 2
+
+
 def test_a_partial_list_closes_nothing_but_still_opens_and_updates(conn, run, capsys):
     """The summary says €300 is invested and the list adds up to €200: GME is not on it, but that
     is the list's fault. What it does show is applied."""
@@ -1780,6 +1797,44 @@ def test_the_live_view_stores_the_days_prices_and_account_but_is_not_a_sync(conn
     assert (sap.position, sap.status, sap.quantity, sap.price, sap.currency) == (None, None, 10.0, 125.0, "EUR")
 
 
+ISIN_ON_TWO_EXCHANGES = "IE00B3XXRP09"
+
+
+@pytest.mark.parametrize("tracked_first", [True, False])
+def test_the_live_view_does_not_overwrite_a_tracked_holdings_day_price_with_another_listings(
+        conn, run, no_yahoo, tracked_first):
+    """F2: one ISIN held on two exchanges is one position, priced by the listing the sync tracks (the
+    first one listed then). The live call stores that listing's price under it, in either order of the
+    list -- not the other exchange's, which is another currency."""
+    _synced_before(conn)
+    london = _holding("VUSAl_EQ", "IE00B3XXRP09", currency="GBP", price=80.0)
+    xetra = _holding("VUSAd_EQ", "IE00B3XXRP09", currency="EUR", price=95.0)
+    run(london, xetra)                                              # tracked: London, listed first
+    assert [p.t212_ticker for p in positions.open_positions(conn)] == ["VUSAl_EQ"]
+    now_london, now_xetra = (dataclasses.replace(london, current_price=81.0),
+                             dataclasses.replace(xetra, current_price=96.0))
+    _view(conn, *((now_london, now_xetra) if tracked_first else (now_xetra, now_london)))
+    assert conn.execute("SELECT ticker, price FROM t212_prices").fetchall() == [(ISIN_ON_TWO_EXCHANGES, 81.0)]
+
+
+def test_the_live_view_stores_one_price_for_two_listings_of_an_isin_the_sync_does_not_track_yet(conn, no_yahoo):
+    """Nothing tracks this ISIN yet: the first listing on the list is the one the sync will track, and its
+    is the price stored -- the second listing's does not replace it."""
+    london = _holding("VUSAl_EQ", "IE00B3XXRP09", currency="GBP", price=80.0)
+    xetra = _holding("VUSAd_EQ", "IE00B3XXRP09", currency="EUR", price=95.0)
+    _view(conn, london, xetra)
+    assert conn.execute("SELECT price FROM t212_prices").fetchall() == [(80.0,)]
+
+
+def test_the_live_view_does_not_store_a_price_under_a_position_that_is_not_that_holdings(conn, no_yahoo):
+    """A /bought position keyed by this ISIN is somebody's already: an untracked holding of the same key
+    does not write under it (the sync takes it over and stores its price then)."""
+    positions.open_position(conn, "IE00B3XXRP09", 70.0, today=dt.date(2026, 9, 1), source="BAFIN",
+                            closes_fn=lambda t, s=None: [])
+    _view(conn, _holding("VUSAd_EQ", "IE00B3XXRP09", currency="EUR", price=95.0))
+    assert conn.execute("SELECT COUNT(*) FROM t212_prices").fetchone() == (0,)
+
+
 def test_the_live_view_does_not_show_a_holding_that_was_sold_since_the_sync(conn, run, no_yahoo):
     _synced_before(conn)
     run(_holding(), _holding(**SAP))
@@ -2056,3 +2111,11 @@ def test_the_readme_says_to_restart_the_telegram_agent_after_the_key_changes():
     start = readme.index("### Trading 212\n")
     section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
     assert "перезапустите Telegram-бота" in section and "за последний час" in section
+
+
+def test_the_readme_says_an_empty_list_is_a_bad_answer_only_above_five_euros():
+    """F3."""
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    assert "Пустой список, когда во вложениях больше €5, — плохой ответ" in section
