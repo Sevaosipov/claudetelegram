@@ -86,6 +86,7 @@ KEY_REMOVED_KEY = "t212_key_removed"    # kv: «ключ убран» was said; 
 KEY_REMOVED = ("Ключ Trading 212 убран — слежение за счётом остановлено. "
                "Позиции из Trading 212 остаются в /portfolio по последним данным.")
 SILENT_AFTER = dt.timedelta(hours=24)   # no sync has got through for this long: say so, once a day
+KEY_HELD_FOR = dt.timedelta(hours=1)    # a sync that got through this recently: some process still holds a key
 STALE_DAYS = positions.T212_STALE_DAYS  # an account snapshot or a day price older than this is not current
 _KV_FOREVER = 100 * 365 * 86400         # these two never go stale
 
@@ -293,6 +294,7 @@ def _yahoo_is_its_own(closes, price: float | None, day: str) -> bool:
 
 # ------------------------------------------------------------------ the sync
 _no_key_logged = False                  # the missing key is said once per process
+_was_keyless = False                    # this process has itself found no key (see _key_is_there)
 
 
 @dataclass
@@ -746,12 +748,20 @@ def _warn_when_silent_for_a_day(conn, reason: str, notify, now: dt.datetime) -> 
         db.save_cached_value(conn, key, 1.0)
 
 
-def _say_key_removed(conn, notify) -> None:
+def _say_key_removed(conn, notify, now: dt.datetime) -> None:
     """The account was tracked (a sync has got through) and now no key is configured: the key was
     taken away, which is the owner's doing and not an outage. They are told once -- the mark is
     kept in kv from the moment the message went out, so one that did not go out is tried again --
-    and then nothing more is said, no daily warning either, until a key is there again."""
-    if last_sync(conn) is None or db.get_cached_value(conn, KEY_REMOVED_KEY, _KV_FOREVER) is not None:
+    and then nothing more is said, no daily warning either, until a key is there again.
+
+    Not while a sync got through in the last KEY_HELD_FOR, whichever process made it: the bot is
+    two processes, and the always-on Telegram agent keeps the key it was started with in its
+    environment -- long after the key left .env, which the daily run reads afresh. A recent
+    success means some process still holds a key: it is not removed (and nothing is marked)."""
+    last = last_sync(conn)
+    if last is None or now - last < KEY_HELD_FOR:
+        return
+    if db.get_cached_value(conn, KEY_REMOVED_KEY, _KV_FOREVER) is not None:
         return
     try:
         sent = (notify or telegram_notify.send_text)(KEY_REMOVED)
@@ -764,8 +774,14 @@ def _say_key_removed(conn, notify) -> None:
 
 def _key_is_there(conn, *, commit: bool) -> None:
     """A key is configured again (the call got as far as Trading 212, whatever it answered): the
-    «ключ убран» mark is cleared, so that a later removal is said again. With no mark nothing is
-    written: a sync that fails every 15 minutes takes no write lock for it."""
+    «ключ убран» mark is cleared, so that a later removal is said again -- but only by a process
+    that was itself keyless before (_was_keyless: one of its own syncs found no key). One that has
+    always had its key (the Telegram agent, started with it) says nothing about a key taken out of
+    .env: were its syncs to clear the mark, the daily run, which has none, would say it again every
+    day. With no mark nothing is written: a sync that fails every 15 minutes takes no write lock
+    for it."""
+    if not _was_keyless:
+        return
     if db.get_cached_value(conn, KEY_REMOVED_KEY, _KV_FOREVER) is None:
         return
     conn.execute("DELETE FROM kv_cache WHERE key = ?", (KEY_REMOVED_KEY,))
@@ -782,7 +798,7 @@ def _failed(conn, result: SyncResult, reason: str, kind: str, notify, silent: bo
     if kind == "no_key":
         _say_no_key()
         if not silent:
-            _say_key_removed(conn, notify)
+            _say_key_removed(conn, notify, result.at)
         return result
     _key_is_there(conn, commit=True)
     print(f"[t212] sync failed: {reason}", file=sys.stderr)
@@ -792,7 +808,8 @@ def _failed(conn, result: SyncResult, reason: str, kind: str, notify, silent: bo
 
 
 def _say_no_key() -> None:
-    global _no_key_logged
+    global _no_key_logged, _was_keyless
+    _was_keyless = True
     if not _no_key_logged:
         _no_key_logged = True
         print("[t212] Trading 212 key not set (TRADING212_API_KEY in .env): the account is not tracked")

@@ -98,6 +98,14 @@ def waits(monkeypatch):
     return seen
 
 
+@pytest.fixture(autouse=True)
+def _a_fresh_process(monkeypatch):
+    """What the module remembers about itself is per process: that it has found no key (_was_keyless)
+    and has said so (_no_key_logged). Every test starts as a new process."""
+    monkeypatch.setattr(ta, "_was_keyless", False, raising=False)
+    monkeypatch.setattr(ta, "_no_key_logged", False)
+
+
 # ------------------------------------------------------------------ no real key in the tests
 def test_the_tests_never_see_a_real_key():
     """conftest takes the key out of the environment and points trading212 away from .env."""
@@ -1185,7 +1193,7 @@ _no_key = _down("ключ Trading 212 не задан", "no_key")
 def test_a_removed_key_is_said_once_and_then_the_bot_stays_quiet(conn, run):
     run(_holding())                                                 # tracked, with a key
     run.sent.clear()
-    for hours in (1, 2, 25, 26, 49, 24 * 30):
+    for hours in (2, 3, 25, 26, 49, 24 * 30):
         assert run(fetch=_no_key, now=_hours(hours)).error == ta.NO_KEY
     assert run.sent == [KEY_REMOVED]                                # once -- and no daily «не отвечает»
     assert positions.find_open(conn, "GME") is not None             # the positions stay as they were
@@ -1198,21 +1206,23 @@ def test_with_no_key_and_no_sync_ever_nothing_is_said(conn, run):
 
 
 def test_a_key_that_is_configured_again_clears_the_mark(conn, run):
+    """This process found no key itself (a sync of its own said so), so a sync of its own that gets
+    through is the key back."""
     run(_holding())
-    run(fetch=_no_key, now=_hours(1))
+    run(fetch=_no_key, now=_hours(2))
     assert db.get_cached_value(conn, ta.KEY_REMOVED_KEY, 10**9) is not None
-    run(_holding(), now=_hours(2))                                  # the key is back, and works
+    run(_holding(), now=_hours(3))                                  # the key is back, and works
     assert db.get_cached_value(conn, ta.KEY_REMOVED_KEY, 10**9) is None
     run.sent.clear()
-    run(fetch=_no_key, now=_hours(3))                               # removed again: said again
-    run(fetch=_no_key, now=_hours(4))
+    run(fetch=_no_key, now=_hours(5))                               # removed again: said again
+    run(fetch=_no_key, now=_hours(6))
     assert run.sent == [KEY_REMOVED]
 
 
 def test_a_key_that_is_back_but_fails_is_an_outage_again(conn, run):
     """A key is configured, so the account is meant to be tracked: an API error is an API error."""
     run(_holding())
-    run(fetch=_no_key, now=_hours(1))
+    run(fetch=_no_key, now=_hours(2))
     run.sent.clear()
     run(fetch=_down(ta.BAD_KEY, "unauthorized"), now=_hours(26))    # a day since the last sync that got through
     assert run.sent == [_silent_for_a_day(ta.BAD_KEY)]
@@ -1224,9 +1234,9 @@ def test_a_key_that_is_back_but_fails_is_an_outage_again(conn, run):
 def test_a_silent_sync_with_no_key_leaves_the_message_for_one_that_may_notify(conn, run):
     run(_holding())
     run.sent.clear()
-    run(fetch=_no_key, now=_hours(1), silent=True)                  # --sync: says nothing, marks nothing
+    run(fetch=_no_key, now=_hours(2), silent=True)                  # --sync: says nothing, marks nothing
     assert run.sent == []
-    run(fetch=_no_key, now=_hours(2))
+    run(fetch=_no_key, now=_hours(3))
     assert run.sent == [KEY_REMOVED]
 
 
@@ -1235,10 +1245,10 @@ def test_the_removed_key_message_is_tried_again_when_it_did_not_go_out(conn, run
         raise RuntimeError("telegram is down")
     run(_holding())
     run.sent.clear()
-    run(fetch=_no_key, now=_hours(1), notify=lambda text: False)
-    run(fetch=_no_key, now=_hours(2), notify=broken)
-    run(fetch=_no_key, now=_hours(3))
+    run(fetch=_no_key, now=_hours(2), notify=lambda text: False)
+    run(fetch=_no_key, now=_hours(3), notify=broken)
     run(fetch=_no_key, now=_hours(4))
+    run(fetch=_no_key, now=_hours(5))
     assert run.sent == [KEY_REMOVED]
 
 
@@ -1269,7 +1279,7 @@ def test_an_api_error_keeps_the_daily_warning(conn, run, failure):
 def test_the_real_client_without_a_key_after_a_sync_says_the_key_was_removed(conn, run):
     run(_holding())
     run.sent.clear()
-    result = ta.sync(conn, notify=lambda text: run.sent.append(text) or True, now=_hours(1))   # no key in the tests
+    result = ta.sync(conn, notify=lambda text: run.sent.append(text) or True, now=_hours(2))   # no key in the tests
     assert result.error == ta.NO_KEY and run.sent == [KEY_REMOVED]
 
 
@@ -1278,6 +1288,83 @@ def test_the_result_says_what_kind_of_failure_it_was(conn, run):
     assert run(fetch=_down(ta.NO_RIGHTS, "forbidden")).error_kind == "forbidden"
     assert run(fetch=_down("ReadTimeout", "network")).error_kind == "network"
     assert run(_holding()).error_kind is None
+
+
+# ---------------------------------------------- F1: a key taken out of .env is said once, in the real two-process setup
+class _Process:
+    """One process of the real setup, with its own memory: the module remembers, per process, that it has
+    found no key (ta._was_keyless). `with process:` runs that process's syncs; a new _Process is a new
+    process (the daily run is a fresh one every day, the Telegram agent lives on)."""
+
+    def __init__(self):
+        self.memory = {"_was_keyless": False, "_no_key_logged": False}
+
+    def __enter__(self):
+        for name, value in self.memory.items():
+            setattr(ta, name, value)
+        return self
+
+    def __exit__(self, *exc):
+        for name in self.memory:
+            self.memory[name] = getattr(ta, name)
+
+
+def _mark(conn):
+    return db.get_cached_value(conn, ta.KEY_REMOVED_KEY, 10**9)
+
+
+def test_a_key_is_not_called_removed_while_a_sync_got_through_in_the_last_hour(conn, run):
+    """A sync that got through means some process still holds a key (the Telegram agent keeps the one it was
+    started with): nothing is removed, so nothing is said and nothing is marked."""
+    run(_holding())
+    run.sent.clear()
+    run(fetch=_no_key, now=NOW + dt.timedelta(minutes=59))
+    assert run.sent == [] and _mark(conn) is None
+    run(fetch=_no_key, now=NOW + dt.timedelta(minutes=61))          # an hour without one: it is removed
+    assert run.sent == [KEY_REMOVED] and _mark(conn) is not None
+
+
+@pytest.mark.parametrize("agent_sleeps_at_night", [False, True])
+def test_two_processes_say_the_key_was_removed_at_most_once_over_several_days(conn, run, agent_sleeps_at_night):
+    """The real setup. The Telegram agent was started with the key in its environment and still has it: it
+    syncs every 15 minutes and its syncs get through. The daily run starts after the key was taken out of
+    .env and finds none. The agent's syncs used to clear the mark, so the daily run said it every day.
+    Asleep at night, the agent leaves a gap before the daily run: then it is said, once, and stays said."""
+    agent = _Process()
+    with agent:
+        run(_holding())
+    run.sent.clear()
+    for day in range(1, 6):
+        midnight = dt.datetime.combine(NOW.date() + dt.timedelta(days=day), dt.time())
+        events = [(midnight + dt.timedelta(minutes=15 * q), "agent") for q in range(96)
+                  if not (agent_sleeps_at_night and q < 32)]            # asleep until 08:00
+        events.append((midnight + dt.timedelta(hours=7, minutes=30), "daily run"))
+        for at, who in sorted(events):
+            if who == "agent":
+                with agent:
+                    run(_holding(), now=at)
+            else:
+                with _Process():                                        # a new process each day, with no key
+                    run(fetch=_no_key, now=at)
+    assert run.sent == ([KEY_REMOVED] if agent_sleeps_at_night else [])
+
+
+def test_a_sync_of_a_process_that_was_never_keyless_does_not_clear_the_mark(conn, run):
+    """Another process said the key was removed. This one has always had its key: its syncs, whether they
+    get through or fail, are no sign that the key was put back in .env."""
+    run(_holding())
+    db.save_cached_value(conn, ta.KEY_REMOVED_KEY, 1.0)             # said by the other process
+    run(_holding(), now=_hours(2))
+    run(fetch=_down(), now=_hours(3))
+    assert _mark(conn) is not None
+
+
+def test_a_process_that_was_keyless_clears_the_mark_by_a_sync_that_reaches_trading_212_and_fails(conn, run):
+    run(_holding())
+    run(fetch=_no_key, now=_hours(2))
+    assert _mark(conn) is not None
+    run(fetch=_down(ta.BAD_KEY, "unauthorized"), now=_hours(3))     # a key is there now (it does not fit)
+    assert _mark(conn) is None
 
 
 # ---------------------------------------------- M3: a price of zero is not a price
@@ -1959,3 +2046,13 @@ def test_the_readme_says_a_removed_key_is_said_once():
     section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
     assert "«Ключ Trading 212 убран — слежение за счётом остановлено." in section
     assert "один раз" in section and "пока ключ не появится снова" in section
+
+
+def test_the_readme_says_to_restart_the_telegram_agent_after_the_key_changes():
+    """F1: the agent keeps the key it was started with; the daily run reads .env afresh."""
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    key = " ".join(readme[readme.index("### Ключ Trading 212\n"):].split())[:2500]
+    assert "launchctl kickstart -k gui/$(id -u)/com.disclosurebot.telegram" in key
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    assert "перезапустите Telegram-бота" in section and "за последний час" in section

@@ -438,3 +438,10 @@ warning for ever. Removing the key is the owner's decision.
 - **Tests:** the message once over 30 days of syncs with no key; nothing without an earlier sync; the mark
   cleared by a sync that gets through and by one that fails with a key; a silent sync; a message that did not go
   out; the daily warning for 401, 403, a timeout and a 502.
+
+## Amendment 3 (coordinator rulings after the final review, 2026-10-04)
+
+Ten small fixes, F1-F10. They narrow K2 (F1), I1 (F3, F5, F6), I3 (F8, F9), §6 (F2), §4 and K1 (F7) and add one warning (F4). Where
+they differ from the text above, they win. `trading212._setting` is unchanged.
+
+- **F1.** «Ключ убран» no longer repeats daily in the two-process setup: `_say_key_removed` is quiet while any sync got through in the last hour (some process still holds a key), and the mark is cleared only by a sync of a process that was itself keyless before; README: restart the Telegram agent after changing the key.
