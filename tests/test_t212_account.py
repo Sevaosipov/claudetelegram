@@ -326,8 +326,10 @@ def test_no_other_module_of_the_project_has_the_key_or_a_trading_212_url():
     project's code (the tests aside): no other module can reach the API or hold the key, so no
     other module needs the inspection."""
     root = Path(ta.__file__).parent
-    files = [f for pattern in ("*.py", "cluster/*.py", "*.sh") for f in root.glob(pattern)]
-    assert len(files) > 40                                           # the project's own code was found
+    outside = {"tests", ".venv", ".worktrees", ".superpowers", ".git", "data", "docs"}
+    files = [f for pattern in ("*.py", "*.sh") for f in root.rglob(pattern)
+             if not outside & set(f.relative_to(root).parts)]
+    assert len(files) > 40 and any(f.parent.name == "cluster" for f in files)     # every package, too
     for token in _TRADING_212_ONLY:
         named = sorted(f.name for f in files if token in f.read_text(encoding="utf-8"))
         assert set(named) <= {"t212_account.py", "trading212.py"}, f"{token} is in {named}"
