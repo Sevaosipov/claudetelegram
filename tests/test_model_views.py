@@ -795,6 +795,22 @@ def test_menu_signals_print_the_scored_list(conn, capsys, monkeypatch):
     assert "Открытые позиции" in out                            # the /bought positions
 
 
+def test_menu_prices_a_trading_212_holding_from_its_stored_day_price(conn, capsys, monkeypatch):
+    """A holding with no Yahoo listing (keyed by its ISIN) has the sync's prices, also here."""
+    import menu
+
+    today = dt.date.today().isoformat()
+    monkeypatch.setattr(model, "score_today", lambda c, *a, **k: [])
+    monkeypatch.setattr("positions.check_exits", lambda c, *a, **k: [])
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None, conn=None: 110.0 if conn else None)
+    conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price, origin, quantity, t212_ticker, "
+                 "currency) VALUES ('DE0007164600', 'T212', ?, 100.0, 't212', 5, 'SAPd_EQ', 'EUR')", (today,))
+    conn.commit()
+    menu.show_signals(conn)
+    out = capsys.readouterr().out
+    assert "сейчас 110.00 (+10.0%)" in out and "цена недоступна" not in out
+
+
 def test_menu_signals_survive_a_failing_score(conn, capsys, monkeypatch):
     import menu
 

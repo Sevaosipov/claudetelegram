@@ -26,7 +26,8 @@ DB_PATH = Path(__file__).parent / "data" / "disclosures.db"
 def show_signals(conn) -> None:
     """The model's score for every fresh signal and both coins (model.py): the scores the
     daily run kept today, else computed now -- a browse, not a digest: signals already sent
-    show up too -- then the pending close alerts and the positions reported with /bought."""
+    show up too -- then the pending close alerts and the open positions (reported with /bought,
+    or read from the Trading 212 account)."""
     print()
     try:
         scored = model.cached_scores(conn, dt.date.today())
@@ -41,7 +42,8 @@ def show_signals(conn) -> None:
         print()
         print("\n".join(telegram_notify.format_close_alert(a, html=False) for a in closes))
     print()
-    print(telegram_notify.format_positions(positions.open_positions(conn), positions.last_close))
+    print(telegram_notify.format_positions(
+        positions.open_positions(conn), lambda ticker, source=None: positions.last_price(conn, ticker, source)))
 
 
 def show_research(conn) -> None:

@@ -404,6 +404,12 @@ def _seams(conn, price_fn, closes_fn):
     return price_fn or price, closes_fn or closes
 
 
+def last_price(conn, ticker: str, source: str | None = None) -> float | None:
+    """The price check_exits and /portfolio read for a position by default: last_close, with the
+    database for a Trading 212 holding that has no Yahoo listing."""
+    return _seams(conn, None, None)[0](ticker, source)
+
+
 def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=None, conn=None) -> dict:
     """How an open position stands, from the same price and history the exits read (`price_fn`
     and `closes_fn`, `(ticker, source)` seams with check_exits' defaults; `conn` prices a
