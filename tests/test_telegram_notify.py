@@ -11,6 +11,7 @@ import cluster
 from cluster import ClusterSignal, ExitSignal, StakeSignal
 
 import positions
+import t212_account as ta
 import telegram_notify
 import telegram_notify as tn
 
@@ -542,3 +543,206 @@ def test_my_position_blocks_are_the_positions_alone():
     assert len(blocks) == 2 and blocks[0].startswith("• GME: вход 23,10 (01.10)")
     assert blocks[1] == "• BBB: вход 23,10 (02.10), сейчас — цена недоступна, 3 дн."
     assert tn.my_position_blocks([], html=False) == []
+
+
+# ------------------------------------------------------------ Trading 212 (/portfolio's first section)
+@pytest.mark.parametrize("x, text", [(10.0, "10"), (100.0, "100"), (1234.5, "1 234,5"), (0.52347, "0,5235"),
+                                     (2.5, "2,5"), (0.0, "0")])
+def test_a_quantity_is_shown_the_russian_way_without_needless_decimals(x, text):
+    assert tn.quantity(x) == text
+
+
+def _t212_holding(name="GME", *, qty=10.0, avg=23.10, price=24.05, currency="USD", pnl=8.30,
+                  pnl_currency="EUR", tracked=True, insiders=(), held=False, opened="2026-10-01", days=None,
+                  price_date=None, **status):
+    """A line of «💼 Trading 212» as t212_account builds it; `tracked`: it has a position (and so a
+    status); `days`: since it was bought in Trading 212, when that is known; `price_date`: the day
+    of a stored price that is too old to be a price (the status then has none)."""
+    pos = _held(name, entry=avg or 1.0, opened=opened, insiders=insiders) if tracked else None
+    st = _status(None if price_date else price, entry=avg or 1.0, **status) if tracked else None
+    return ta.Holding(name=name, quantity=qty, avg_price=avg, price=price, currency=currency, pnl=pnl,
+                      pnl_currency=pnl_currency, position=pos, status=st, model_holds=held, opened=opened,
+                      days=days, price_date=price_date)
+
+
+_LIVE = ta.T212Summary("EUR", 12345.67, 2000.0, 10345.67, 10000.0, 345.67, 12.5)
+_ACCOUNT_LINE = "Счёт: €12 346 · вложено €10 000 · P/L +€346 (+3,5%) · свободно €2 000"
+
+
+def _view(*holdings, summary=_LIVE, **kw):
+    return ta.PortfolioView(list(holdings), summary=None if kw.get("error") else summary, **kw)
+
+
+def test_the_portfolio_opens_with_trading_212_then_what_is_outside_it():
+    manual = [(_held("AAA", entry=100.0), _status(110.0, entry=100.0, peak=110.0, stop_level=99.0), False)]
+    view = _view(_t212_holding(insiders=["Ryan Cohen"], held=True))
+    assert tn.format_my_portfolio(manual, t212=view) == "\n\n".join([
+        "<b>💼 Trading 212</b>\n" + _ACCOUNT_LINE,
+        "\n".join(["• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30",
+                   "   стоп 21,65 (−10% от максимума 24,05), до стопа 10,0%",
+                   "   слежу за продажами: Ryan Cohen",
+                   "   модель тоже держит"]),
+        "<b>✍️ Вне Trading 212</b>",
+        "\n".join(["• AAA: вход 100,00 (01.10), сейчас 110,00 (+10,0%), 3 дн.",
+                   "   стоп 99,00 (−10% от максимума 110,00), до стопа 10,0%"]),
+        "Средний результат: +7,1% по 2 позициям\n" + _SELL_LINE])           # (+4,1% and +10,0%) / 2
+
+
+def test_only_trading_212_holdings_have_no_outside_section():
+    text = tn.format_my_portfolio([], t212=_view(_t212_holding()))
+    assert "Вне Trading 212" not in text and "Ваш портфель" not in text
+    assert text.endswith("Средний результат: +4,1% по 1 позиции\n" + _SELL_LINE)
+
+
+def test_the_account_line_shows_a_loss_with_a_real_minus_and_leaves_out_what_it_does_not_know():
+    losing = ta.T212Summary("EUR", 9880.4, 500.0, 9380.4, 9500.0, -119.6, 0.0)
+    assert tn.format_my_portfolio([], t212=_view(_t212_holding(pnl=-8.30, price=22.0), summary=losing)).splitlines()[1:3] \
+        == ["Счёт: €9 880 · вложено €9 500 · P/L −€120 (−1,3%) · свободно €500", ""]
+    assert "€−8,30" in tn.format_my_portfolio([], t212=_view(_t212_holding(pnl=-8.30, price=22.0)))
+    partial = ta.T212Summary(None, 500.0, None, None, None, None, None)
+    assert tn.format_my_portfolio([], t212=_view(_t212_holding(), summary=partial)).splitlines()[1] == "Счёт: €500"
+    computed = ta.T212Summary("EUR", 1100.0, 100.0, 1000.0, 800.0, None, None)     # P/L from value - cost
+    assert "вложено €800 · P/L +€200 (+25,0%)" in tn.format_my_portfolio([], t212=_view(summary=computed))
+
+
+@pytest.mark.parametrize("currency, total, pnl", [("GBP", "£12 346", "£+8,30"), ("USD", "$12 346", "$+8,30"),
+                                                  ("CHF", "12 346 CHF", "+8,30 CHF")])
+def test_another_account_currency_is_named(currency, total, pnl):
+    summary = ta.T212Summary(currency, 12345.67, None, None, None, None, None)
+    text = tn.format_my_portfolio([], t212=_view(_t212_holding(pnl_currency=currency), summary=summary))
+    assert f"Счёт: {total}" in text and f", {pnl}" in text
+
+
+def test_a_holding_trading_212_shows_before_the_bot_tracks_it_has_only_its_line():
+    text = tn.format_my_portfolio([], t212=_view(_t212_holding(tracked=False)))
+    block = text.split("\n\n")[1]
+    assert block == "• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30"
+
+
+def test_a_holding_with_no_price_says_so_and_what_is_not_known_is_left_out():
+    h = _t212_holding(price=None, pnl=None)
+    block = tn.format_my_portfolio([], t212=_view(h)).split("\n\n")[1]
+    assert block == "• GME — 10 шт., средняя 23,10, сейчас — цена недоступна"
+    bare = ta.Holding(name="SAP", quantity=None, avg_price=None, price=125.0, currency=None)
+    assert tn.format_my_portfolio([], t212=_view(bare)).split("\n\n")[1] == "• SAP — сейчас 125,00"
+
+
+def test_the_oldest_trading_212_holding_comes_first():
+    text = tn.format_my_portfolio([], t212=_view(_t212_holding("NEW", opened="2026-10-01"),
+                                                 _t212_holding("OLD", opened="2026-09-20")))
+    assert text.index("• OLD") < text.index("• NEW")
+
+
+def test_when_trading_212_did_not_answer_the_stored_holdings_come_with_the_reason_and_their_time():
+    stored = _t212_holding(pnl=9.5, pnl_currency="USD")
+    text = tn.format_my_portfolio([], t212=_view(stored, error="HTTP 502", as_of="14:05"))
+    head, block = text.split("\n\n")[:2]
+    assert head == ("<b>💼 Trading 212</b>\n"
+                    "⚠️ Trading 212 не ответил (HTTP 502) — данные на 14:05 последней синхронизации")
+    assert block.startswith("• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), $+9,50\n   стоп ")
+    assert "Счёт:" not in text
+    nothing = tn.format_my_portfolio([], t212=_view(error="ReadTimeout", as_of="14:05"))
+    assert nothing.split("\n\n")[0] == "<b>💼 Trading 212</b>\n⚠️ Trading 212 не ответил (ReadTimeout)"
+
+
+_HINT = ("Создайте в Trading 212 → Настройки → API ключ только для чтения (Portfolio, Account data) "
+         "и положите в .env")
+
+
+def test_a_missing_or_powerless_key_shows_the_reason_and_the_hint():
+    no_key = tn.format_my_portfolio([], t212=_view(error="ключ Trading 212 не задан", hint=_HINT))
+    assert no_key == "\n\n".join(["<b>💼 Trading 212</b>\n⚠️ Ключ Trading 212 не задан\n" + _HINT,
+                                  "Ваших позиций нет. Купили? /bought TICKER [цена] — например "
+                                  "/bought GME 23.10. Модельный портфель: /model."])
+    forbidden = tn.format_my_portfolio(
+        [(_held("AAA"), _status(), False)],
+        t212=_view(_t212_holding(), error="ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта",
+                   hint=_HINT, as_of="30.09 14:05"))
+    assert forbidden.split("\n\n")[0] == (
+        "<b>💼 Trading 212</b>\n⚠️ Ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта"
+        " — данные на 30.09 14:05 последней синхронизации\n" + _HINT)
+    assert "<b>✍️ Вне Trading 212</b>" in forbidden and "• AAA: вход" in forbidden
+
+
+def test_an_empty_account_and_nothing_bought_is_the_account_line_and_the_empty_text():
+    text = tn.format_my_portfolio([], t212=_view())
+    assert text == "<b>💼 Trading 212</b>\n" + _ACCOUNT_LINE + "\n\n" + tn._NO_POSITIONS
+
+
+def test_the_trading_212_section_escapes_every_dynamic_string_and_uses_only_bold():
+    h = _t212_holding("A&B<C>", currency="U<S>D", insiders=["X & <Y>"])
+    text = tn.format_my_portfolio([], t212=_view(h, error="bad <reason> & co", as_of="14:05"))
+    assert "• A&amp;B&lt;C&gt; — " in text and "U&lt;S&gt;D" in text and "X &amp; &lt;Y&gt;" in text
+    assert "(bad &lt;reason&gt; &amp; co)" in text
+    bare = text.replace("<b>", "").replace("</b>", "")
+    assert "<" not in bare and ">" not in bare
+
+
+def test_the_trading_212_section_in_plain_text_has_no_markup():
+    text = tn.format_my_portfolio([(_held("A&B"), _status(), False)], html=False,
+                                  t212=_view(_t212_holding("C&D")))
+    assert text.startswith("💼 Trading 212\nСчёт: €12 346") and "\n\n✍️ Вне Trading 212\n\n• A&B: вход" in text
+    assert "<b>" not in text and "&amp;" not in text and "• C&D — 10 шт." in text
+
+
+def test_trading_212_blocks_are_the_holdings_alone():
+    blocks = tn.t212_blocks([_t212_holding("NEW"), _t212_holding("OLD", opened="2026-09-01")], html=False)
+    assert len(blocks) == 2 and blocks[0].startswith("• OLD — 10 шт.") and tn.t212_blocks([], html=False) == []
+
+
+def test_the_account_line_alone():
+    assert tn.format_t212_account(12345.67, 10000.0, 345.67, 2000.0, "EUR") == _ACCOUNT_LINE
+    assert tn.format_t212_account(None, None, None, None) == ""
+    assert tn.format_t212_account(100.0, 0.0, 0.0, 100.0) == "Счёт: €100 · вложено €0 · P/L +€0 · свободно €100"
+
+
+@pytest.mark.parametrize("x, currency, text", [(9800.4, "EUR", "€9 800"), (-9800.4, "EUR", "−€9 800"),
+                                               (-0.2, "EUR", "€0"), (1234.0, None, "€1 234"),
+                                               (1234.0, "USD", "$1 234"), (-5.0, "SEK", "−5 SEK")])
+def test_money_in_a_currency(x, currency, text):
+    assert tn.money(x, currency) == text
+    assert tn.money_eur(9800.4) == "€9 800" and tn.money_eur(-9800.4) == "−€9 800"
+
+
+def test_a_close_alert_names_a_trading_212_holding_by_its_symbol_not_its_isin():
+    pos = positions.Position(1, "DE0007164600", "T212", "2026-09-01", 100.0, [], None, None, None, None,
+                             0.10, "t212", 5.0, "SAPd_EQ", "EUR")
+    text = telegram_notify.format_close_alert(positions.CloseAlert(pos, "trailing_stop", "detail", 90.0))
+    assert text.startswith("<b>🚪 SAP — стоп от максимума</b>\n") and "DE0007164600" not in text
+    us = positions.Position(2, "GME", None, "2026-09-01", 100.0, [], None, None, None, None,
+                            0.10, "t212", 5.0, "GME_US_EQ", "USD")
+    assert telegram_notify.format_close_alert(positions.CloseAlert(us, "time", "d", None), html=False) \
+        .startswith("🚪 GME — год в позиции\n")
+
+
+def test_a_trading_212_holding_shows_the_days_since_it_was_bought_there():
+    block = tn.format_my_portfolio([], t212=_view(_t212_holding(days=5))).split("\n\n")[1]
+    assert block.splitlines()[0] == "• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30, 5 дн."
+    unpriced = tn.format_my_portfolio([], t212=_view(_t212_holding(price=None, pnl=None, days=0)))
+    assert "• GME — 10 шт., средняя 23,10, сейчас — цена недоступна, 0 дн." in unpriced
+    assert "дн." not in tn.format_my_portfolio([], t212=_view(_t212_holding())).split("\n\n")[1]   # not known
+
+
+def test_a_holding_that_pre_dates_tracking_shows_its_real_loss_and_a_stop_from_its_floor():
+    """Bought at 100 long ago, at 50 when the bot first saw it: −50% is the truth, and the stop is
+    measured from 50."""
+    legacy = _t212_holding(avg=100.0, price=50.0, pnl=-431.0, days=518, peak=50.0, stop_level=45.0)
+    block = tn.format_my_portfolio([], t212=_view(legacy)).split("\n\n")[1]
+    assert block.splitlines() == [
+        "• GME — 10 шт., средняя 100,00, сейчас 50,00 USD (−50,0%), €−431,00, 518 дн.",
+        "   стоп 45,00 (−10% от максимума 50,00), до стопа 10,0%"]
+
+
+def test_a_stale_stored_price_is_shown_as_the_price_of_its_day_with_no_stop_line():
+    """Trading 212 has not answered for days: the last stored price is shown as what it is, the
+    price of 28.09, and no stop is read from it."""
+    stale = _t212_holding(pnl=9.5, pnl_currency="USD", days=9, price_date="2026-09-28", insiders=["Ryan Cohen"])
+    view = _view(stale, _t212_holding("NEW", avg=100.0, price=110.0, opened="2026-10-02"),
+                 error="ReadTimeout", as_of="28.09 14:05")
+    text = tn.format_my_portfolio([], t212=view)
+    gme = next(b for b in text.split("\n\n") if b.startswith("• GME"))
+    assert gme.splitlines() == [
+        "• GME — 10 шт., средняя 23,10, цена на 28.09: 24,05 USD (+4,1%), $+9,50, 9 дн.",
+        "   слежу за продажами: Ryan Cohen"]                        # no «стоп» line: nothing to measure it with
+    assert "сейчас 24,05" not in text
+    assert "Средний результат: +10,0% по 1 позиции" in text         # a stale result is not averaged in

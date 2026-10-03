@@ -35,13 +35,20 @@ accumulating a real record from whenever a ticker first gets checked.
 
 /bought TICKER [price], /sold TICKER and /portfolio (/positions too) track what the
 user reports actually buying (positions.py) -- entirely separate from the ticker
-lookup above, and the only place this bot writes state instead of just
-reading and replying. /portfolio shows the user's own positions, each with how it
+lookup above, and (with the Trading 212 sync below) the only place this bot writes state
+instead of just reading and replying. /portfolio shows the user's own positions, each with how it
 stands now (positions.portfolio_rows, telegram_notify.format_my_portfolio), without
 Claude (the prices come from Yahoo). /bought and /sold take an Oslo or Stockholm listing written the
 Yahoo way (EQNR.OL, VOLV-B.ST): it is stored the way the signal tables know it, the
 bare ticker with its source (EQNR, NORWAY), so it is priced on its own exchange.
 See POSITIONS_USAGE and _handle_positions_command.
+
+The Trading 212 account is tracked too (t212_account.py), read only: the bot never places an
+order. The loop syncs the account's holdings into the positions at start and then every 15 minutes
+(T212_SYNC_SECONDS; a failed sync is logged and the polling goes on), so a holding is watched
+without a /bought, and one sold there is closed by itself. /portfolio opens with «💼 Trading 212»,
+asked live (t212_account.portfolio_view), and lists the /bought positions after it. /bought and
+/sold of a ticker held in Trading 212 only say that the account is where it is tracked from.
 
 Only ever responds to TELEGRAM_CHAT_ID -- the same chat the rest of
 disclosure-bot already alerts into. Any message from a different chat is
@@ -83,6 +90,7 @@ import paper_report
 import positions
 import research
 import sources
+import t212_account
 import telegram_notify
 
 BASE_DIR = Path(__file__).parent
@@ -98,6 +106,8 @@ QUESTION_LATER = "Не успел ответить — вопрос в очер�
 
 API_URL = "https://api.telegram.org/bot{token}/{method}"
 LONG_POLL_SECONDS = 25
+T212_SYNC_SECONDS = 900          # the Trading 212 account is synced at start and then this often
+T212_KEY_RETRY_SECONDS = 3600    # ... but after a 401 or a 403 only this often: a key does not heal by itself
 STATE_OFFSET = "telegram_bot_offset"
 PERSIST_SECONDS = 30 * 365 * 24 * 3600
 
@@ -116,7 +126,7 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
-             "/portfolio — ваши позиции (/bought), /model — модельный портфель.\n"
+             "/portfolio — ваш счёт Trading 212 и позиции /bought, /model — модельный портфель.\n"
              "Сводка модельного портфеля приходит по пятницам.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
@@ -185,10 +195,14 @@ def _position_listing(arg: str) -> tuple[str, str | None] | None:
 
 
 def _handle_my_portfolio(conn) -> None:
-    """/portfolio and /positions: the user's own positions, each with how it stands now."""
+    """/portfolio and /positions: «💼 Trading 212» -- the account, asked live (or what the last
+    sync stored, with why) -- then the positions recorded with /bought, each with how it stands
+    now."""
     try:
-        rows = positions.portfolio_rows(conn, dt.date.today())
-        telegram_notify.send_text(telegram_notify.format_my_portfolio(rows))
+        today = dt.date.today()
+        view = t212_account.portfolio_view(conn, today)
+        rows = positions.portfolio_rows(conn, today, origin=positions.MANUAL)
+        telegram_notify.send_text(telegram_notify.format_my_portfolio(rows, t212=view))
     except Exception as e:
         print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось собрать список позиций ({type(e).__name__}). "
@@ -210,6 +224,19 @@ def _handle_positions_command(conn, text: str) -> bool:
         telegram_notify.send_text(POSITIONS_USAGE)
         return True
     ticker, venue_source = listing
+    # A ticker the Trading 212 account holds is tracked from the account: the sync sees a buy or a
+    # sale there by itself. It is matched by the position's own ticker or by the symbol of the
+    # t212_ticker stored with it (Meta, held as FB_US_EQ and tracked as META, answers to both) --
+    # not by the name a holding keyed by its ISIN is shown under: hundreds of non-US instruments
+    # share a US company's symbol, so SAP here is the US stock and the Frankfurt SAPd_EQ is named
+    # by its ISIN.
+    held = positions.find_open(conn, ticker) or positions.find_holding(conn, ticker)
+    if held is not None and held.origin == positions.T212:
+        name = telegram_notify._esc(ticker)
+        telegram_notify.send_text(
+            f"{name} отслеживается из Trading 212: продайте там — бот увидит продажу сам."
+            if cmd == "/sold" else f"{name} уже отслеживается из Trading 212.")
+        return True
     if cmd == "/sold":
         pos = positions.close_position(conn, ticker)
         telegram_notify.send_text(f"Позиция {ticker} закрыта." if pos
@@ -443,6 +470,50 @@ def _handle_message(conn, text: str) -> None:
     _handle_ticker(conn, asset)
 
 
+def _sync_t212(conn) -> int:
+    """One sync of the Trading 212 account (t212_account.sync), and how many seconds until the
+    next: T212_SYNC_SECONDS, or T212_KEY_RETRY_SECONDS after a 401 or a 403. Whatever it raises is
+    logged by its type alone -- never its text -- and the polling goes on."""
+    try:
+        result = t212_account.sync(conn)
+    except Exception as e:
+        print(f"[telegram_bot] Trading 212 sync failed: {type(e).__name__}", file=sys.stderr)
+        return T212_SYNC_SECONDS
+    kind = result.error_kind if result is not None else None
+    return T212_KEY_RETRY_SECONDS if kind in ("unauthorized", "forbidden") else T212_SYNC_SECONDS
+
+
+def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=time.time,
+           sleep=time.sleep, rounds: int | None = None) -> None:
+    """The always-on loop: long-poll Telegram, and sync the Trading 212 account at start and then
+    every T212_SYNC_SECONDS (between two polls, so at most one long poll or one answer late). A
+    poll that fails on the network is retried after a growing pause. `rounds` ends the loop after
+    that many polls (tests); `clock` and `sleep` are the time seams.
+
+    The clock is the wall clock: time.monotonic stands still while the Mac sleeps, and the first
+    thing wanted after a wake is a sync. A clock set back by more than the interval syncs at once
+    too, rather than waiting out the difference. After a 401 or a 403 the next sync is an hour
+    away, not 15 minutes: the key will not heal by itself."""
+    next_sync, wait = clock(), T212_SYNC_SECONDS
+    backoff = 5
+    done = 0
+    while rounds is None or done < rounds:
+        done += 1
+        now = clock()
+        if now >= next_sync or next_sync - now > wait:
+            wait = _sync_t212(conn)
+            next_sync = now + wait
+        try:
+            _poll_once(conn, token, chat_id, session)
+            backoff = 5
+        except requests.RequestException as e:
+            # requests puts the whole URL -- the bot token in it -- into its error text
+            print(f"[telegram_bot] poll failed: {telegram_notify._redact(str(e), token)}; "
+                  f"retrying in {backoff}s", file=sys.stderr)
+            sleep(backoff)
+            backoff = min(backoff * 2, 300)
+
+
 def _poll_once(conn, token: str, chat_id: str, session: requests.Session) -> None:
     offset = db.get_cached_value(conn, STATE_OFFSET, PERSIST_SECONDS)
     offset = int(offset) if offset is not None else None
@@ -486,15 +557,8 @@ def main() -> int:
         return 0
 
     print("[telegram_bot] listening (Ctrl+C to stop)")
-    backoff = 5
-    while True:
-        try:
-            _poll_once(conn, token, chat_id, session)
-            backoff = 5
-        except requests.RequestException as e:
-            print(f"[telegram_bot] poll failed: {e}; retrying in {backoff}s", file=sys.stderr)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 300)
+    _serve(conn, token, chat_id, session)
+    return 0
 
 
 if __name__ == "__main__":

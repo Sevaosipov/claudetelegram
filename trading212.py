@@ -9,8 +9,9 @@ under Settings -> API (Beta), and put in .env:
     TRADING212_API_KEY=...
     TRADING212_API_SECRET=...
 
-Only the key's metadata permission is used; nothing here reads the account, and
-nothing can place an order. The endpoint allows one call per 50 seconds and the list
+Only the key's metadata permission is used here; t212_account.py reads the account's
+positions and summary with the same key (read only), and nothing in either can place an
+order. The endpoint allows one call per 50 seconds and the list
 changes slowly, so it is cached in the database for a day. With no key, or with the
 API down and nothing cached, availability is unknown -- callers say so rather than
 treating every stock as unavailable.
@@ -109,6 +110,15 @@ def fetch_instruments(session: requests.Session | None = None) -> list[dict] | N
     return data
 
 
+def _reason(e: Exception) -> str:
+    """Why a call failed, fit for a log: the exception's type and an HTTP status -- never its text,
+    which for a requests error can carry the URL or the Authorization header."""
+    status = None
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        status = e.response.status_code
+    return f"{type(e).__name__} {status}" if status else type(e).__name__
+
+
 def _symbol(inst: dict) -> str:
     """AAPL_US_EQ -> AAPL; BRK_B_US_EQ -> BRK.B."""
     t = inst.get("ticker") or ""
@@ -136,7 +146,7 @@ def availability(conn, session: requests.Session | None = None) -> Availability 
             if instruments:
                 _save(conn, instruments)
         except (requests.RequestException, ValueError) as e:
-            print(f"[T212] instrument list not refreshed ({e}); using the cached one if any")
+            print(f"[T212] instrument list not refreshed ({_reason(e)}); using the cached one if any")
     rows = conn.execute(
         "SELECT ticker, isin, type, short_name, currency FROM t212_instruments").fetchall()
     if not rows:

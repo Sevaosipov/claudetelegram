@@ -957,6 +957,151 @@ def test_portfolio_keeps_the_model_when_your_positions_cannot_be_shown(conn, my_
     assert "НАБЛЮДЕНИЕ: нет" in out and "ПОКУПКИ СЕГОДНЯ: нет" in out
 
 
+# ---- the Trading 212 account in the analyst's portfolio (stored data: no live call)
+def _t212_held(conn, ticker="GME", *, source=None, entry=23.10, qty=10.0, t212_ticker="GME_US_EQ",
+               currency="USD", opened="2026-09-28", stop=0.10, insiders="[]", base=None, created=None):
+    """A holding as the Trading 212 sync stored it; `base` and `created`: one that pre-dates
+    tracking has the stop's floor and the date Trading 212 says it was bought."""
+    conn.execute(
+        "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, stop_pct, origin, "
+        "quantity, t212_ticker, currency, stop_base, t212_created) VALUES (?,?,?,?,?,?,'t212',?,?,?,?,?)",
+        (ticker, source, opened, entry, insiders, stop, qty, t212_ticker, currency, base, created))
+    conn.commit()
+
+
+def _t212_price(conn, ticker, price, days_ago=0):
+    """A day price the sync stored `days_ago` days before today (the analyst reads the real clock,
+    and a stored price older than three days is no price)."""
+    day = (dt.date.today() - dt.timedelta(days=days_ago)).isoformat()
+    conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES (?,?,?)", (ticker, day, price))
+    conn.commit()
+
+
+def _t212_snapshot(conn, day="2026-10-01", total=12345.67, value=10345.67, cost=10000.0, cash=2000.0):
+    conn.execute("INSERT OR REPLACE INTO t212_equity (date, total_value, invested_value, invested_cost, "
+                 "cash_free, currency) VALUES (?,?,?,?,?,'EUR')", (day, total, value, cost, cash))
+    conn.commit()
+
+
+@pytest.fixture
+def no_live_call(monkeypatch):
+    """The analyst's Claude runs this command: it must never reach Trading 212."""
+    def refuse(*a, **k):
+        raise AssertionError("analyst.py portfolio made a live Trading 212 call")
+    for name in ("fetch_account", "fetch_positions", "fetch_summary", "_get", "portfolio_view", "sync"):
+        monkeypatch.setattr(analyst.t212_account, name, refuse)
+
+
+@pytest.fixture
+def yahoo_price(monkeypatch):
+    """Yahoo's last close of anything is 24.05 (and there is no history: see _hermetic). The real
+    last_close and daily_closes run, so a holding with no Yahoo listing reads its stored prices."""
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: 24.05)
+
+
+_SNAPSHOT_LINE = "Счёт Trading 212 на 01.10: €12 346 · вложено €10 000 · P/L +€346 (+3,5%) · свободно €2 000"
+
+
+def test_portfolio_shows_the_trading_212_account_from_what_the_sync_stored(conn, yahoo_price, no_live_call):
+    model.create_books(conn, dt.date(2026, 9, 1))
+    _t212_held(conn, insiders='["Ryan Cohen"]')
+    _t212_held(conn, "DE0007164600", source="T212", entry=120.0, qty=2.5, t212_ticker="SAPd_EQ",
+               currency="EUR", opened="2026-09-29")
+    _t212_price(conn, "GME", 23.00, days_ago=1)
+    _t212_price(conn, "GME", 24.05)                                  # the last stored price is the one shown
+    _t212_price(conn, "DE0007164600", 126.0)
+    _t212_snapshot(conn, "2026-09-30", total=1.0)
+    _t212_snapshot(conn)                                             # the latest snapshot
+    _bought(conn, "BBB", opened="2026-09-30", entry=10.0)
+    _paper_position(conn, S, "GME")                                  # the model holds it too
+    lines = analyst.portfolio(conn, scored=[]).splitlines()
+    assert lines[:7] == [
+        "ВАШИ ПОЗИЦИИ (Trading 212 и /bought):",
+        _SNAPSHOT_LINE,
+        "В Trading 212:",
+        "• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), $+9,50",      # 10 x (24,05 - 23,10)
+        "   стоп 20,79 (−10% от максимума 23,10), до стопа 13,6%",
+        "   слежу за продажами: Ryan Cohen",
+        "   модель тоже держит"]
+    assert lines[7] == "• SAP — 2,5 шт., средняя 120,00, сейчас 126,00 EUR (+5,0%), €+15,00"
+    assert lines[8].startswith("   стоп ")
+    assert lines[9] == "Вне Trading 212 (/bought):"
+    assert lines[10].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
+    assert lines[12] == "" and lines[13].startswith("Модельный портфель")     # then the model, as before
+    assert "GME: вход" not in "\n".join(lines)                       # a holding is not listed twice
+
+
+def test_portfolio_shows_a_legacy_holding_with_its_real_result_and_days_since_the_purchase(
+        conn, my_prices, no_live_call):
+    """The owner's own figures: the result on the average price and how long it has been held in
+    Trading 212, not since the bot began to track it."""
+    today = dt.date.today()
+    _t212_held(conn, entry=100.0, opened=today.isoformat(), base=50.0, created="2024-05-01")
+    _t212_price(conn, "GME", 50.0)
+    lines = analyst.portfolio(conn, scored=[]).splitlines()
+    held = (today - dt.date(2024, 5, 1)).days
+    assert lines[:4] == [
+        "ВАШИ ПОЗИЦИИ (Trading 212 и /bought):",
+        "В Trading 212:",
+        f"• GME — 10 шт., средняя 100,00, сейчас 50,00 USD (−50,0%), $−500,00, {held} дн.",
+        "   стоп 45,00 (−10% от максимума 50,00), до стопа 10,0%"]
+
+
+def test_portfolio_with_only_the_trading_212_account(conn, my_prices, no_live_call):
+    _t212_held(conn)
+    _t212_snapshot(conn)
+    lines = analyst.portfolio(conn, scored=[]).splitlines()
+    assert lines[:5] == ["ВАШИ ПОЗИЦИИ (Trading 212 и /bought):", _SNAPSHOT_LINE, "В Trading 212:",
+                         "• GME — 10 шт., средняя 23,10, сейчас — цена недоступна",     # no price stored yet
+                         "Вне Trading 212 (/bought): нет"]
+
+
+def test_portfolio_with_an_account_that_holds_nothing(conn, my_prices, no_live_call):
+    _t212_snapshot(conn)
+    _bought(conn, "BBB", opened="2026-09-30", entry=10.0)
+    lines = analyst.portfolio(conn, scored=[]).splitlines()
+    assert lines[:4] == ["ВАШИ ПОЗИЦИИ (Trading 212 и /bought):", _SNAPSHOT_LINE,
+                         "В Trading 212: позиций нет", "Вне Trading 212 (/bought):"]
+
+
+def test_portfolio_without_trading_212_reads_as_before(conn, my_prices, no_live_call):
+    _bought(conn, "GME")
+    out = analyst.portfolio(conn, scored=[])
+    assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought):" and "Trading 212" not in out
+
+
+def test_portfolio_prints_the_trading_212_part_as_plain_text(conn, yahoo_price, no_live_call):
+    _t212_held(conn, "DE000A1EWWW0", source="T212", t212_ticker="A&Bd_EQ", insiders='["X & <Y>"]')
+    out = analyst.portfolio(conn, scored=[])
+    assert "• A&B — 10 шт." in out and "слежу за продажами: X & <Y>" in out
+    assert "<b>" not in out and "&amp;" not in out and "💼" not in out
+
+
+def test_portfolio_keeps_the_model_when_the_trading_212_part_cannot_be_shown(conn, my_prices, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("offline")
+    _t212_held(conn)
+    monkeypatch.setattr(analyst.t212_account, "stored_holdings", boom)
+    out = analyst.portfolio(conn, scored=[])
+    assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): не посчитаны: RuntimeError"
+    assert "НАБЛЮДЕНИЕ: нет" in out and "ПОКУПКИ СЕГОДНЯ: нет" in out
+
+
+def test_context_says_where_your_position_is_tracked_from(conn):
+    _t212_held(conn, "NVDA", t212_ticker="NVDA_US_EQ", entry=100.0, qty=2.5, stop=0.15)
+    out = analyst.context(conn, "NVDA", scored=[])
+    assert "ВАША ПОЗИЦИЯ (Trading 212): с 2026-09-28, 2,5 шт., вход 100.00, стоп −15% от максимума" in out
+    assert "(/bought)" not in out
+
+
+def test_the_method_names_the_trading_212_account_in_the_portfolio_output():
+    method = " ".join(_text("analyst_method.txt").split())
+    assert "«ВАШИ ПОЗИЦИИ (Trading 212 и /bought):»" in method and "Trading 212 account" in method
+    assert "as the bot last stored" in method
+    assert "the days since it was bought in Trading 212" in method
+    assert "before the bot began to track the account" in method and "its price on that day" in method
+
+
 def test_the_analyst_uses_the_one_venue_split_the_bot_uses():
     assert not hasattr(analyst, "_split_venue")
     assert analyst._Spellings("EQNR.OL").venue == positions.split_venue("EQNR.OL") == ("EQNR", "NORWAY")

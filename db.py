@@ -458,8 +458,10 @@ CREATE TABLE IF NOT EXISTS crypto_wallet_snapshots (
     PRIMARY KEY (address, taken_at)
 );
 
--- Positions the user reports via Telegram (/bought, /sold) -- positions.py. The bot
--- never reads the brokerage account; this is only what the user tells it.
+-- Positions the user reports via Telegram (/bought, /sold) -- positions.py -- and, with
+-- origin 't212', the holdings the bot reads from the Trading 212 account (t212_account.py;
+-- read only: nothing here can place an order). origin, quantity, t212_ticker, currency,
+-- stop_base and t212_created come from _ADDED_COLUMNS.
 CREATE TABLE IF NOT EXISTS positions (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker            TEXT NOT NULL,
@@ -471,6 +473,25 @@ CREATE TABLE IF NOT EXISTS positions (
     closed_at         TEXT,
     close_reason      TEXT,
     close_alerted_at  TEXT
+);
+
+-- The Trading 212 account (t212_account.py), one row a day, the last of the day replacing the
+-- earlier ones. t212_prices prices a holding with no Yahoo listing (keyed by its ISIN) for the
+-- exits; t212_equity is the account's value for /portfolio, the weekly message and the analyst.
+CREATE TABLE IF NOT EXISTS t212_prices (
+    ticker  TEXT,                    -- the position's key: the US symbol, else the ISIN
+    date    TEXT,                    -- ISO date
+    price   REAL,                    -- currentPrice, in the instrument's currency
+    PRIMARY KEY (ticker, date)
+);
+
+CREATE TABLE IF NOT EXISTS t212_equity (
+    date            TEXT PRIMARY KEY,
+    total_value     REAL,
+    invested_value  REAL,
+    invested_cost   REAL,
+    cash_free       REAL,
+    currency        TEXT             -- the account's currency
 );
 
 -- The ~250 largest coins by market cap (sources.cached_coins), refreshed daily:
@@ -595,6 +616,17 @@ _ADDED_COLUMNS = [
     ("paper_positions", "score", "REAL"),
     # The trailing stop of a /bought position, fixed when it is recorded (positions.py).
     ("positions", "stop_pct", "REAL"),
+    # A holding read from the Trading 212 account (t212_account.py) is origin 't212', with the
+    # account's quantity, the instrument's Trading 212 id (AAPL_US_EQ) and its currency.
+    ("positions", "origin", "TEXT DEFAULT 'manual'"),
+    ("positions", "quantity", "REAL"),
+    ("positions", "t212_ticker", "TEXT"),
+    ("positions", "currency", "TEXT"),
+    # A holding that was in the account before the bot first looked: the floor of its trailing
+    # stop is its price at that moment (stop_base), not the average price it was bought at.
+    ("positions", "stop_base", "REAL"),
+    # The date Trading 212 says a holding was bought (createdAt): shown, never used by a rule.
+    ("positions", "t212_created", "TEXT"),
     # The analyst's queue also holds free-form questions (analyst.py): kind 'ticker' | 'question'.
     ("claude_analysis_queue", "kind", "TEXT DEFAULT 'ticker'"),
     ("claude_analysis_queue", "question", "TEXT"),
@@ -734,14 +766,17 @@ def get_cached_value(conn: sqlite3.Connection, key: str, max_age_seconds: float)
     return row[0]
 
 
-def save_cached_value(conn: sqlite3.Connection, key: str, value: float) -> None:
+def save_cached_value(conn: sqlite3.Connection, key: str, value: float, *, commit: bool = True) -> None:
+    """`commit=False` leaves the row in the caller's open transaction (t212_account's sync
+    commits all of its changes at once)."""
     import datetime as _dt
     conn.execute(
         """INSERT INTO kv_cache (key, value, computed_at) VALUES (?,?,?)
            ON CONFLICT(key) DO UPDATE SET value=excluded.value, computed_at=excluded.computed_at""",
         (key, value, _dt.datetime.now().isoformat()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def save_cached_json(conn: sqlite3.Connection, key: str, obj) -> None:

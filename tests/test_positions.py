@@ -951,3 +951,503 @@ def test_an_oslo_listing_the_model_holds_on_oslo_too_counts(conn, priced):
     _model_position(conn, model.STOCK_BOOK, "NRC", source="NORWAY")
     positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY", closes_fn=lambda t, s=None: [])
     assert [held for _p, _st, held in _rows(conn)] == [True]
+
+
+# ------------------------------------------------------- Trading 212 holdings (t212_account.py)
+def _t212(conn, ticker="DE0007164600", *, source="T212", entry=100.0, days_ago=5, stop=0.10,
+          quantity=10.0, t212_ticker="SAPd_EQ", currency="EUR", insiders=()):
+    """An open position the Trading 212 sync opened (origin 't212')."""
+    conn.execute(
+        "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, stop_pct, origin, "
+        "quantity, t212_ticker, currency) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (ticker, source, (TODAY - dt.timedelta(days=days_ago)).isoformat(), entry,
+         json.dumps(list(insiders)), stop, "t212", quantity, t212_ticker, currency))
+    conn.commit()
+    return next(p for p in positions.open_positions(conn) if p.ticker == ticker)
+
+
+def _snapshots(conn, ticker, rows):
+    """The sync's day prices: rows [(days_ago, price)]."""
+    for days_ago, price in rows:
+        conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES (?,?,?)",
+                     (ticker, (TODAY - dt.timedelta(days=days_ago)).isoformat(), price))
+    conn.commit()
+
+
+def _no_yahoo(monkeypatch):
+    def refuse(*a, **k):
+        raise AssertionError("a Trading 212 holding with no Yahoo listing must not reach Yahoo")
+    monkeypatch.setattr(positions, "_yahoo_close", refuse)
+    monkeypatch.setattr(paper, "_closes", refuse)
+
+
+def test_a_position_built_the_old_way_is_a_manual_one():
+    pos = positions.Position(1, "GME", None, "2026-10-01", 23.1, [], None, None, None, None, 0.10)
+    assert (pos.origin, pos.quantity, pos.t212_ticker, pos.currency) == ("manual", None, None, None)
+
+
+def test_a_trading_212_position_reads_back_with_its_fields(conn):
+    pos = _t212(conn)
+    assert (pos.origin, pos.quantity, pos.t212_ticker, pos.currency, pos.source) == \
+        ("t212", 10.0, "SAPd_EQ", "EUR", "T212")
+    assert _open(conn, "AAA").origin == "manual"
+
+
+def test_an_older_positions_table_gains_the_trading_212_columns(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT NOT NULL, "
+                "source TEXT, opened_at TEXT NOT NULL, entry_price REAL NOT NULL, "
+                "insiders TEXT NOT NULL DEFAULT '[]', signal_id INTEGER, closed_at TEXT, "
+                "close_reason TEXT, close_alerted_at TEXT)")
+    old.execute("INSERT INTO positions (ticker, opened_at, entry_price) VALUES ('OLD', '2026-01-05', 10.0)")
+    old.commit()
+    old.close()
+    migrated = db.connect(str(path))
+    [pos] = positions.open_positions(migrated)
+    assert (pos.ticker, pos.origin, pos.quantity, pos.t212_ticker, pos.currency) == \
+        ("OLD", "manual", None, None, None)
+    assert (pos.stop_base, pos.t212_created) == (None, None)
+    tables = {r[0] for r in migrated.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"t212_prices", "t212_equity"} <= tables
+    migrated.close()
+
+
+def test_the_days_price_and_account_rows_are_one_a_day(conn):
+    conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES ('GME', '2026-10-01', 23.0)")
+    conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES ('GME', '2026-10-01', 24.0)")
+    for value in (1000.0, 1100.0):
+        conn.execute("INSERT OR REPLACE INTO t212_equity (date, total_value, invested_value, invested_cost, "
+                     "cash_free, currency) VALUES ('2026-10-01', ?, 900, 800, 100, 'EUR')", (value,))
+    assert conn.execute("SELECT price FROM t212_prices").fetchall() == [(24.0,)]
+    assert conn.execute("SELECT total_value FROM t212_equity").fetchall() == [(1100.0,)]
+
+
+def test_the_snapshots_are_the_history_of_a_holding_with_no_yahoo_listing(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    _snapshots(conn, "DE0007164600", [(2, 110.0), (3, 105.0), (1, 120.0)])
+    _snapshots(conn, "OTHER", [(1, 1.0)])
+    series = [(_d(3), 105.0), (_d(2), 110.0), (_d(1), 120.0)]
+    assert positions.daily_closes("DE0007164600", "T212", conn=conn) == series
+    assert positions.last_close("DE0007164600", "T212", conn=conn, today=TODAY) == 120.0
+    assert positions.daily_closes("DE0007164600", "T212") == []           # no database: nothing to read
+    assert positions.last_close("DE0007164600", "T212") is None
+    assert positions.daily_closes("DE0007164600", "BAFIN", conn=conn) == []   # only a T212 holding has them
+    assert positions.last_close("NOPE00000000", "T212", conn=conn, today=TODAY) is None
+
+
+def _d(days_ago):
+    return (TODAY - dt.timedelta(days=days_ago)).isoformat()
+
+
+def test_a_trading_212_holding_with_no_yahoo_listing_trips_its_stop_on_the_snapshots(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    _t212(conn, entry=100.0, stop=0.10, days_ago=5)
+    _snapshots(conn, "DE0007164600", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 116.0
+    assert alert.detail == "−10% от максимума 130.00"                    # today's snapshot is not a close yet
+
+
+def test_above_its_stop_a_trading_212_holding_stays(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    _t212(conn, entry=100.0, stop=0.10, days_ago=5)
+    _snapshots(conn, "DE0007164600", [(4, 110.0), (3, 130.0), (0, 118.0)])
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []
+
+
+def test_a_us_trading_212_holding_is_priced_from_yahoo_like_a_bought_one(conn, monkeypatch):
+    seen = []
+    bars = _held_bars([], [100.0, 130.0, 125.0])
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: seen.append(symbol) or bars)
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: seen.append(symbol) or 116.0)
+    _t212(conn, "GME", source=None, entry=100.0, stop=0.10, t212_ticker="GME_US_EQ", currency="USD")
+    _snapshots(conn, "GME", [(0, 129.0)])                       # the snapshot is not what the exits read
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 116.0 and set(seen) == {"GME"}
+
+
+def test_explicit_seams_still_win_for_a_trading_212_holding(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    _t212(conn, entry=100.0, stop=0.10)
+    _snapshots(conn, "DE0007164600", [(0, 50.0)])
+    seen = []
+    alerts = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: seen.append((t, s)) or 99.0,
+                                   closes_fn=lambda t, s=None: [], news_fn=lambda t, s=None: [])
+    assert alerts == [] and seen == [("DE0007164600", "T212")]
+
+
+def test_the_status_of_a_trading_212_holding_reads_its_snapshots(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    pos = _t212(conn, entry=100.0, stop=0.10)
+    _snapshots(conn, "DE0007164600", [(3, 130.0), (0, 120.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (120.0, 130.0)
+    assert st["result"] == pytest.approx(0.20)
+
+
+def test_an_oslo_insider_selling_closes_a_trading_212_holding_of_the_same_company(conn):
+    """Trading 212 sells Equinor as a Frankfurt listing keyed by its ISIN; Oslo's insiders trade
+    it as EQNR. norway's ISIN cache ties the two."""
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    _t212(conn, "NO0010096985", t212_ticker="EQNRd_EQ", insiders=["Boss Person"])
+    conn.execute(
+        "INSERT INTO norway_purchases (message_id, person, issuer_name, ticker, txn_type, "
+        "txn_date, shares, price, currency, value, source_url) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (1, "Boss Person", "Equinor ASA", "EQNR", "S", _d(1), 1000, 300.0, "NOK", 300_000, "u"))
+    conn.commit()
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=_no_price)
+    assert alert.trigger == "insider_sell" and "Oslo" in alert.detail
+
+
+def test_the_oslo_ticker_of_an_isin_comes_from_the_cache(conn):
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('NONE', '', '2026-09-01T00:00:00')")
+    assert positions.oslo_ticker(conn, "NO0010096985") == "EQNR"
+    assert positions.oslo_ticker(conn, "DE0007164600") is None
+    assert positions.oslo_ticker(conn, "") is None
+
+
+def test_a_trading_212_holding_takes_its_insiders_by_isin_or_by_its_oslo_ticker(conn):
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    _strong_journal(conn, "EQNR", ["US Boss"], source="SEC")             # the US EQNR: another listing
+    _strong_journal(conn, "EQNR", ["Oslo Boss"], source="NORWAY")
+    _strong_journal(conn, "EQNR", ["US Boss 2"], source="SEC")
+    sig = positions._buy_signal(conn, "NO0010096985", "T212")
+    assert sig is not None and json.loads(sig[1]) == ["Oslo Boss"]
+    _strong_journal(conn, "DE0007164600", ["Vorstand"], source="BAFIN")
+    assert json.loads(positions._buy_signal(conn, "DE0007164600", "T212")[1]) == ["Vorstand"]
+    _strong_journal(conn, "NO0010096985", ["Later By Isin"], source="BAFIN")
+    assert json.loads(positions._buy_signal(conn, "NO0010096985", "T212")[1]) == ["Later By Isin"]
+
+
+def test_find_open_and_the_name_a_holding_is_shown_by(conn):
+    sap = _t212(conn)
+    gme = _t212(conn, "GME", source=None, t212_ticker="GME_US_EQ", currency="USD")
+    _open(conn, "AAA")
+    assert positions.find_open(conn, "gme").id == gme.id and positions.find_open(conn, "ZZZ") is None
+    assert positions.display_name(sap) == "SAP"                       # SAPd_EQ: the symbol, not the ISIN
+    assert positions.display_name(gme) == "GME"
+    assert positions.display_name(positions.find_open(conn, "AAA")) == "AAA"
+    coin = positions.Position(9, "CRYPTO:BTC", "CRYPTO", "2026-10-01", 1.0, [], None, None, None, None)
+    assert positions.display_name(coin) == "BTC"
+
+
+def test_portfolio_rows_can_keep_to_the_manual_positions(conn, monkeypatch):
+    monkeypatch.setattr(positions, "last_close", lambda t, s=None: 110.0)
+    monkeypatch.setattr(positions, "daily_closes", lambda t, s=None: [])
+    _t212(conn, "GME", source=None, t212_ticker="GME_US_EQ")
+    _open(conn, "AAA", 100.0, stop=0.10)
+    assert [p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY, origin="manual")] == ["AAA"]
+    assert {p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY)} == {"AAA", "GME"}
+
+
+def test_find_holding_is_the_trading_212_holding_meant_by_its_ticker_or_its_us_code(conn):
+    sap = _t212(conn)                                              # keyed DE0007164600, shown as SAP
+    gme = _t212(conn, "GME", source=None, t212_ticker="GME_US_EQ", currency="USD")
+    meta = _t212(conn, "META", source=None, t212_ticker="FB_US_EQ", currency="USD")       # an old code
+    brk = _t212(conn, "US0846707026", t212_ticker="BRK_B_US_EQ", currency="USD")          # keyed by its ISIN
+    _open(conn, "AAA")
+    assert positions.find_holding(conn, "DE0007164600").id == sap.id
+    assert positions.find_holding(conn, "sap") is None             # SAP is the US stock, not SAPd_EQ
+    assert positions.find_holding(conn, "GME").id == gme.id
+    assert positions.find_holding(conn, "meta").id == meta.id and positions.find_holding(conn, "FB").id == meta.id
+    assert positions.find_holding(conn, "BRK.B").id == brk.id      # a US code names it however it is keyed
+    assert positions.find_holding(conn, "AAA") is None             # a /bought position is not a holding
+    assert positions.find_holding(conn, "ZZZ") is None
+
+
+def test_the_headlines_of_a_trading_212_holding_of_an_oslo_company_are_its_oslo_listings(conn, monkeypatch):
+    """Trading 212 sells a Norwegian company as a Frankfurt listing, which has no news feed of its
+    own here (an ISIN has no Yahoo symbol): the headlines are read on the Oslo listing, the way its
+    insiders are."""
+    _no_yahoo(monkeypatch)
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    _t212(conn, "NO0010096985", t212_ticker="EQNRd_EQ", stop=0.10)
+    _t212(conn, "DE0007164600", days_ago=4)                         # no Oslo listing: asked as it is
+    _snapshots(conn, "NO0010096985", [(0, 100.0)])
+    _snapshots(conn, "DE0007164600", [(0, 100.0)])
+    asked = []
+
+    def news_fn(ticker, source=None):
+        asked.append((ticker, source))
+        return _RED if ticker == "EQNR" else []
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=news_fn)
+    assert asked == [("EQNR", "NORWAY"), ("DE0007164600", "T212")]
+    assert alert.trigger == "news" and alert.position.ticker == "NO0010096985"
+
+
+# ------------------------------------- holdings that pre-date tracking: the stop's floor (stop_base)
+def _legacy(conn, ticker="GME", *, entry=100.0, base=50.0, stop=0.10, days_ago=0, created="2024-05-01"):
+    """A holding that was in the account before the bot looked, as the first sync opens it: its
+    clock starts when tracking starts, it is entered at Trading 212's average price, and the floor
+    of its stop is its price at that moment."""
+    conn.execute(
+        "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, stop_pct, origin, "
+        "quantity, t212_ticker, currency, stop_base, t212_created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (ticker, None, _d(days_ago), entry, "[]", stop, "t212", 10.0, f"{ticker}_US_EQ", "USD", base, created))
+    conn.commit()
+    return positions.find_open(conn, ticker)
+
+
+def test_a_position_reads_back_its_stop_base_and_its_trading_212_date(conn):
+    pos = _legacy(conn)
+    assert (pos.stop_base, pos.t212_created) == (50.0, "2024-05-01")
+    manual = _open(conn, "AAA")
+    assert (manual.stop_base, manual.t212_created) == (None, None)
+    old_way = positions.Position(1, "GME", None, "2026-10-01", 23.1, [], None, None, None, None, 0.10)
+    assert (old_way.stop_base, old_way.t212_created) == (None, None)
+
+
+def test_the_stop_base_is_the_floor_of_the_peak_in_place_of_the_entry(conn):
+    """Bought at 100, at 50 when tracking began: the stop is measured from 50, so a holding that is
+    deep under water is not stopped out the day the bot first sees it."""
+    _legacy(conn, entry=100.0, base=50.0, stop=0.10, days_ago=3)
+    before = _held_bars([200.0] * 3, [], days_ago=3)                # its old highs are not the peak either
+    assert _check(conn, price=50.0, bars=before) == []
+    assert _check(conn, price=45.1, bars=before) == []
+    [alert] = _check(conn, price=45.0, bars=before)
+    assert alert.trigger == "trailing_stop" and alert.detail == "−10% от максимума 50.00"
+
+
+def test_a_close_since_tracking_began_raises_the_peak_above_the_stop_base(conn):
+    _legacy(conn, entry=100.0, base=50.0, stop=0.10, days_ago=3)
+    bars = _held_bars([200.0] * 3, [52.0, 60.0, 58.0], days_ago=3)
+    assert _check(conn, price=54.1, bars=bars) == []
+    [alert] = _check(conn, price=54.0, bars=bars)
+    assert alert.trigger == "trailing_stop" and alert.detail == "−10% от максимума 60.00"
+
+
+def test_the_status_of_a_legacy_holding_is_its_real_result_and_the_stop_from_its_floor(conn):
+    pos = _legacy(conn, entry=100.0, base=50.0, stop=0.10)
+    st = positions.position_status(pos, TODAY, price_fn=lambda t, s=None: 50.0, closes_fn=lambda t, s=None: [])
+    assert st["result"] == pytest.approx(-0.50)                     # against the average price paid
+    assert (st["peak"], st["stop_pct"]) == (50.0, 0.10) and st["stop_level"] == pytest.approx(45.0)
+    assert st["to_stop"] == pytest.approx(0.10) and st["days"] == 0
+
+
+def test_a_legacy_holding_with_no_stored_stop_sizes_it_from_the_closes_before_tracking(conn):
+    _legacy(conn, entry=100.0, base=50.0, stop=None, days_ago=2)
+    stop = model_score.stop_distance(_CHOPPY, "stock")
+    bars = _held_bars(_CHOPPY, [50.0, 50.0], days_ago=2)
+    [alert] = _check(conn, price=50.0 * (1 - stop) - 0.01, bars=bars)
+    assert alert.trigger == "trailing_stop" and alert.detail == f"−{stop * 100:.0f}% от максимума 50.00"
+
+
+def test_a_position_without_a_stop_base_keeps_the_entry_as_its_floor(conn):
+    _t212(conn, "GME", source=None, entry=100.0, stop=0.10, t212_ticker="GME_US_EQ", currency="USD")
+    [alert] = _check(conn, price=90.0, bars=[])
+    assert alert.detail == "−10% от максимума 100.00"
+
+
+# ------------------------------------- K1: a holding Yahoo has nothing for is priced from its day prices
+def _us_holding(conn, **over):
+    """A Trading 212 holding keyed by its US symbol (like a /bought position)."""
+    fields = dict(source=None, entry=100.0, stop=0.10, days_ago=5, t212_ticker="GME_US_EQ", currency="USD")
+    return _t212(conn, "GME", **{**fields, **over})
+
+
+def _yahoo_has_nothing(monkeypatch):
+    """Yahoo is down, or does not know the symbol: no history (see _no_network_seams), no last close."""
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+
+
+def test_a_us_keyed_holding_yahoo_has_nothing_for_is_priced_from_its_day_prices(conn, monkeypatch):
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 116.0
+    assert alert.detail == "−10% от максимума 130.00"              # today's stored price is not a completed bar
+
+
+def test_the_price_and_the_history_fall_back_each_on_its_own(conn, monkeypatch):
+    """Yahoo has the history but no last close just now: the history is Yahoo's, the price the sync's."""
+    _yahoo_has_nothing(monkeypatch)
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: _held_bars([], [100.0, 130.0, 125.0]))
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(3, 999.0), (0, 116.0)])              # the stored history is not read: Yahoo has one
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.last_price == 116.0 and alert.detail == "−10% от максимума 130.00"
+
+
+def test_a_stale_day_price_is_no_price_for_a_us_keyed_holding_either(conn, monkeypatch, capsys):
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn, days_ago=10)
+    _snapshots(conn, "GME", [(9, 130.0), (4, 50.0)])               # far under the stop, four days ago
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []
+    assert "no price for GME" in capsys.readouterr().out
+
+
+def test_the_status_of_a_us_keyed_holding_yahoo_has_nothing_for_reads_its_day_prices(conn, monkeypatch):
+    _yahoo_has_nothing(monkeypatch)
+    pos = _us_holding(conn)
+    _snapshots(conn, "GME", [(3, 130.0), (0, 120.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (120.0, 130.0) and st["result"] == pytest.approx(0.20)
+    assert positions.last_price(conn, "GME") is None               # as of the real today that price is stale
+
+
+def test_a_bought_position_is_never_priced_from_trading_212_day_prices(conn, monkeypatch):
+    """Day prices left under GME by a holding since sold are not the price of a /bought GME."""
+    _yahoo_has_nothing(monkeypatch)
+    pos = _open(conn, "GME", 100.0, stop=0.10)
+    _snapshots(conn, "GME", [(3, 130.0), (0, 50.0)])
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (None, 100.0)
+
+
+def test_seams_handed_in_are_not_second_guessed(conn, monkeypatch):
+    """A caller's own price and history are what the exits read, whatever is stored."""
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(3, 500.0), (0, 50.0)])
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 95.0,
+                                 closes_fn=lambda t, s=None: [], news_fn=lambda t, s=None: []) == []
+
+
+def test_last_price_is_the_price_the_exits_read_for_a_position(conn, monkeypatch):
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn)
+    today = dt.date.today().isoformat()
+    conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES ('GME', ?, 111.0)", (today,))
+    assert positions.last_price(conn, "GME") == 111.0
+    assert positions.last_price(conn, "ZZZ") is None               # no position: Yahoo's word alone
+
+
+# ------------------------------------- F7: a Yahoo series that is not the holding's does not drive its stop
+def _yahoo_answers(monkeypatch, closes, last=None):
+    """Yahoo knows the symbol: these completed closes (oldest first) and, as its last close, `last`
+    (default: the last of them). Returns the list of the histories asked for."""
+    asked = []
+
+    def history(symbol, days):
+        asked.append(symbol)
+        return list(closes)
+    monkeypatch.setattr(paper, "_closes", history)
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: closes[-1][1] if last is None else last)
+    return asked
+
+
+def _flat_yahoo(price):
+    """Three completed closes at `price`, the last one yesterday."""
+    return _days(TODAY - dt.timedelta(days=3), [price] * 3)
+
+
+def test_a_yahoo_series_far_from_the_day_price_the_sync_stored_does_not_drive_the_stop(conn, monkeypatch):
+    """The holding was keyed by its US symbol when Yahoo had nothing for it, and was priced from the sync's
+    day prices. Yahoo now has a series under that symbol -- an old code's, another instrument's, four times
+    the price: the stop reads the stored Trading 212 series, price and history, not that one."""
+    _yahoo_answers(monkeypatch, _days(TODAY - dt.timedelta(days=3), [480.0, 500.0, 510.0]), last=520.0)
+    pos = _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 116.0
+    assert alert.detail == "−10% от максимума 130.00"
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (116.0, 130.0)
+
+
+@pytest.mark.parametrize("ratio, foreign", [(1.19, False), (1.21, True), (0.81, False), (0.79, True)])
+def test_a_yahoo_series_is_the_holdings_own_within_twenty_percent_of_the_stored_price(
+        conn, monkeypatch, ratio, foreign):
+    yahoo = round(116.0 * ratio, 2)
+    _yahoo_answers(monkeypatch, _flat_yahoo(yahoo))
+    pos = _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == ((116.0, 130.0) if foreign else (yahoo, max(100.0, yahoo)))
+
+
+def test_a_yahoo_series_that_is_the_holdings_own_keeps_driving_its_stop(conn, monkeypatch):
+    _yahoo_answers(monkeypatch, _days(TODAY - dt.timedelta(days=3), [128.0, 127.0, 120.0]), last=118.0)
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []   # 118 is not 10% under 128
+
+
+def test_there_is_no_verdict_on_a_yahoo_series_without_a_fresh_stored_price(conn, monkeypatch):
+    """Nothing to compare with: the day price is four days old (no price), so Yahoo's series stands."""
+    _yahoo_answers(monkeypatch, _flat_yahoo(500.0))
+    pos = _us_holding(conn, days_ago=10)
+    _snapshots(conn, "GME", [(9, 100.0), (4, 116.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (500.0, 500.0)
+
+
+def test_yahoo_with_only_todays_bar_has_no_completed_close_to_compare(conn, monkeypatch):
+    _yahoo_answers(monkeypatch, _days(TODAY, [500.0]))
+    pos = _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (0, 116.0)])
+    assert positions.position_status(pos, TODAY, conn=conn)["last"] == 500.0
+
+
+def test_a_bought_position_never_reads_the_stored_prices_whatever_yahoo_says(conn, monkeypatch):
+    _yahoo_answers(monkeypatch, _flat_yahoo(500.0))
+    pos = _open(conn, "GME", 100.0, stop=0.10)
+    _snapshots(conn, "GME", [(3, 130.0), (0, 116.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (500.0, 500.0)
+
+
+def test_seams_handed_in_are_used_as_given_even_for_a_foreign_looking_series(conn, monkeypatch):
+    _yahoo_answers(monkeypatch, _flat_yahoo(500.0))
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 95.0,
+                                 closes_fn=lambda t, s=None: [], news_fn=lambda t, s=None: []) == []
+
+
+def test_yahoos_history_is_fetched_once_per_position(conn, monkeypatch):
+    asked = _yahoo_answers(monkeypatch, _flat_yahoo(500.0))
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert asked == ["GME"]
+
+
+def test_last_price_is_the_stored_one_when_yahoos_series_is_foreign(conn, monkeypatch):
+    _yahoo_answers(monkeypatch, _flat_yahoo(500.0))
+    _us_holding(conn)
+    conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES ('GME', ?, 111.0)",
+                 (dt.date.today().isoformat(),))
+    assert positions.last_price(conn, "GME") == 111.0
+
+
+# ------------------------------------- a stored Trading 212 day price that is too old is not a price
+def test_a_day_price_older_than_three_days_is_not_a_price(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    _snapshots(conn, "DE0007164600", [(9, 110.0), (4, 120.0)])
+    assert positions.last_close("DE0007164600", "T212", conn=conn, today=TODAY) is None
+    assert len(positions.daily_closes("DE0007164600", "T212", conn=conn)) == 2      # the history stays the history
+    _snapshots(conn, "DE0007164600", [(3, 121.0)])                  # three days old: a weekend and a day
+    assert positions.last_close("DE0007164600", "T212", conn=conn, today=TODAY) == 121.0
+    assert positions.T212_STALE_DAYS == 3
+
+
+def test_the_stop_check_is_skipped_for_a_holding_whose_day_price_is_stale(conn, monkeypatch, capsys):
+    """The sync has not got through for four days. The last price it stored is far under the stop,
+    but it is four days old: it drives no stop, as a holding with no price drives none."""
+    _no_yahoo(monkeypatch)
+    _t212(conn, entry=100.0, stop=0.10, days_ago=10)
+    _snapshots(conn, "DE0007164600", [(9, 130.0), (4, 50.0)])
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []
+    assert "no price for DE0007164600" in capsys.readouterr().out
+    _snapshots(conn, "DE0007164600", [(0, 50.0)])                   # a price of today
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 50.0
+
+
+def test_the_status_of_a_holding_with_a_stale_day_price_has_no_price(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    pos = _t212(conn, entry=100.0, stop=0.10, days_ago=10)
+    _snapshots(conn, "DE0007164600", [(4, 120.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["result"], st["to_stop"]) == (None, None, None)
+    assert st["peak"] == 120.0                                      # the old close still counts for the peak

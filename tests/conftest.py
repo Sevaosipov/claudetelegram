@@ -45,6 +45,16 @@ def _offline(monkeypatch):
     monkeypatch.setattr(curl_cffi.requests.Session, "request", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _no_trading212_key(monkeypatch):
+    """No test reads the owner's Trading 212 key: none in the environment, and the project's .env
+    is not read. A test that needs a key sets a fake one itself."""
+    import trading212
+    monkeypatch.delenv("TRADING212_API_KEY", raising=False)
+    monkeypatch.delenv("TRADING212_API_SECRET", raising=False)
+    monkeypatch.setattr(trading212, "ENV_FILE", pathlib.Path("/nonexistent/disclosure-bot/.env"))
+
+
 @pytest.fixture
 def conn():
     """An empty in-memory database with FX rates pre-seeded.

@@ -664,7 +664,9 @@ def test_portfolio_shows_your_own_positions_with_their_status(conn, replies, mon
     replies.clear()
     tb._handle_message(conn, "/portfolio")
     [text] = replies
-    assert text.startswith("<b>💼 Ваш портфель — 1 позиция</b>\n\n• GRAB: вход 40,00 (")
+    # «💼 Trading 212» comes first (no key here: see the Trading 212 tests below), then what was /bought
+    assert "\n\n<b>✍️ Вне Trading 212</b>\n\n• GRAB: вход 40,00 (" in text
+    assert text.startswith("<b>💼 Trading 212</b>\n") and "Ваш портфель" not in text
     assert "сейчас 50,00 (+25,0%)" in text
     assert "   стоп 34,00 (−15% от максимума 40,00), до стопа 32,0%" in text      # no history: the fallback
     assert text.endswith("/sold TICKER — закрыть, /model — модельный портфель.")
@@ -716,8 +718,10 @@ def test_portfolio_says_when_the_model_holds_the_same_name(conn, replies, monkey
 def test_portfolio_with_nothing_bought_says_how_to_add_one(conn, sent, monkeypatch):
     _never_the_model_summary(monkeypatch)
     tb._handle_message(conn, "/portfolio")
-    assert sent == ["Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
-                    "Модельный портфель: /model."]
+    [text] = sent
+    assert text.endswith("\n\nВаших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
+                         "Модельный портфель: /model.")
+    assert text.startswith("<b>💼 Trading 212</b>\n")              # and why it shows no account: no key
 
 
 def test_portfolio_failure_is_a_reply_not_a_crash(conn, sent, monkeypatch):
@@ -738,7 +742,8 @@ def test_help_for_start_help_unknown_commands_and_empty(conn, analysis, sent, te
 def test_help_text_lists_questions_and_the_portfolio():
     assert "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком TradingView " \
            "и данными бота." in tb.HELP_TEXT
-    assert "/portfolio — ваши позиции (/bought), /model — модельный портфель." in tb.HELP_TEXT.splitlines()
+    assert "/portfolio — ваш счёт Trading 212 и позиции /bought, /model — модельный портфель." \
+        in tb.HELP_TEXT.splitlines()
     assert "/backtest" in tb.HELP_TEXT and "/bought" in tb.HELP_TEXT
 
 
@@ -774,6 +779,323 @@ def test_the_positions_commands_and_backtest_come_first(conn, analysis, sent, mo
     tb._handle_message(conn, "/backtest aapl")
     tb._handle_message(conn, "/positions")
     assert sent[0] == "BT AAPL" and analysis.labels == []
+
+
+# ------------------------------------------------------------------ Trading 212
+_T212_SUMMARY_LINE = "Счёт: €12 346 · вложено €10 000 · P/L +€346 (+3,5%) · свободно €2 000"
+_KEY_HINT = ("Создайте в Trading 212 → Настройки → API ключ только для чтения (Portfolio, Account data) "
+             "и положите в .env")
+
+
+def _t212_holding(**over):
+    import t212_account as ta
+    fields = dict(t212_ticker="GME_US_EQ", name="GameStop", isin="US36467W1099", currency="USD",
+                  quantity=10.0, avg_price=23.10, current_price=24.05,
+                  created_at="2026-09-28T14:03:11.000+02:00", value_eur=207.3, cost_eur=199.0,
+                  pnl_eur=8.30, account_currency="EUR")
+    return ta.T212Position(**{**fields, **over})
+
+
+def _t212_account(monkeypatch, *holdings, error=None):
+    """What Trading 212 answers to the bot's live call (never the network)."""
+    import t212_account as ta
+    summary = ta.T212Summary("EUR", 12345.67, 2000.0, 10345.67, 10000.0, 345.67, 12.5)
+
+    def fetch(session=None):
+        if error is not None:
+            raise error
+        return list(holdings), summary
+    monkeypatch.setattr(ta, "fetch_account", fetch)
+    return fetch
+
+
+def _t212_synced(conn, *holdings, at=None):
+    """The holdings as a sync stored them (no messages)."""
+    import datetime as dt
+    import t212_account as ta
+    summary = ta.T212Summary("EUR", 12345.67, 2000.0, 10345.67, 10000.0, 345.67, 12.5)
+    # Yahoo knows the symbol at about Trading 212's price (one close: too few to size a stop)
+    return ta.sync(conn, fetch=lambda: (list(holdings), summary), notify=lambda text: True,
+                   now=at or dt.datetime.now(), closes_fn=lambda t, s=None: [("2026-08-03", 24.0)])
+
+
+def test_bought_a_ticker_held_in_trading_212_says_it_is_already_tracked(conn, replies):
+    import positions
+    _t212_synced(conn, _t212_holding())
+    for text in ("/bought gme 23.10", "/bought GME"):
+        tb._handle_message(conn, text)
+    assert replies == ["GME уже отслеживается из Trading 212."] * 2
+    [pos] = positions.open_positions(conn)
+    assert (pos.origin, pos.entry_price) == ("t212", 23.10)
+
+
+def test_sold_a_trading_212_holding_says_to_sell_it_there_and_closes_nothing(conn, replies):
+    import positions
+    _t212_synced(conn, _t212_holding(), _t212_holding(t212_ticker="SAPd_EQ", isin="DE0007164600", currency="EUR"))
+    tb._handle_message(conn, "/sold GME")
+    tb._handle_message(conn, "/sold de0007164600")
+    assert replies == ["GME отслеживается из Trading 212: продайте там — бот увидит продажу сам.",
+                       "DE0007164600 отслеживается из Trading 212: продайте там — бот увидит продажу сам."]
+    assert {p.ticker for p in positions.open_positions(conn)} == {"GME", "DE0007164600"}
+
+
+def test_a_frankfurt_holding_is_not_taken_for_the_us_stock_of_the_same_symbol(conn, replies):
+    """SAPd_EQ is shown as SAP, but SAP typed in Telegram is the US listing: hundreds of non-US
+    instruments share a US company's symbol. Only its own key -- the ISIN -- names the holding."""
+    import positions
+    _t212_synced(conn, _t212_holding(t212_ticker="SAPd_EQ", isin="DE0007164600", currency="EUR"))
+    tb._handle_message(conn, "/sold sap")
+    assert replies[-1] == "По SAP нет открытой позиции."
+    tb._handle_message(conn, "/bought SAP 250")                     # the US SAP: a position of its own
+    assert positions.find_open(conn, "SAP").origin == "manual"
+    tb._handle_message(conn, "/sold SAP")
+    assert replies[-1] == "Позиция SAP закрыта."
+    tb._handle_message(conn, "/sold DE0007164600")                  # the holding, by its key
+    assert replies[-1] == ("DE0007164600 отслеживается из Trading 212: продайте там — "
+                           "бот увидит продажу сам.")
+    assert [(p.ticker, p.origin) for p in positions.open_positions(conn)] == [("DE0007164600", "t212")]
+
+
+def test_a_us_holding_is_known_by_its_ticker_and_by_its_trading_212_code(conn, replies):
+    """Meta is held as FB_US_EQ and tracked as META: both names mean that holding."""
+    import positions
+    conn.execute("INSERT INTO t212_instruments (ticker, isin, type, short_name, currency) "
+                 "VALUES ('FB_US_EQ', 'US30303M1027', 'STOCK', 'META', 'USD')")
+    conn.commit()
+    _t212_synced(conn, _t212_holding(t212_ticker="FB_US_EQ", isin="US30303M1027"))
+    assert [p.ticker for p in positions.open_positions(conn)] == ["META"]
+    for text in ("/sold META", "/sold fb", "/bought FB 500", "/bought META"):
+        tb._handle_message(conn, text)
+    assert replies == ["META отслеживается из Trading 212: продайте там — бот увидит продажу сам.",
+                       "FB отслеживается из Trading 212: продайте там — бот увидит продажу сам.",
+                       "FB уже отслеживается из Trading 212.", "META уже отслеживается из Trading 212."]
+    assert [(p.ticker, p.origin) for p in positions.open_positions(conn)] == [("META", "t212")]
+
+
+def test_bought_and_sold_still_work_for_what_is_not_in_trading_212(conn, replies):
+    import positions
+    _t212_synced(conn, _t212_holding())
+    tb._handle_message(conn, "/bought GRAB 18")
+    assert positions.find_open(conn, "GRAB").origin == "manual"
+    tb._handle_message(conn, "/sold GRAB")
+    assert [p.ticker for p in positions.open_positions(conn)] == ["GME"] and "закрыта" in replies[-1]
+
+
+def test_portfolio_asks_trading_212_live_and_shows_the_account_then_the_rest(conn, replies, monkeypatch):
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
+    tb._handle_message(conn, "/bought GRAB 40")
+    _t212_synced(conn, _t212_holding(current_price=23.0))
+    _t212_account(monkeypatch, _t212_holding())                     # now it is 24,05
+    replies.clear()
+    tb._handle_message(conn, "/portfolio")
+    [text] = replies
+    blocks = text.split("\n\n")
+    assert blocks[0] == "<b>💼 Trading 212</b>\n" + _T212_SUMMARY_LINE
+    import datetime as dt
+    held = (dt.date.today() - dt.date(2026, 9, 28)).days            # since Trading 212's purchase date
+    assert blocks[1].splitlines() == [
+        f"• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30, {held} дн.",   # Trading 212's price now
+        # it was in the account before the bot looked: the stop is measured from its price then (23,00)
+        "   стоп 19,55 (−15% от максимума 23,00), до стопа 18,7%"]
+    assert blocks[2] == "<b>✍️ Вне Trading 212</b>" and blocks[3].startswith("• GRAB: вход 40,00 (")
+    assert blocks[4].startswith("Средний результат: +14,6% по 2 позициям\n")     # (+4,1% and +25,0%) / 2
+    assert text.endswith("/sold TICKER — закрыть, /model — модельный портфель.")
+    # the live answer is kept like a sync's
+    assert conn.execute("SELECT price FROM t212_prices WHERE ticker = 'GME'").fetchall() == [(24.05,)]
+
+
+def test_portfolio_shows_the_stored_holdings_when_trading_212_does_not_answer(conn, replies, monkeypatch):
+    import datetime as dt
+    import t212_account as ta
+    _t212_synced(conn, _t212_holding(), at=dt.datetime.now().replace(hour=14, minute=5, second=0))
+    _t212_account(monkeypatch, error=ta.T212Error("ReadTimeout", "network"))
+    tb._handle_message(conn, "/portfolio")
+    [text] = replies
+    head, block = text.split("\n\n")[:2]
+    assert head == ("<b>💼 Trading 212</b>\n"
+                    "⚠️ Trading 212 не ответил (ReadTimeout) — данные на 14:05 последней синхронизации")
+    held = (dt.date.today() - dt.date(2026, 9, 28)).days
+    assert block.startswith(f"• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), $+9,50, {held} дн.\n"
+                            "   стоп ")
+    assert "Счёт:" not in text and _KEY_HINT not in text
+
+
+def test_portfolio_with_no_key_says_so_and_how_to_get_one(conn, replies):
+    tb._handle_message(conn, "/portfolio")                          # no key in the tests
+    assert replies[0].split("\n\n")[0] == "<b>💼 Trading 212</b>\n⚠️ Ключ Trading 212 не задан\n" + _KEY_HINT
+
+
+def test_portfolio_with_a_key_that_lacks_the_rights_says_so_and_how_to_get_one(conn, replies, monkeypatch):
+    import t212_account as ta
+    _t212_account(monkeypatch, error=ta.T212Error(ta.NO_RIGHTS, "forbidden"))
+    tb._handle_message(conn, "/portfolio")
+    assert replies[0].split("\n\n")[0] == (
+        "<b>💼 Trading 212</b>\n⚠️ Ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта\n"
+        + _KEY_HINT)
+
+
+def test_a_trading_212_holding_is_not_listed_again_outside_trading_212(conn, replies, monkeypatch):
+    _t212_synced(conn, _t212_holding())
+    _t212_account(monkeypatch, _t212_holding())
+    tb._handle_message(conn, "/portfolio")
+    assert replies[0].count("GME") == 1 and "Вне Trading 212" not in replies[0]
+    assert "• GME — 10 шт." in replies[0]
+
+
+class _Clock:
+    """A clock the loop's polls move: each poll takes `step` seconds."""
+
+    def __init__(self, start=1000.0, step=100.0):
+        self.t, self.step, self.polls, self.sleeps = start, step, [], []
+
+    def __call__(self):
+        return self.t
+
+    def poll(self, conn, token, chat_id, session):
+        self.polls.append(self.t)
+        self.t += self.step
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+def test_the_loop_syncs_trading_212_at_start_and_then_every_900_seconds(conn, monkeypatch):
+    clock, syncs = _Clock(), []
+    monkeypatch.setattr(tb, "_poll_once", clock.poll)
+    monkeypatch.setattr(tb.t212_account, "sync", lambda c: syncs.append(clock.t))
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=28)
+    assert tb.T212_SYNC_SECONDS == 900
+    assert syncs == [1000.0, 1900.0, 2800.0, 3700.0]                # the first one before the first poll
+    assert len(clock.polls) == 28 and clock.polls[0] == 1000.0
+
+
+def test_the_loop_reads_the_wall_clock_so_a_mac_that_slept_syncs_when_it_wakes(conn, monkeypatch):
+    """time.monotonic stands still while the Mac sleeps; the wall clock does not."""
+    import inspect
+    assert inspect.signature(tb._serve).parameters["clock"].default is time.time
+    clock, syncs = _Clock(step=10.0), []
+
+    def poll(conn_, token, chat_id, session):
+        clock.poll(conn_, token, chat_id, session)
+        if len(clock.polls) == 2:
+            clock.t += 8 * 3600                                     # asleep for eight hours
+    monkeypatch.setattr(tb, "_poll_once", poll)
+    monkeypatch.setattr(tb.t212_account, "sync", lambda c: syncs.append(clock.t))
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=4)
+    assert syncs == [1000.0, 1020.0 + 8 * 3600]                     # at once after the wake, not 15 minutes later
+
+
+def test_a_clock_set_back_does_not_put_the_sync_off(conn, monkeypatch):
+    clock, syncs = _Clock(start=100_000.0, step=10.0), []
+
+    def poll(conn_, token, chat_id, session):
+        clock.poll(conn_, token, chat_id, session)
+        if len(clock.polls) == 1:
+            clock.t -= 50_000.0                                     # the clock was corrected, far back
+    monkeypatch.setattr(tb, "_poll_once", poll)
+    monkeypatch.setattr(tb.t212_account, "sync", lambda c: syncs.append(clock.t))
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=3)
+    assert syncs == [100_000.0, 50_010.0]                           # not 50 000 seconds later
+
+
+@pytest.mark.parametrize("kind", ["unauthorized", "forbidden"])
+def test_after_a_key_error_the_loop_tries_again_in_an_hour_not_in_fifteen_minutes(conn, monkeypatch, kind):
+    """A 401 or a 403 does not heal by itself: asking every 15 minutes only hammers the API."""
+    import t212_account as ta
+    clock, syncs = _Clock(step=300.0), []
+
+    def sync(c):
+        syncs.append(clock.t)
+        return ta.SyncResult(error="ключ", error_kind=kind)
+    monkeypatch.setattr(tb, "_poll_once", clock.poll)
+    monkeypatch.setattr(tb.t212_account, "sync", sync)
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=30)
+    assert tb.T212_KEY_RETRY_SECONDS == 3600
+    assert syncs == [1000.0, 4600.0, 8200.0]
+
+
+def test_any_other_failure_and_a_key_that_works_again_keep_the_fifteen_minutes(conn, monkeypatch):
+    import t212_account as ta
+    clock, syncs = _Clock(step=300.0), []
+    answers = iter([ta.SyncResult(error="ключ", error_kind="forbidden"),          # an hour
+                    ta.SyncResult(error="ReadTimeout", error_kind="network"),      # 15 minutes
+                    ta.SyncResult(), ta.SyncResult(), ta.SyncResult()])            # 15 minutes each
+
+    def sync(c):
+        syncs.append(clock.t)
+        return next(answers)
+    monkeypatch.setattr(tb, "_poll_once", clock.poll)
+    monkeypatch.setattr(tb.t212_account, "sync", sync)
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=20)
+    assert syncs == [1000.0, 4600.0, 5500.0, 6400.0]
+
+
+def test_a_failed_poll_does_not_print_the_bot_token(conn, monkeypatch, capsys):
+    """requests puts the whole URL -- the token in it -- into its error text."""
+    import requests
+    token = "123456789:AAH-fake_TOKEN-value_xyz"
+
+    def poll(conn_, tok, chat_id, session):
+        raise requests.ConnectionError(
+            f"HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: "
+            f"/bot{token}/getUpdates?timeout=25 (Caused by NewConnectionError('nodename nor servname'))")
+    monkeypatch.setattr(tb, "_poll_once", poll)
+    monkeypatch.setattr(tb.t212_account, "sync", lambda c: None)
+    tb._serve(conn, token, "1", object(), clock=lambda: 0.0, sleep=lambda s: None, rounds=2)
+    err = capsys.readouterr().err
+    assert err.count("poll failed") == 2 and "retrying in 5s" in err and "getUpdates" in err
+    assert token not in err and "AAH-fake" not in err and "bot<token>" in err
+
+
+def test_a_sync_that_raises_is_logged_and_the_polling_goes_on(conn, monkeypatch, capsys):
+    clock = _Clock(step=1000.0)
+
+    def boom(c):
+        raise RuntimeError("Authorization: Basic c2VjcmV0")
+    monkeypatch.setattr(tb, "_poll_once", clock.poll)
+    monkeypatch.setattr(tb.t212_account, "sync", boom)
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=3)
+    assert len(clock.polls) == 3
+    err = capsys.readouterr().err
+    assert err.count("RuntimeError") == 3 and "c2VjcmV0" not in err   # the type, never the text
+
+
+def test_a_failed_poll_still_backs_off_and_the_sync_keeps_its_time(conn, monkeypatch, capsys):
+    import requests
+    clock, syncs = _Clock(step=0.0), []
+    answers = iter([requests.ConnectionError("down")] * 3 + [None, requests.ConnectionError("down")])
+
+    def poll(conn_, token, chat_id, session):
+        clock.polls.append(clock.t)
+        answer = next(answers)
+        if answer is not None:
+            raise answer
+    monkeypatch.setattr(tb, "_poll_once", poll)
+    monkeypatch.setattr(tb.t212_account, "sync", lambda c: syncs.append(clock.t))
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=5)
+    assert clock.sleeps == [5, 10, 20, 5]                           # doubled, and back to 5 after a good poll
+    assert syncs == [1000.0] and len(clock.polls) == 5
+
+
+def test_main_runs_the_loop_and_once_only_polls(monkeypatch, tmp_path):
+    served, polled = [], []
+    monkeypatch.setattr(tb, "DB_PATH", tmp_path / "d.db")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setattr(tb, "_serve", lambda conn, token, chat_id, session: served.append((token, chat_id)))
+    monkeypatch.setattr(tb, "_poll_once", lambda conn, token, chat_id, session: polled.append(token))
+    monkeypatch.setattr(tb.t212_account, "sync", lambda c: pytest.fail("--once does not sync"))
+    monkeypatch.setattr(sys, "argv", ["telegram_bot.py", "--once"])
+    assert tb.main() == 0 and polled == ["tok"] and served == []
+    monkeypatch.setattr(sys, "argv", ["telegram_bot.py"])
+    tb.main()
+    assert served == [("tok", "1")] and polled == ["tok"]
+
+
+def test_the_module_docstring_says_the_account_is_only_read():
+    doc = " ".join(tb.__doc__.split())
+    assert "Trading 212" in doc and "every 15 minutes" in doc and "never places an order" in doc
 
 
 # ------------------------------------------------------------------ the runner
