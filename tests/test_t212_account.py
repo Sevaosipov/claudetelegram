@@ -8,6 +8,7 @@ import dataclasses
 import datetime as dt
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -242,29 +243,63 @@ def test_a_norwegian_isin_maps_to_its_oslo_ticker_for_the_insiders(conn):
 
 # ------------------------------------------------------------------ safety (mandatory)
 _SOURCES = [Path(trading212.__file__), Path(ta.__file__)]
+_WRITE_CALLS = (".post(", ".put(", ".patch(", ".delete(", "requests.request(", ".request(")
+_READ_PATHS = {url.removeprefix("https://live.trading212.com") for url in READ_URLS}
 
 
-@pytest.mark.parametrize("path", _SOURCES, ids=lambda p: p.name)
-def test_the_source_has_no_write_call(path):
-    source = path.read_text(encoding="utf-8")
-    for call in (".post(", ".put(", ".patch(", ".delete(", "requests.request(", ".request("):
-        assert call not in source, f"{path.name} contains {call}"
-
-
-@pytest.mark.parametrize("path", _SOURCES, ids=lambda p: p.name)
-def test_every_url_in_the_source_is_a_whitelisted_read(path):
-    source = path.read_text(encoding="utf-8")
-    assert "/orders" not in source and "/order" not in source
-    for url in re.findall(r"https?://[^\s\"'<>)]+", source):
-        assert url in READ_URLS, url
-    paths = {u.removeprefix("https://live.trading212.com") for u in READ_URLS}
-    for found in re.findall(r"/api/v0/[A-Za-z0-9_/.{}-]*", source):
-        assert found in paths, found
+def _violations(source: str) -> list[str]:
+    """Everything in a module's source that could write to Trading 212 or reach an endpoint off
+    the whitelist: a write call, an orders path, a URL or an API path that is not one of the three
+    reads -- in the code, in a comment or in a docstring alike."""
+    found = [f"call {call}" for call in _WRITE_CALLS if call in source]
+    if "/order" in source:
+        found.append("an orders path")
+    found += [f"url {url}" for url in re.findall(r"https?://[^\s\"'<>)]+", source) if url not in READ_URLS]
+    found += [f"path {path}" for path in re.findall(r"/api/v0/[A-Za-z0-9_/.{}-]*", source)
+              if path not in _READ_PATHS]
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             text = node.value
-            if "trading212.com" in text or text.startswith(("http://", "https://", "/api", "/equity")):
-                assert text in READ_URLS, text
+            if ("trading212.com" in text or text.startswith(("http://", "https://", "/api", "/equity"))) \
+                    and text not in READ_URLS:
+                found.append(f"string {text!r}")
+    return found
+
+
+@pytest.mark.parametrize("path", _SOURCES, ids=lambda p: p.name)
+def test_the_source_can_only_read_the_whitelisted_urls(path):
+    """No .post( / .put( / .patch( / .delete( / requests.request(, every URL string one of the
+    whitelisted reads (instruments, positions, account/summary), and no orders path at all."""
+    assert _violations(path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize("bad", [
+    'requests.post(URL, json={"ticker": "GME_US_EQ", "quantity": 1})',
+    'session.put(URL)', 'session.patch(URL)', 'session.delete(URL)',
+    'requests.request("POST", URL)', 'session.request("DELETE", URL)',
+    'URL = "https://live.trading212.com/api/v0/equity/orders/market"',
+    'URL = "https://live.trading212.com/api/v0/equity/history/orders"',
+    'URL = "https://demo.trading212.com/api/v0/equity/positions"',
+    'URL = "https://live.trading212.com/api/v0/equity/pies"',
+    'URL = BASE + "/equity/orders/limit"',
+    'PATH = "/equity/pies"',
+    'PATH = "/api/v0/equity/account/cash"',
+    'URL = "https://example.com/collect"',
+    '# then call https://live.trading212.com/api/v0/equity/orders'])
+def test_the_inspection_catches_a_write_or_a_url_off_the_whitelist(bad):
+    assert _violations(f"import requests\n{bad}\n") != []
+    assert _violations("import requests\nURL = 'https://live.trading212.com/api/v0/equity/positions'\n"
+                       "data = requests.get(URL, headers=h, timeout=20).json()\n") == []
+
+
+def test_no_other_module_of_the_project_talks_to_trading_212():
+    """The two inspected modules are the only ones that name Trading 212's host: nothing else in
+    the project can reach it, so nothing else needs the inspection."""
+    root = Path(ta.__file__).parent
+    files = [f for pattern in ("*.py", "cluster/*.py", "*.sh") for f in root.glob(pattern)]
+    assert len(files) > 40                                           # the project's own code was found
+    talking = sorted(f.name for f in files if "trading212.com" in f.read_text(encoding="utf-8"))
+    assert talking == ["t212_account.py", "trading212.py"]
 
 
 def test_the_client_only_ever_gets_whitelisted_urls(keyed):
@@ -507,6 +542,43 @@ def test_a_failure_while_applying_rolls_everything_back(conn, run, monkeypatch):
     assert ta.last_sync(conn) is None and run.sent == []
 
 
+def test_two_syncs_at_once_do_not_open_the_same_holding_twice(tmp_path):
+    """The Telegram bot and the daily run are two processes. While this sync asks Yahoo for the new
+    holding's history, the other one opens it: this one must see that before it writes."""
+    path = tmp_path / "shared.db"
+    mine, other = db.connect(path), db.connect(path)
+    for c in (mine, other):
+        db.save_cached_value(c, ta.SYNCED_ONCE_KEY, 1.0)
+    sent = []
+
+    def while_yahoo_answers(ticker, source=None):
+        ta.sync(other, fetch=lambda: ([_holding()], SUMMARY), notify=sent.append, now=NOW,
+                closes_fn=lambda t, s=None: [])
+        return GME_DAYS
+    result = ta.sync(mine, fetch=lambda: ([_holding()], SUMMARY), notify=sent.append, now=NOW,
+                     closes_fn=while_yahoo_answers)
+    assert result.opened == [] and len(sent) == 1                   # the other one announced it
+    assert mine.execute("SELECT COUNT(*) FROM positions WHERE ticker = 'GME'").fetchone() == (1,)
+    mine.close()
+    other.close()
+
+
+def test_a_sync_that_cannot_get_the_database_changes_nothing(tmp_path, capsys):
+    path = tmp_path / "shared.db"
+    mine, other = db.connect(path), db.connect(path)
+    mine.execute("PRAGMA busy_timeout = 50")
+    other.execute("BEGIN IMMEDIATE")                                # another writer holds it
+    with pytest.raises(sqlite3.OperationalError):
+        ta.sync(mine, fetch=lambda: ([_holding()], SUMMARY), notify=lambda t: pytest.fail("nothing to say"),
+                now=NOW, closes_fn=lambda t, s=None: [])
+    other.rollback()
+    assert mine.execute("SELECT COUNT(*) FROM positions").fetchone() == (0,)
+    assert ta.sync(mine, fetch=lambda: ([_holding()], SUMMARY), notify=lambda t: True, now=NOW,
+                   closes_fn=lambda t, s=None: []).opened == ["GME"]          # and the next one goes through
+    mine.close()
+    other.close()
+
+
 def test_the_sync_reads_through_the_client_and_only_gets(conn, keyed):
     session = _account()
     result = ta.sync(conn, fetch=lambda: ta.fetch_account(session), notify=lambda t: True, now=NOW,
@@ -687,6 +759,19 @@ def test_the_view_shows_a_holding_it_cannot_key_by_whatever_names_it(conn, no_ya
     nameless = ta.T212Position(None, None, None, None, 1.0, 5.0, 6.0, None, None, None, None, None)
     view = _view(conn, odd, nameless)
     assert [h.name for h in view.holdings] == ["ODD", "?"] and all(h.position is None for h in view.holdings)
+
+
+def test_a_busy_database_does_not_cost_the_live_view(conn, no_yahoo, monkeypatch, capsys):
+    """Storing the day's prices is a side job of /portfolio: when the daily run holds the database,
+    the account is still shown."""
+    import sqlite3
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(ta, "_store_snapshot", locked)
+    view = _view(conn, _holding())
+    assert view.error is None and [h.name for h in view.holdings] == ["GME"] and view.summary == SUMMARY
+    assert "OperationalError" in capsys.readouterr().err
 
 
 def test_the_live_view_only_gets(conn, keyed, no_yahoo):

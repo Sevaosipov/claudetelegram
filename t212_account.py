@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import math
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
@@ -307,8 +308,9 @@ def _open_holding(conn, key: str, source: str | None, h: T212Position, day: str,
     """A position of origin 't212' for a holding seen for the first time: entered at the average
     price paid, opened when Trading 212 says, watching the insiders of the journal's latest signal
     on it, the stop sized from the price history as /bought sizes it. `closes` is that history;
-    None for a holding with no Yahoo listing, which has the day prices stored so far. False (and
-    nothing stored) when there is no price to enter it at."""
+    None for a holding with no Yahoo listing (and for one whose history was not fetched), which
+    has the day prices stored so far. False (and nothing stored) when there is no price to enter
+    it at."""
     entry = _entry(h)
     if entry is None:
         return False
@@ -377,15 +379,22 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
     commits. Fills `result` and returns the messages to send once it is committed."""
     day = now.date().isoformat()
     keyed, unkeyed = _keyed(holdings)
+    # A new US holding's history comes from Yahoo. It is asked for here, on a first look at what is
+    # open and before the write lock: the database is not kept locked while Yahoo answers.
+    known = {p.ticker for p in positions.open_positions(conn)}
+    closes_fn = closes_fn or positions.daily_closes
+    histories = {key: closes_fn(key, source) for key, source, _h in keyed
+                 if key not in known and source != positions.T212_SOURCE}
+
+    # From here the database is this sync's: the Telegram bot and the daily run are two processes,
+    # and what is open is read again under the lock, so a holding the other one has just opened
+    # is not opened twice. (A history that wasn't fetched for it then counts as none.)
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     open_now = positions.open_positions(conn)
     tracked = {p.ticker: p for p in open_now if p.origin == positions.T212}
     manual = {p.ticker: p for p in open_now if p.origin != positions.T212}
     first = db.get_cached_value(conn, SYNCED_ONCE_KEY, _KV_FOREVER) is None
-    # A US holding's history comes from Yahoo. It is asked for here, before the first write: the
-    # database is not kept locked while Yahoo answers.
-    closes_fn = closes_fn or positions.daily_closes
-    histories = {key: closes_fn(key, source) for key, source, _h in keyed
-                 if key not in tracked and key not in manual and source != positions.T212_SOURCE}
 
     _store_snapshot(conn, keyed, summary, day)
     new_texts, sold_texts, names = [], [], []
@@ -592,6 +601,9 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
     try:
         _store_snapshot(conn, _keyed(holdings)[0], summary, now.date().isoformat())
         conn.commit()
+    except sqlite3.Error as e:      # the database is busy (the daily run): still worth showing
+        conn.rollback()
+        print(f"[t212] the day's prices were not stored: {type(e).__name__}", file=sys.stderr)
     except BaseException:
         conn.rollback()
         raise
