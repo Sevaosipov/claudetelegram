@@ -535,7 +535,8 @@ def _close_missing(conn, missing: list[positions.Position], holdings: list[T212P
                      (day, SOLD_REASON, pos.id))
         result.closed.append(pos.ticker)
         texts.append(_sold_text(positions.display_name(pos)))
-    kept = [p for p in missing if p not in sold]
+    closed = {p.id for p in sold}
+    kept = [p for p in missing if p.id not in closed]
     if kept:
         result.held, result.note = [p.ticker for p in kept], reason
     # Who is waiting for a second sync: after a list that could not be checked, everyone it missed
@@ -684,7 +685,7 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
             _take_over(conn, manual[key], source, h)
             result.updated.append(key)
         elif (back := _restore(conn, h, taken | set(manual))) is not None:
-            key = back.ticker
+            key, name = back.ticker, positions.display_name(back)      # as its own row has it
             _store_price(conn, key, day, h.current_price)
             _update_holding(conn, back, h)
             result.updated.append(key)

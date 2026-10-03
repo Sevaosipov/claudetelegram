@@ -857,6 +857,19 @@ def test_a_holding_that_vanishes_and_returns_keeps_its_clock_and_its_stop_base(c
     assert conn.execute("SELECT COUNT(*) FROM positions WHERE ticker = 'GME'").fetchone() == (1,)
 
 
+def test_a_restored_holding_is_named_in_the_first_message_as_its_own_row_has_it(conn, run):
+    """Stored under its ISIN while Yahoo did not know the symbol, sold, and back when Yahoo does:
+    it is the stored row again -- still keyed by its ISIN -- and is listed once, by its name."""
+    run.yahoo = lambda ticker: []
+    run(_holding(), silent=True)                                    # keyed US36467W1099; no message yet
+    run(silent=True, now=NOW + dt.timedelta(hours=1))               # gone
+    run.yahoo = None
+    result = run(_holding(), now=NOW + dt.timedelta(hours=2))       # back, and the first sync that may notify
+    assert result.updated == ["US36467W1099"] and result.opened == []
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (1): GME\n" + LEGACY_LINE]
+    assert [p.ticker for p in positions.open_positions(conn)] == ["US36467W1099"]
+
+
 def test_a_restored_holding_brings_no_burst_of_alerts(conn, run):
     run(_holding(created=OLD, avg=100.0, price=50.0))
     run(now=NOW + dt.timedelta(hours=1))
