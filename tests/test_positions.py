@@ -1008,6 +1008,7 @@ def test_an_older_positions_table_gains_the_trading_212_columns(tmp_path):
     [pos] = positions.open_positions(migrated)
     assert (pos.ticker, pos.origin, pos.quantity, pos.t212_ticker, pos.currency) == \
         ("OLD", "manual", None, None, None)
+    assert (pos.stop_base, pos.t212_created) == (None, None)
     tables = {r[0] for r in migrated.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"t212_prices", "t212_equity"} <= tables
     migrated.close()
@@ -1175,3 +1176,66 @@ def test_the_headlines_of_a_trading_212_holding_of_an_oslo_company_are_its_oslo_
     [alert] = positions.check_exits(conn, today=TODAY, news_fn=news_fn)
     assert asked == [("EQNR", "NORWAY"), ("DE0007164600", "T212")]
     assert alert.trigger == "news" and alert.position.ticker == "NO0010096985"
+
+
+# ------------------------------------- holdings that pre-date tracking: the stop's floor (stop_base)
+def _legacy(conn, ticker="GME", *, entry=100.0, base=50.0, stop=0.10, days_ago=0, created="2024-05-01"):
+    """A holding that was in the account before the bot looked, as the first sync opens it: its
+    clock starts when tracking starts, it is entered at Trading 212's average price, and the floor
+    of its stop is its price at that moment."""
+    conn.execute(
+        "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, stop_pct, origin, "
+        "quantity, t212_ticker, currency, stop_base, t212_created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (ticker, None, _d(days_ago), entry, "[]", stop, "t212", 10.0, f"{ticker}_US_EQ", "USD", base, created))
+    conn.commit()
+    return positions.find_open(conn, ticker)
+
+
+def test_a_position_reads_back_its_stop_base_and_its_trading_212_date(conn):
+    pos = _legacy(conn)
+    assert (pos.stop_base, pos.t212_created) == (50.0, "2024-05-01")
+    manual = _open(conn, "AAA")
+    assert (manual.stop_base, manual.t212_created) == (None, None)
+    old_way = positions.Position(1, "GME", None, "2026-10-01", 23.1, [], None, None, None, None, 0.10)
+    assert (old_way.stop_base, old_way.t212_created) == (None, None)
+
+
+def test_the_stop_base_is_the_floor_of_the_peak_in_place_of_the_entry(conn):
+    """Bought at 100, at 50 when tracking began: the stop is measured from 50, so a holding that is
+    deep under water is not stopped out the day the bot first sees it."""
+    _legacy(conn, entry=100.0, base=50.0, stop=0.10, days_ago=3)
+    before = _held_bars([200.0] * 3, [], days_ago=3)                # its old highs are not the peak either
+    assert _check(conn, price=50.0, bars=before) == []
+    assert _check(conn, price=45.1, bars=before) == []
+    [alert] = _check(conn, price=45.0, bars=before)
+    assert alert.trigger == "trailing_stop" and alert.detail == "−10% от максимума 50.00"
+
+
+def test_a_close_since_tracking_began_raises_the_peak_above_the_stop_base(conn):
+    _legacy(conn, entry=100.0, base=50.0, stop=0.10, days_ago=3)
+    bars = _held_bars([200.0] * 3, [52.0, 60.0, 58.0], days_ago=3)
+    assert _check(conn, price=54.1, bars=bars) == []
+    [alert] = _check(conn, price=54.0, bars=bars)
+    assert alert.trigger == "trailing_stop" and alert.detail == "−10% от максимума 60.00"
+
+
+def test_the_status_of_a_legacy_holding_is_its_real_result_and_the_stop_from_its_floor(conn):
+    pos = _legacy(conn, entry=100.0, base=50.0, stop=0.10)
+    st = positions.position_status(pos, TODAY, price_fn=lambda t, s=None: 50.0, closes_fn=lambda t, s=None: [])
+    assert st["result"] == pytest.approx(-0.50)                     # against the average price paid
+    assert (st["peak"], st["stop_pct"]) == (50.0, 0.10) and st["stop_level"] == pytest.approx(45.0)
+    assert st["to_stop"] == pytest.approx(0.10) and st["days"] == 0
+
+
+def test_a_legacy_holding_with_no_stored_stop_sizes_it_from_the_closes_before_tracking(conn):
+    _legacy(conn, entry=100.0, base=50.0, stop=None, days_ago=2)
+    stop = model_score.stop_distance(_CHOPPY, "stock")
+    bars = _held_bars(_CHOPPY, [50.0, 50.0], days_ago=2)
+    [alert] = _check(conn, price=50.0 * (1 - stop) - 0.01, bars=bars)
+    assert alert.trigger == "trailing_stop" and alert.detail == f"−{stop * 100:.0f}% от максимума 50.00"
+
+
+def test_a_position_without_a_stop_base_keeps_the_entry_as_its_floor(conn):
+    _t212(conn, "GME", source=None, entry=100.0, stop=0.10, t212_ticker="GME_US_EQ", currency="USD")
+    [alert] = _check(conn, price=90.0, bars=[])
+    assert alert.detail == "−10% от максимума 100.00"

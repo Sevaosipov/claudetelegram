@@ -4,7 +4,9 @@ Trading 212 account, and when to close them.
 A position is either reported (origin 'manual': /bought, at the user's own entry price) or read
 from the Trading 212 account (origin 't212': t212_account.py keeps those in step with the
 account, with its quantity and average price, and closes one that was sold there). The bot
-only reads the account and never trades. A Trading 212 holding with a US listing is keyed and
+only reads the account and never trades. A holding that was in the account before the bot first
+looked starts its clock when tracking starts, and its stop is measured from its price then
+(stop_base), not from the average price it was bought at: see _stop_and_peak. A Trading 212 holding with a US listing is keyed and
 priced like a /bought one; any other is keyed by its ISIN with source T212_SOURCE and priced
 from the day prices the sync stores (t212_prices). Every position leaves on the model's own
 exits (model.py), and a close alert fires once per position, on the first of:
@@ -88,6 +90,8 @@ class Position:
     quantity: float | None = None       # a Trading 212 holding's shares
     t212_ticker: str | None = None      # its Trading 212 id: AAPL_US_EQ, SAPd_EQ
     currency: str | None = None         # its instrument's currency (entry_price is in it)
+    stop_base: float | None = None      # a holding that pre-dates tracking: the floor of its stop
+    t212_created: str | None = None     # the date Trading 212 says it was bought (shown only)
 
 
 @dataclass
@@ -100,12 +104,13 @@ class CloseAlert:
 
 
 _COLS = ("id, ticker, source, opened_at, entry_price, insiders, signal_id, closed_at, "
-         "close_reason, close_alerted_at, stop_pct, origin, quantity, t212_ticker, currency")
+         "close_reason, close_alerted_at, stop_pct, origin, quantity, t212_ticker, currency, "
+         "stop_base, t212_created")
 
 
 def _row(r) -> Position:
     return Position(r[0], r[1], r[2], r[3], r[4], json.loads(r[5] or "[]"), r[6], r[7], r[8], r[9], r[10],
-                    r[11] or MANUAL, r[12], r[13], r[14])
+                    r[11] or MANUAL, r[12], r[13], r[14], r[15], r[16])
 
 
 def open_positions(conn) -> list[Position]:
@@ -380,7 +385,11 @@ def _stop_and_peak(pos: Position, bars: list[tuple[str, float]]) -> tuple[float,
     """(the stop's distance, the highest close since the open -- the entry price counts as one)
     of a position, from its completed closes `bars`. A position with no stored stop takes the
     one the closes before its open date give, else the model's fallback for its kind. The one
-    computation behind the trailing-stop alert and the status /portfolio shows."""
+    computation behind the trailing-stop alert and the status /portfolio shows.
+
+    A holding that was in the Trading 212 account before tracking began has a stop_base -- its
+    price when tracking began -- and that, not the average price it was bought at, is the floor
+    of its peak: one that is deep under water is not stopped out the day the bot first sees it."""
     import model
     stop = pos.stop_pct
     if stop is None:
@@ -388,7 +397,8 @@ def _stop_and_peak(pos: Position, bars: list[tuple[str, float]]) -> tuple[float,
         stop = model_score.stop_distance([c for d, c in bars if d < pos.opened_at], kind)
         if stop is None:
             stop = model.FALLBACK_STOP[kind]
-    peak = max([pos.entry_price] + [c for d, c in bars if d >= pos.opened_at])
+    floor = pos.entry_price if pos.stop_base is None else pos.stop_base
+    peak = max([floor] + [c for d, c in bars if d >= pos.opened_at])
     return stop, peak
 
 
@@ -427,7 +437,8 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
       last        the price, or None when there isn't one;
       result      last / entry price - 1, or None;
       days        days since the open;
-      peak        the entry price or the highest completed close since the open;
+      peak        the entry price (a holding that pre-dates tracking: its stop_base) or the
+                  highest completed close since the open;
       stop_pct    the stop's distance: the stored one, else the closes before the open give,
                   else the model's fallback;
       stop_level  peak * (1 - stop_pct): the price the trailing stop fires at;

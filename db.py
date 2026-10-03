@@ -460,8 +460,8 @@ CREATE TABLE IF NOT EXISTS crypto_wallet_snapshots (
 
 -- Positions the user reports via Telegram (/bought, /sold) -- positions.py -- and, with
 -- origin 't212', the holdings the bot reads from the Trading 212 account (t212_account.py;
--- read only: nothing here can place an order). origin, quantity, t212_ticker and currency
--- come from _ADDED_COLUMNS.
+-- read only: nothing here can place an order). origin, quantity, t212_ticker, currency,
+-- stop_base and t212_created come from _ADDED_COLUMNS.
 CREATE TABLE IF NOT EXISTS positions (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker            TEXT NOT NULL,
@@ -622,6 +622,11 @@ _ADDED_COLUMNS = [
     ("positions", "quantity", "REAL"),
     ("positions", "t212_ticker", "TEXT"),
     ("positions", "currency", "TEXT"),
+    # A holding that was in the account before the bot first looked: the floor of its trailing
+    # stop is its price at that moment (stop_base), not the average price it was bought at.
+    ("positions", "stop_base", "REAL"),
+    # The date Trading 212 says a holding was bought (createdAt): shown, never used by a rule.
+    ("positions", "t212_created", "TEXT"),
     # The analyst's queue also holds free-form questions (analyst.py): kind 'ticker' | 'question'.
     ("claude_analysis_queue", "kind", "TEXT DEFAULT 'ticker'"),
     ("claude_analysis_queue", "question", "TEXT"),
