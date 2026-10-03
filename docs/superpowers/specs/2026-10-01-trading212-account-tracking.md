@@ -189,3 +189,93 @@ A «Trading 212» section covers:
 - the read-only key recommendation (create a key without order permissions);
 - `--check`;
 - that the bot never places orders.
+
+## Amendment (coordinator rulings, 2026-10-03)
+
+Three rulings made after the first implementation. They change §2 (sync), §3 (DB), §6 (`/portfolio`), §8 (the
+analyst) and §9 (CLI). Where they differ from the text above, they win.
+
+### R1. Holdings that pre-date tracking ("legacy") bring no burst of close alerts
+
+Connecting an account that already holds positions must not fire «год в позиции», «стоит на месте» and stops from
+old highs on day one. The bot's rule clock and its stop start when tracking starts, not at the original purchase.
+
+**Which holdings are legacy.** The sync before which no position of origin 't212' was ever stored (open or closed)
+is the one that starts tracking. Every holding it opens was in the account before the bot looked. This keys on the
+stored positions, not on the notification flag (see R3).
+
+**A legacy holding:**
+- `opened_at` is the date of that sync (was: createdAt). The 365-day rule and dead money (60 business days, result
+  below +5% against `entry_price`) count from `opened_at` as they do for any position, so they count from the
+  tracking start.
+- `entry_price` stays `averagePricePaid`. The result shown is the real one.
+- `stop_base` is `currentPrice` at that sync (the last close of the price history when Trading 212 gives no price).
+- `stop_pct` is sized as usual, from the price history before tracking started.
+
+**The stop.** `positions._stop_and_peak` uses `stop_base`, when it is not None, in place of `entry_price` as the
+floor of the peak: the peak is the highest of `stop_base` and the completed closes since `opened_at`. A holding
+that is deep under water does not hit its stop on day one. A fall of `stop_pct` from the peak since tracking began
+fires the trailing stop.
+
+**A holding first seen by a later sync** is a normal new position, as in §2: `opened_at` is its createdAt date
+(today when missing), `entry_price` its average price, `stop_base` NULL.
+
+**A `/bought` position taken over** keeps its own `opened_at` and has no `stop_base`: the bot has watched it since
+the `/bought`.
+
+**DB (§3).** `positions` gets two more nullable columns in `_ADDED_COLUMNS`, and `Position` the matching fields:
+- `stop_base REAL`: the floor of a legacy holding's stop;
+- `t212_created TEXT`: the date Trading 212 says the holding was bought. It is shown, and no rule uses it.
+
+**The first-sync message (§2.7)** gets a second line when a holding it lists is legacy:
+«Для уже купленных бумаг правила выхода считаются с сегодняшнего дня.» When a silent sync stored those holdings
+on an earlier day (R3), the line names that day: «…считаются с 01.10.»
+
+**What is shown (§6, §8).** `/portfolio` and the analyst show the owner's own figures, whatever the rules count
+from:
+- the result is the price against the average price paid;
+- the Trading 212 line ends with the days since Trading 212's purchase date when it is known:
+  «• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30, 5 дн.»;
+- the stop line of a legacy holding reads from its floor: «стоп 45,00 (−10% от максимума 50,00), до стопа 10,0%».
+
+### R2. A message names only what is really watched for its holding
+
+The «📥 Вижу в Trading 212: …» notification ends with what the bot watches for that holding:
+- a US holding: «Слежу: стоп, продажи инсайдеров, новости.»;
+- a holding keyed by its ISIN has no news feed: «Слежу: стоп и срок.»;
+- «…, а также продажи инсайдеров» is added only when the journal matches insiders for it (BaFin and FI by the
+  ISIN, Oslo through the mapped ticker);
+- «…, а также новости» is added only for a company with an Oslo listing, whose headlines are read there;
+- both: «Слежу: стоп и срок, а также продажи инсайдеров и новости.»
+
+The first-sync message lists the holdings and says when the rules start. It makes no claim about news or insiders.
+
+### R3. A silent sync does not use up the first-sync message
+
+- `sync(conn, *, fetch=None, notify=None, now=None, closes_fn=None, silent=False)`. A silent sync stores everything
+  and sends nothing: `notify` is not called.
+- `python t212_account.py --sync` and a `bot.py --no-telegram` run sync silently.
+- The flag `t212_synced_once` is set only by a sync that sent the combined first message, or tried to with the
+  notifications on (a failed send still counts). A silent sync does not set it, and neither does a sync of an
+  account that holds nothing (there is no message to send).
+- The first notifying sync after a silent one sends the combined message and lists every Trading 212 holding the
+  bot tracks, not only what that sync opened.
+- The legacy rule (R1) does not depend on this flag.
+
+### Tests added for the rulings
+
+- **R1:**
+  - a legacy holding bought long ago and deep under water raises no close alert at the first check;
+  - later, a fall of `stop_pct` from the peak since tracking began fires the trailing stop;
+  - the year and dead money count from the tracking start (dead money's result from the average price);
+  - a holding first seen after the first sync opens at its Trading 212 date, with no `stop_base`;
+  - a `/bought` position taken over at the first sync keeps its clock;
+  - the legacy rule keys on stored positions, not on the flag;
+  - `/portfolio` and the analyst show the real result and the days since the purchase.
+- **R2:** the message for a US holding, an ISIN holding with and without matched insiders (BaFin, FI), an Oslo
+  company with and without a signal; the first message claims nothing it does not watch.
+- **R3:**
+  - a silent sync sends nothing and leaves the flag unset;
+  - the next notifying sync lists every tracked holding and sets the flag;
+  - a failed send still sets it, and an empty account does not;
+  - `--sync` and `--no-telegram` are silent.
