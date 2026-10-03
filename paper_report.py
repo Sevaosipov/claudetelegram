@@ -15,6 +15,7 @@ import db
 import model
 import model_score
 import paper
+import t212_account
 import telegram_notify
 from telegram_notify import money_eur, share_pct, signed_pct
 
@@ -317,10 +318,26 @@ def _week_return(conn, today: dt.date, value: float) -> float | None:
     return value / sum(before) - 1
 
 
+def _t212_line(conn, today: dt.date) -> str | None:
+    """«Ваш счёт Trading 212: €X (за неделю ±Y%)»: the owner's own account, from the snapshots the
+    Trading 212 sync stores -- its value on the last day stored on or before `today`, against the
+    last one on or before a week earlier (left out when there is none). None with no value yet."""
+    now = t212_account.account_value(conn, today)
+    if now is None:
+        return None
+    value, currency = now
+    line = f"Ваш счёт Trading 212: {telegram_notify.money(value, currency)}"
+    before = t212_account.account_value(conn, today - dt.timedelta(days=7))
+    if before and before[0]:
+        line += f" (за неделю {signed_pct(value / before[0] - 1)})"
+    return line
+
+
 def format_week(conn, today: dt.date, report, *, html: bool = True, model_failed: bool = False) -> str:
     """The weekly Telegram message (spec 2026-10-01-weekly-model-message.md): what the model bought
     and sold in the week today-6 ... today, what it holds, what it is watching, the groups that
-    started selling, and where the portfolio stands. Always a message, however quiet the week.
+    started selling, the owner's Trading 212 account when the bot tracks it (_t212_line), and
+    where the portfolio stands. Always a message, however quiet the week.
     `report` is model.DayReport (None: the model did not run -- its watch list is then the
     scores the daily run kept). `model_failed`: the week's model pass never got through (the
     Sunday message goes out regardless), which a warning line says. Blocks are joined by a blank line and none has one inside, so a
@@ -353,6 +370,8 @@ def format_week(conn, today: dt.date, report, *, html: bool = True, model_failed
 
     if model_failed:
         parts.append(esc(MODEL_FAILED_WARNING))
+    if account := _t212_line(conn, today):
+        parts.append(esc(account))
     line = f"Портфель: {money_eur(stats['value'])} ({signed_pct(stats['ret'])} с начала)"
     week = _week_return(conn, today, stats["value"])
     if week is not None:

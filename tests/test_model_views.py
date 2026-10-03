@@ -719,6 +719,65 @@ def test_plain_week_has_no_tags(conn):
     assert not _TAGS.search(_week(conn))
 
 
+# ------------------------------------------------- the Trading 212 line of the weekly message
+def _t212_equity(conn, rows, currency="EUR"):
+    """The account's daily snapshots as a sync stores them: rows [(ISO date, total value)]."""
+    for day, value in rows:
+        conn.execute("INSERT OR REPLACE INTO t212_equity (date, total_value, invested_value, invested_cost, "
+                     "cash_free, currency) VALUES (?,?,?,?,?,?)", (day, value, None, None, None, currency))
+    conn.commit()
+
+
+def test_the_week_shows_your_trading_212_account_just_before_the_portfolio_line(conn):
+    _week_model(conn)
+    _t212_equity(conn, [("2026-10-02", 12_000.0), ("2026-10-09", 12_345.67)])
+    blocks = _week(conn).split("\n\n")
+    assert blocks[-2] == "Ваш счёт Trading 212: €12 346 (за неделю +2,9%)"
+    assert blocks[-1].startswith("Портфель: €107 100")
+
+
+def test_the_account_is_valued_on_or_before_today_and_a_week_before(conn):
+    """Today is FRI 09.10: the last snapshot on or before it is of 07.10, and the week is measured
+    from the last one on or before 02.10, which is of 30.09."""
+    _week_model(conn)
+    _t212_equity(conn, [("2026-09-30", 10_000.0), ("2026-10-07", 9_000.0), ("2026-10-10", 99_999.0)])
+    assert "Ваш счёт Trading 212: €9 000 (за неделю −10,0%)" in _week(conn).split("\n\n")
+
+
+@pytest.mark.parametrize("rows", [[("2026-10-08", 12_000.0)],                           # nothing that early
+                                  [("2026-10-01", 0.0), ("2026-10-08", 12_000.0)]])     # nothing to compare with
+def test_the_week_change_is_left_out_when_it_is_not_known(conn, rows):
+    _week_model(conn)
+    _t212_equity(conn, rows)
+    blocks = _week(conn).split("\n\n")
+    assert blocks[-2] == "Ваш счёт Trading 212: €12 000" and "за неделю" not in blocks[-2]
+
+
+def test_without_account_data_there_is_no_trading_212_line(conn):
+    _week_model(conn)
+    assert "Trading 212" not in _week(conn)
+    _t212_equity(conn, [("2026-10-10", 12_000.0)])                 # only a day after today
+    assert "Trading 212" not in _week(conn)
+    conn.execute("INSERT INTO t212_equity (date, total_value) VALUES ('2026-10-05', NULL)")
+    assert "Trading 212" not in _week(conn)
+
+
+def test_the_trading_212_line_stands_between_the_model_warning_and_the_portfolio_line(conn):
+    _week_model(conn)
+    _t212_equity(conn, [("2026-10-09", 12_000.0)])
+    blocks = _week(conn, model_failed=True).split("\n\n")
+    assert blocks[-3] == WARNING and blocks[-2] == "Ваш счёт Trading 212: €12 000"
+    assert blocks[-1].startswith("Портфель: €107 100")
+
+
+def test_the_trading_212_line_is_plain_text_in_html_and_names_another_currency(conn):
+    _week_model(conn)
+    _t212_equity(conn, [("2026-10-02", 10_000.0), ("2026-10-09", 12_000.0)], currency="GBP")
+    text = paper_report.format_week(conn, FRI, None)
+    assert "\n\nВаш счёт Trading 212: £12 000 (за неделю +20,0%)\n\nПортфель: " in text
+    assert set(_TAGS.findall(text)) <= {"<b>", "</b>", "<pre>", "</pre>"}
+
+
 # ---------------------------------------------------------------------- the menu
 def test_menu_signals_print_the_scored_list(conn, capsys, monkeypatch):
     import menu

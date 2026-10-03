@@ -466,6 +466,14 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     return result
 
 
+def account_value(conn, day: dt.date) -> tuple[float, str | None] | None:
+    """(the account's value, its currency) from the last snapshot stored on or before `day`, or
+    None when there is none that early."""
+    row = conn.execute("SELECT total_value, currency FROM t212_equity WHERE date <= ? "
+                       "AND total_value IS NOT NULL ORDER BY date DESC LIMIT 1", (day.isoformat(),)).fetchone()
+    return (row[0], row[1]) if row else None
+
+
 # ------------------------------------------------------------------ what /portfolio shows
 @dataclass
 class Holding:
