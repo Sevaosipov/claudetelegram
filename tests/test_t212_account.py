@@ -245,15 +245,34 @@ def test_a_norwegian_isin_maps_to_its_oslo_ticker_for_the_insiders(conn):
 
 # ------------------------------------------------------------------ safety (mandatory)
 _SOURCES = [Path(trading212.__file__), Path(ta.__file__)]
-_WRITE_CALLS = (".post(", ".put(", ".patch(", ".delete(", "requests.request(", ".request(")
+# a write to the API, or a way round the plain `.get(` the other tests watch
+_WRITE_CALLS = (".post(", ".put(", ".patch(", ".delete(", "requests.request(", ".request(", ".send(",
+                "getattr(", "__import__(")
 _READ_PATHS = {url.removeprefix("https://live.trading212.com") for url in READ_URLS}
+# anything else that can talk to a server: the two modules may import none of it
+_NETWORK_LIBRARIES = {"urllib", "urllib3", "http", "httpx", "httplib2", "aiohttp", "socket", "ssl", "asyncio",
+                      "curl_cffi", "pycurl", "websocket", "websockets", "tornado", "ftplib", "smtplib",
+                      "xmlrpc", "subprocess", "importlib"}
+
+
+def _imported(source: str) -> set[str]:
+    """The top-level names of everything a module imports."""
+    roots = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            roots |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            roots.add(node.module.split(".")[0])
+    return roots
 
 
 def _violations(source: str) -> list[str]:
     """Everything in a module's source that could write to Trading 212 or reach an endpoint off
-    the whitelist: a write call, an orders path, a URL or an API path that is not one of the three
-    reads -- in the code, in a comment or in a docstring alike."""
+    the whitelist: a write call (or `.send(`, `getattr(`, `__import__(`, which could make one
+    unseen), an import of a network library other than requests, an orders path, a URL or an API
+    path that is not one of the three reads -- in the code, in a comment or in a docstring alike."""
     found = [f"call {call}" for call in _WRITE_CALLS if call in source]
+    found += [f"import {name}" for name in sorted(_imported(source) & _NETWORK_LIBRARIES)]
     if "/order" in source:
         found.append("an orders path")
     found += [f"url {url}" for url in re.findall(r"https?://[^\s\"'<>)]+", source) if url not in READ_URLS]
@@ -287,21 +306,39 @@ def test_the_source_can_only_read_the_whitelisted_urls(path):
     'PATH = "/equity/pies"',
     'PATH = "/api/v0/equity/account/cash"',
     'URL = "https://example.com/collect"',
-    '# then call https://live.trading212.com/api/v0/equity/orders'])
+    '# then call https://live.trading212.com/api/v0/equity/orders',
+    'session.send(prepared)', 'getattr(session, "post")(URL)', '__import__("urllib.request")',
+    'import urllib.request', 'from http.client import HTTPSConnection', 'import httpx',
+    'import socket', 'import subprocess', 'from importlib import import_module'])
 def test_the_inspection_catches_a_write_or_a_url_off_the_whitelist(bad):
     assert _violations(f"import requests\n{bad}\n") != []
     assert _violations("import requests\nURL = 'https://live.trading212.com/api/v0/equity/positions'\n"
                        "data = requests.get(URL, headers=h, timeout=20).json()\n") == []
 
 
-def test_no_other_module_of_the_project_talks_to_trading_212():
-    """The two inspected modules are the only ones that name Trading 212's host: nothing else in
-    the project can reach it, so nothing else needs the inspection."""
+_TRADING_212_ONLY = ("trading212.com", "_auth_headers", "INSTRUMENTS_URL", "POSITIONS_URL", "SUMMARY_URL",
+                     "READ_URLS", "TRADING212_API_KEY", "TRADING212_API_SECRET")
+
+
+def test_no_other_module_of_the_project_has_the_key_or_a_trading_212_url():
+    """Trading 212's host, its URL constants, the helper that builds the auth header and the names
+    of the key's variables are referenced in the two inspected modules and nowhere else in the
+    project's code (the tests aside): no other module can reach the API or hold the key, so no
+    other module needs the inspection."""
     root = Path(ta.__file__).parent
     files = [f for pattern in ("*.py", "cluster/*.py", "*.sh") for f in root.glob(pattern)]
     assert len(files) > 40                                           # the project's own code was found
-    talking = sorted(f.name for f in files if "trading212.com" in f.read_text(encoding="utf-8"))
-    assert talking == ["t212_account.py", "trading212.py"]
+    for token in _TRADING_212_ONLY:
+        named = sorted(f.name for f in files if token in f.read_text(encoding="utf-8"))
+        assert set(named) <= {"t212_account.py", "trading212.py"}, f"{token} is in {named}"
+    assert sorted(f.name for f in files if "trading212.com" in f.read_text(encoding="utf-8")) == \
+        ["t212_account.py", "trading212.py"]
+
+
+@pytest.mark.parametrize("path", _SOURCES, ids=lambda p: p.name)
+def test_the_two_modules_reach_the_network_through_requests_alone(path):
+    roots = _imported(path.read_text(encoding="utf-8"))
+    assert "requests" in roots and not roots & _NETWORK_LIBRARIES
 
 
 def test_the_client_only_ever_gets_whitelisted_urls(keyed):
@@ -1102,6 +1139,96 @@ def test_the_result_says_what_kind_of_failure_it_was(conn, run):
     assert run(_holding()).error_kind is None
 
 
+# ---------------------------------------------- M3: a price of zero is not a price
+def test_a_price_of_zero_is_not_stored_and_drives_no_stop(conn, run):
+    _synced_before(conn)
+    run(_holding(**SAP))                                            # 125,00
+    run(_holding(**dict(SAP, price=0.0)), now=NOW + dt.timedelta(days=1))
+    assert conn.execute("SELECT date, price FROM t212_prices").fetchall() == [("2026-10-01", 125.0)]
+    day = NOW.date() + dt.timedelta(days=1)
+    assert positions.last_close("DE0007164600", "T212", conn=conn, today=day) == 125.0
+    assert positions.check_exits(conn, today=day, news_fn=lambda t, s=None: []) == []
+
+
+def test_a_zero_already_in_the_day_prices_is_not_read_as_one(conn):
+    conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES ('X', '2026-10-01', 12.0)")
+    conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES ('X', '2026-10-02', 0.0)")
+    assert positions.t212_closes(conn, "X") == [("2026-10-01", 12.0)]
+
+
+def test_a_holding_that_pre_dates_tracking_and_is_priced_at_zero_takes_its_floor_from_the_history(conn, run):
+    run.yahoo = lambda ticker: _flat(60.0)
+    run(_holding(created=OLD, avg=100.0, price=0.0))
+    pos = positions.find_open(conn, "GME")
+    assert pos.stop_base == 60.0 and conn.execute("SELECT COUNT(*) FROM t212_prices").fetchone() == (0,)
+
+
+def test_the_live_view_shows_no_price_for_a_price_of_zero(conn, run, no_yahoo):
+    _synced_before(conn)
+    run(_holding())
+    [h] = _view(conn, _holding(price=0.0)).holdings
+    assert h.price is None and h.status["last"] is None
+
+
+# ---------------------------------------------- M4: a take-over needs the same listing
+ADR = dict(t212_ticker="EQNR_US_EQ", isin="US29446M1027", avg=25.0, price=26.0)      # Equinor in New York
+
+
+def test_a_us_instrument_does_not_take_over_a_position_bought_on_oslo(conn, run):
+    """EQNR in Oslo and EQNR in New York are two listings: the /bought one stays the owner's own,
+    and the account's holding is tracked beside it, keyed by its ISIN."""
+    _synced_before(conn)
+    oslo = positions.open_position(conn, "EQNR", 270.0, today=dt.date(2026, 9, 1), source="NORWAY",
+                                   closes_fn=lambda t, s=None: [])
+    result = run(_holding(**ADR))
+    assert result.opened == ["US29446M1027"] and result.updated == []
+    by = {p.ticker: p for p in positions.open_positions(conn)}
+    assert (by["EQNR"].id, by["EQNR"].origin, by["EQNR"].source, by["EQNR"].entry_price) == \
+        (oslo.id, "manual", "NORWAY", 270.0)
+    assert (by["US29446M1027"].origin, by["US29446M1027"].source, by["US29446M1027"].t212_ticker) == \
+        ("t212", "T212", "EQNR_US_EQ")
+    assert run.sent[0].startswith("📥 Вижу в Trading 212: EQNR — ") and run.histories == []
+
+
+@pytest.mark.parametrize("source", ["NORWAY", "SWEDEN"])
+def test_with_no_isin_to_key_it_by_such_a_holding_is_left_untracked_and_blocks_no_sale(conn, run, source, capsys):
+    _synced_before(conn)
+    run(_holding(**SAP))
+    positions.open_position(conn, "EQNR", 270.0, today=dt.date(2026, 9, 1), source=source,
+                            closes_fn=lambda t, s=None: [])
+    result = run(_holding("EQNR_US_EQ", None, avg=25.0, price=26.0))
+    assert result.opened == [] and result.closed == ["DE0007164600"]        # SAP was sold: still seen
+    assert positions.find_open(conn, "EQNR").origin == "manual"
+    assert "another exchange" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("source", [None, "SEC", "HOUSE", "SEC13DG"])
+def test_a_us_instrument_takes_over_a_position_bought_as_a_us_stock(conn, run, source):
+    _synced_before(conn)
+    manual = positions.open_position(conn, "GME", 20.0, today=dt.date(2026, 9, 1), source=source,
+                                     closes_fn=lambda t, s=None: [])
+    result = run(_holding())
+    pos = positions.find_open(conn, "GME")
+    assert result.updated == ["GME"] and (pos.id, pos.origin, pos.source) == (manual.id, "t212", source)
+
+
+@pytest.mark.parametrize("source", ["BAFIN", "SWEDEN", None])
+def test_a_holding_takes_over_a_position_bought_under_the_same_isin_whatever_named_it(conn, run, source):
+    _synced_before(conn)
+    manual = positions.open_position(conn, "DE0007164600", 110.0, today=dt.date(2026, 9, 1), source=source,
+                                     closes_fn=lambda t, s=None: [])
+    run(_holding(**SAP))
+    pos = positions.find_open(conn, "DE0007164600")
+    assert (pos.id, pos.origin, pos.source) == (manual.id, "t212", "T212")
+
+
+def test_a_frankfurt_holding_does_not_take_over_the_us_stock_of_the_same_letters(conn, run):
+    _synced_before(conn)
+    us = positions.open_position(conn, "SAP", 250.0, today=dt.date(2026, 9, 1), closes_fn=lambda t, s=None: [])
+    assert run(_holding(**SAP)).opened == ["DE0007164600"]
+    assert positions.find_open(conn, "SAP").id == us.id and positions.find_open(conn, "SAP").origin == "manual"
+
+
 # ---------------------------------------------- R1: holdings that pre-date tracking ("legacy")
 def _exits(conn, today, price, closes=()):
     return positions.check_exits(conn, today=today, price_fn=lambda t, s=None: price,
@@ -1176,7 +1303,7 @@ def test_legacy_keys_on_whether_a_holding_was_ever_stored_not_on_the_message_fla
     pos = positions.find_open(conn, "GME")
     assert (pos.opened_at, pos.stop_base) == (NOW.date().isoformat(), 20.0)
     assert run.sent == ["📥 Вижу в Trading 212: GME — 10 шт. по 23,10 USD. "
-                        "Слежу: стоп, продажи инсайдеров, новости."]       # the flag decides the message only
+                        "Слежу: стоп, срок и новости."]             # the flag decides the message only
 
 
 def test_a_sold_holding_still_counts_as_stored_before(conn, run):
@@ -1217,9 +1344,16 @@ def _watched(run, **holding):
     return run.sent[-1].split(". Слежу: ")[1]
 
 
-def test_a_us_holding_is_watched_for_its_stop_its_insiders_and_its_news(conn, run):
+def test_a_us_holding_with_insiders_is_watched_for_its_stop_their_sales_and_its_news(conn, run):
     _synced_before(conn)
+    _journal(conn, "GME", ["Ryan Cohen"])
     assert _watched(run) == "стоп, продажи инсайдеров, новости."
+
+
+def test_a_us_holding_with_no_matched_insiders_is_not_said_to_be_watched_for_their_sales(conn, run):
+    _synced_before(conn)
+    _journal(conn, "AAPL", ["Tim Cook"])                            # another stock's insiders
+    assert _watched(run) == "стоп, срок и новости."
 
 
 def test_a_holding_with_no_news_feed_and_no_matched_insiders_is_watched_for_its_stop_and_its_time(conn, run):
@@ -1525,8 +1659,37 @@ def test_check_says_the_key_works_with_the_count_and_the_currency_and_nothing_el
     _wire(monkeypatch, session)
     assert ta.main(["--check"]) == 0
     out = capsys.readouterr()
-    assert out.out == "Trading 212: доступ есть, позиций 2, валюта EUR\n" and out.err == ""
+    assert out.out.splitlines()[0] == "Trading 212: доступ есть, позиций 2, валюта EUR" and out.err == ""
     assert session.calls == [("get", ta.POSITIONS_URL), ("get", ta.SUMMARY_URL)]
+
+
+def _check_line(monkeypatch, capsys, positions_payload, summary_payload=None):
+    _wire(monkeypatch, _account(positions_payload, summary_payload))
+    assert ta.main(["--check"]) == 0
+    return capsys.readouterr().out.splitlines()
+
+
+def _payload(ticker, isin, price=10.0, value=100.0):
+    return {"instrument": {"ticker": ticker, "isin": isin, "currency": "EUR"}, "quantity": 1,
+            "currentPrice": price, "averagePricePaid": 9.0, "walletImpact": {"currentValue": value}}
+
+
+def test_check_counts_how_the_holdings_are_keyed_and_priced(keyed, monkeypatch, capsys):
+    held = [_payload("GME_US_EQ", "US36467W1099"), _payload("FB_US_EQ", "US30303M1027", price=0),
+            _payload("SAPd_EQ", "DE0007164600"), _payload("ODDd_EQ", None, price=None)]
+    lines = _check_line(monkeypatch, capsys, held, dict(FULL_SUMMARY, investments={"currentValue": 400.0}))
+    assert lines == ["Trading 212: доступ есть, позиций 4, валюта EUR",
+                     "Ключи: США — 2, ISIN — 1, без ключа — 1; с ценой — 2 из 4; список и сводка сходятся"]
+
+
+def test_check_says_when_the_list_and_the_summary_disagree_or_cannot_be_compared(keyed, monkeypatch, capsys):
+    two = [_payload("GME_US_EQ", "US36467W1099"), _payload("SAPd_EQ", "DE0007164600")]
+    lines = _check_line(monkeypatch, capsys, two, dict(FULL_SUMMARY, investments={"currentValue": 400.0}))
+    assert lines[1] == "Ключи: США — 1, ISIN — 1; с ценой — 2 из 2; список и сводка расходятся на 50%"
+    lines = _check_line(monkeypatch, capsys, two, dict(FULL_SUMMARY, investments={}))
+    assert lines[1] == "Ключи: США — 1, ISIN — 1; с ценой — 2 из 2; список и сводку не сверить"
+    lines = _check_line(monkeypatch, capsys, [], dict(FULL_SUMMARY, investments={"currentValue": 0}))
+    assert lines[1] == "Ключи: США — 0, ISIN — 0; с ценой — 0 из 0; список и сводка сходятся"
 
 
 def test_check_prints_nothing_that_identifies_the_account_or_the_key(keyed, monkeypatch, capsys):
@@ -1627,3 +1790,15 @@ def test_the_readme_says_how_a_holding_that_pre_dates_tracking_is_treated():
                    "не расходует"):                                                     # R3: --sync, --no-telegram
         assert phrase in section, phrase
     assert "может прийти сразу после первой синхронизации" not in section   # no burst of alerts any more
+
+
+def test_the_readme_claims_of_the_safety_tests_only_what_they_prove():
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    assert "Главная защита — ключ без прав на заявки" in section
+    assert "не доказательство" in section                           # an inspection of the text, not a proof
+    for phrase in ("`.send(`", "`getattr(`", "кроме `requests`"):
+        assert phrase in section, phrase
+    assert "торговать нечем" not in section and "падают, если в них появится хоть один вызов" not in section
+    assert "сплит" in section                                       # M10: one false stop after a stock split

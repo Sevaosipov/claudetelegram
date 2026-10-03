@@ -1146,13 +1146,17 @@ def test_portfolio_rows_can_keep_to_the_manual_positions(conn, monkeypatch):
     assert {p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY)} == {"AAA", "GME"}
 
 
-def test_find_holding_is_the_trading_212_holding_meant_by_a_name(conn):
+def test_find_holding_is_the_trading_212_holding_meant_by_its_ticker_or_its_us_code(conn):
     sap = _t212(conn)                                              # keyed DE0007164600, shown as SAP
     gme = _t212(conn, "GME", source=None, t212_ticker="GME_US_EQ", currency="USD")
+    meta = _t212(conn, "META", source=None, t212_ticker="FB_US_EQ", currency="USD")       # an old code
+    brk = _t212(conn, "US0846707026", t212_ticker="BRK_B_US_EQ", currency="USD")          # keyed by its ISIN
     _open(conn, "AAA")
-    assert positions.find_holding(conn, "sap").id == sap.id
     assert positions.find_holding(conn, "DE0007164600").id == sap.id
+    assert positions.find_holding(conn, "sap") is None             # SAP is the US stock, not SAPd_EQ
     assert positions.find_holding(conn, "GME").id == gme.id
+    assert positions.find_holding(conn, "meta").id == meta.id and positions.find_holding(conn, "FB").id == meta.id
+    assert positions.find_holding(conn, "BRK.B").id == brk.id      # a US code names it however it is keyed
     assert positions.find_holding(conn, "AAA") is None             # a /bought position is not a holding
     assert positions.find_holding(conn, "ZZZ") is None
 

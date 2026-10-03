@@ -33,7 +33,8 @@ the holdings as the last sync left them (stored_holdings), with the reason.
 
 Usage:
     python t212_account.py --check    # does the key read the account? prints the number of
-                                      # positions and the currency, or why not -- nothing else
+                                      # positions and the currency, how they are keyed and priced
+                                      # and whether the list adds up -- or why not; nothing else
     python t212_account.py --sync     # one sync now, without the Telegram messages
 """
 from __future__ import annotations
@@ -317,7 +318,7 @@ def last_sync(conn) -> dt.datetime | None:
 def _store_price(conn, ticker: str, day: str, price: float | None) -> None:
     """The day's price of a holding, under its position's ticker: one row a day, the last one of
     the day replacing the earlier ones. Not committed here."""
-    if price is not None:
+    if price is not None and price > 0:         # a price of zero is no price: it must not drive a stop
         conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES (?,?,?)",
                      (ticker, day, price))
 
@@ -393,7 +394,8 @@ def _open_holding(conn, key: str, source: str | None, h: T212Position, day: str,
     stop = model_score.stop_distance([c for _d, c in closes], positions._kind(key))
     base = None
     if legacy:
-        base = h.current_price if h.current_price is not None else (closes[-1][1] if closes else None)
+        priced = h.current_price is not None and h.current_price > 0
+        base = h.current_price if priced else (closes[-1][1] if closes else None)
     conn.execute(
         "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, signal_id, stop_pct, "
         "origin, quantity, t212_ticker, currency, stop_base, t212_created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -421,8 +423,8 @@ def _update_holding(conn, pos: positions.Position, h: T212Position) -> bool:
 
 
 def _take_over(conn, pos: positions.Position, source: str | None, h: T212Position) -> None:
-    """A /bought position in a name the account holds becomes the account's: its quantity and
-    average price are Trading 212's from now on. One keyed by its ISIN is priced from the day
+    """A /bought position in a name the account holds -- the same listing: _same_listing --
+    becomes the account's: its quantity and average price are Trading 212's from now on. One keyed by its ISIN is priced from the day
     prices, so its source becomes T212_SOURCE; a US one keeps the source its signal gave it. Its
     clock is not touched: the bot has watched it since the /bought."""
     entry = _entry(h)
@@ -436,12 +438,12 @@ def _take_over(conn, pos: positions.Position, source: str | None, h: T212Positio
 
 def _watched(conn, key: str, source: str | None, insiders: list[str]) -> str:
     """What the bot really watches for a holding, as its message says it. A US holding: its stop,
-    its insiders' sales, its headlines. A holding keyed by its ISIN has no news feed of its own:
+    its headlines and -- when the journal named some -- its insiders' sales (else its time rules). A holding keyed by its ISIN has no news feed of its own:
     its stop and its time rules -- its insiders' sales only when the journal named some (BaFin
     and FI by the ISIN, Oslo by the listing's ticker), and headlines only through an Oslo
     listing."""
     if source != positions.T212_SOURCE:
-        return "стоп, продажи инсайдеров, новости"
+        return "стоп, продажи инсайдеров, новости" if insiders else "стоп, срок и новости"
     more = (["продажи инсайдеров"] if insiders else []) \
         + (["новости"] if positions.oslo_ticker(conn, key) else [])
     return "стоп и срок" + (", а также " + " и ".join(more) if more else "")
@@ -579,18 +581,30 @@ class _Plan:
     closes: list | None = None
 
 
-def _plan(conn, h: T212Position, tracked_ids: set, bought: set, closes_fn, day: str) -> _Plan:
+def _same_listing(bought: positions.Position, source: str | None) -> bool:
+    """Whether a /bought position under a holding's key is that holding's own listing, so that it
+    can be taken over. A holding keyed by its ISIN is that security whatever source named the
+    position. A US holding is not a position bought on Oslo or Stockholm under the same letters
+    (EQNR in New York is not EQNR.OL)."""
+    return source == positions.T212_SOURCE or bought.source not in positions._VENUE_SOURCES
+
+
+def _plan(conn, h: T212Position, tracked_ids: set, bought: dict, closes_fn, day: str) -> _Plan:
     """The key of a holding. A US one the bot does not track yet has Yahoo asked for its history
     (here, before the lock: the database is not kept locked while Yahoo answers), and is keyed by
     its symbol only when Yahoo's price is its own (_yahoo_is_its_own): else by its ISIN, priced
     from the sync's own day prices. A holding that is tracked already, or goes to an open /bought
-    position, is not put to Yahoo: its position has its key."""
+    position of the same listing, is not put to Yahoo: its position has its key. One whose symbol
+    is a position bought on another exchange is keyed by its ISIN, beside that position."""
     key = position_key(h.t212_ticker, h.isin, conn)
     if key is None:
         return _Plan(h)
     ticker, source = key
-    if source == positions.T212_SOURCE or h.t212_ticker in tracked_ids or ticker in bought:
+    if source == positions.T212_SOURCE or h.t212_ticker in tracked_ids:
         return _Plan(h, ticker, source)
+    if ticker in bought:
+        isin = None if _same_listing(bought[ticker], source) else _isin_key(h.isin)
+        return _Plan(h, isin, positions.T212_SOURCE) if isin else _Plan(h, ticker, source)
     closes = closes_fn(ticker, None)
     if not _yahoo_is_its_own(closes, h.current_price, day):
         isin = _isin_key(h.isin)
@@ -613,7 +627,7 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
     closes_fn = closes_fn or positions.daily_closes
     first_look = positions.open_positions(conn)
     plans = [_plan(conn, h, {p.t212_ticker for p in first_look if p.origin == positions.T212},
-                   {p.ticker for p in first_look if p.origin != positions.T212}, closes_fn, day)
+                   {p.ticker: p for p in first_look if p.origin != positions.T212}, closes_fn, day)
              for h in holdings]
 
     # From here the database is this sync's: the Telegram bot and the daily run are two processes,
@@ -659,6 +673,12 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
         if key in taken:                # a second listing of a name that has its position
             continue                    # (one ISIN held on two exchanges): the first one is it
         name = positions.name_of(key, source, h.t212_ticker)
+        if key in manual and not _same_listing(manual[key], source):
+            # Another listing was /bought under these letters, and there is no ISIN to track this
+            # one by beside it: it is left alone (and is no reason to hold back a sale).
+            print(f"[t212] {name}: a position bought on another exchange has this ticker; "
+                  f"not tracked", file=sys.stderr)
+            continue
         if key in manual:
             _store_price(conn, key, day, h.current_price)
             _take_over(conn, manual[key], source, h)
@@ -963,11 +983,12 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
         else:
             name = positions.name_of(key[0], key[1], h.t212_ticker) if key else _untracked_name(h)
             where = key
+        price = h.current_price if h.current_price is not None and h.current_price > 0 else None
         rows.append(Holding(
-            name=name, quantity=h.quantity, avg_price=h.avg_price, price=h.current_price,
+            name=name, quantity=h.quantity, avg_price=h.avg_price, price=price,
             currency=h.currency, pnl=h.pnl_eur,
             pnl_currency=h.account_currency or (summary.currency if summary else None),
-            position=pos, status=_status(conn, pos, today, h.current_price) if pos else None,
+            position=pos, status=_status(conn, pos, today, price) if pos else None,
             model_holds=bool(where) and _model_holds(conn, where[0], where[1], held),
             opened=created or (pos.opened_at if pos else ""), days=_days_held(created, today)))
     return PortfolioView(rows, summary=summary)
@@ -975,9 +996,10 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
 
 # ------------------------------------------------------------------ command line
 def check(fetch=None) -> tuple[bool, str]:
-    """Whether the key reads the account, and the line to print: the number of positions and the
-    account's currency -- nothing that identifies the account, and never the key -- or why it
-    can't (with the hint when the cure is a read-only key)."""
+    """Whether the key reads the account, and what to print: the number of positions and the
+    account's currency, then how the holdings are keyed and priced and whether the list adds up
+    to the summary (_check_details) -- nothing that identifies the account, and never the key --
+    or why it can't (with the hint when the cure is a read-only key)."""
     try:
         holdings, summary = (fetch or fetch_account)()
     except T212Error as e:
@@ -985,7 +1007,29 @@ def check(fetch=None) -> tuple[bool, str]:
     except ValueError:              # its text is not printed: only what this module wrote is safe
         return False, f"Trading 212: доступа нет — {BAD_ANSWER}"
     return True, (f"Trading 212: доступ есть, позиций {len(holdings)}, "
-                  f"валюта {summary.currency or 'не указана'}")
+                  f"валюта {summary.currency or 'не указана'}\n{_check_details(holdings, summary)}")
+
+
+def _check_details(holdings: list[T212Position], summary: T212Summary) -> str:
+    """The second line of --check: how the holdings would be keyed (a US ticker, an ISIN, neither),
+    how many have a price the bot can use, and whether the list adds up to the summary -- the one
+    thing a sale depends on. Counts and a percentage: nothing that identifies the account."""
+    keys = [position_key(h.t212_ticker, h.isin) for h in holdings]
+    us = sum(1 for k in keys if k is not None and k[1] is None)
+    isin = sum(1 for k in keys if k is not None and k[1] == positions.T212_SOURCE)
+    none = len(keys) - us - isin
+    priced = sum(1 for h in holdings if h.current_price is not None and h.current_price > 0)
+    agrees = _list_agrees(holdings, summary)
+    if agrees is None:
+        adds_up = "список и сводку не сверить"
+    elif agrees:
+        adds_up = "список и сводка сходятся"
+    else:
+        invested = abs(_invested(summary))
+        gap = f" на {abs(_list_gap(holdings, summary)) / invested:.0%}" if invested else ""
+        adds_up = f"список и сводка расходятся{gap}"
+    return (f"Ключи: США — {us}, ISIN — {isin}" + (f", без ключа — {none}" if none else "")
+            + f"; с ценой — {priced} из {len(holdings)}; {adds_up}")
 
 
 def main(argv: list[str] | None = None) -> int:

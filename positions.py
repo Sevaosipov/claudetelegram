@@ -153,13 +153,17 @@ def display_name(pos: Position) -> str:
 
 
 def find_holding(conn, name: str) -> Position | None:
-    """The open Trading 212 holding a user means by `name`: the one keyed by it, else the one
-    shown under it (a holding keyed by its ISIN is shown by its Trading 212 symbol). None when
-    the account has no such holding -- a /bought position is not one."""
+    """The open Trading 212 holding a user means by `name`: the one keyed by it, else the US one
+    whose Trading 212 code is it (Meta is held as FB_US_EQ and tracked as META: both name it).
+    None when the account has no such holding -- a /bought position is not one.
+
+    A holding keyed by its ISIN is NOT found by the symbol it is shown under: hundreds of non-US
+    instruments share a US company's symbol, and «SAP» typed in Telegram is the US listing, not
+    the Frankfurt SAPd_EQ. Its ISIN names it."""
     name = name.strip().upper()
     held = [p for p in open_positions(conn) if p.origin == T212]
     return (next((p for p in held if p.ticker == name), None)
-            or next((p for p in held if display_name(p).upper() == name), None))
+            or next((p for p in held if us_symbol(p.t212_ticker) == name), None))
 
 
 def oslo_ticker(conn, isin: str) -> str | None:
@@ -304,9 +308,10 @@ def _yahoo_close(symbol: str) -> float | None:
 
 def t212_closes(conn, ticker: str) -> list[tuple[str, float]]:
     """The day prices the Trading 212 sync stored for `ticker` (t212_prices), oldest first: the
-    last price of each day, today's included (still in progress, like a Yahoo bar of today)."""
+    last price of each day, today's included (still in progress, like a Yahoo bar of today). Only
+    a price above zero is one."""
     return [(d, float(p)) for d, p in conn.execute(
-        "SELECT date, price FROM t212_prices WHERE ticker = ? AND price IS NOT NULL ORDER BY date",
+        "SELECT date, price FROM t212_prices WHERE ticker = ? AND price > 0 ORDER BY date",
         (ticker,))]
 
 

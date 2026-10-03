@@ -742,7 +742,8 @@ def test_help_for_start_help_unknown_commands_and_empty(conn, analysis, sent, te
 def test_help_text_lists_questions_and_the_portfolio():
     assert "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком TradingView " \
            "и данными бота." in tb.HELP_TEXT
-    assert "/portfolio — ваши позиции (/bought), /model — модельный портфель." in tb.HELP_TEXT.splitlines()
+    assert "/portfolio — ваш счёт Trading 212 и позиции /bought, /model — модельный портфель." \
+        in tb.HELP_TEXT.splitlines()
     assert "/backtest" in tb.HELP_TEXT and "/bought" in tb.HELP_TEXT
 
 
@@ -838,26 +839,37 @@ def test_sold_a_trading_212_holding_says_to_sell_it_there_and_closes_nothing(con
     assert {p.ticker for p in positions.open_positions(conn)} == {"GME", "DE0007164600"}
 
 
-def test_a_holding_is_recognised_by_the_name_it_is_shown_under(conn, replies):
-    """A Frankfurt holding is keyed by its ISIN but shown as SAP: that is what its owner types."""
+def test_a_frankfurt_holding_is_not_taken_for_the_us_stock_of_the_same_symbol(conn, replies):
+    """SAPd_EQ is shown as SAP, but SAP typed in Telegram is the US listing: hundreds of non-US
+    instruments share a US company's symbol. Only its own key -- the ISIN -- names the holding."""
     import positions
     _t212_synced(conn, _t212_holding(t212_ticker="SAPd_EQ", isin="DE0007164600", currency="EUR"))
     tb._handle_message(conn, "/sold sap")
-    tb._handle_message(conn, "/bought SAP 120")
-    assert replies == ["SAP отслеживается из Trading 212: продайте там — бот увидит продажу сам.",
-                       "SAP уже отслеживается из Trading 212."]
-    assert [(p.ticker, p.origin) for p in positions.open_positions(conn)] == [("DE0007164600", "t212")]
-
-
-def test_a_bought_position_of_the_same_name_comes_before_the_holding_shown_under_it(conn, replies):
-    """/bought SAP (the US listing) was recorded before the account was connected: /sold SAP is
-    about that one."""
-    import positions
-    tb._handle_message(conn, "/bought SAP 250")
-    _t212_synced(conn, _t212_holding(t212_ticker="SAPd_EQ", isin="DE0007164600", currency="EUR"))
+    assert replies[-1] == "По SAP нет открытой позиции."
+    tb._handle_message(conn, "/bought SAP 250")                     # the US SAP: a position of its own
+    assert positions.find_open(conn, "SAP").origin == "manual"
     tb._handle_message(conn, "/sold SAP")
-    assert "Позиция SAP закрыта." == replies[-1]
+    assert replies[-1] == "Позиция SAP закрыта."
+    tb._handle_message(conn, "/sold DE0007164600")                  # the holding, by its key
+    assert replies[-1] == ("DE0007164600 отслеживается из Trading 212: продайте там — "
+                           "бот увидит продажу сам.")
     assert [(p.ticker, p.origin) for p in positions.open_positions(conn)] == [("DE0007164600", "t212")]
+
+
+def test_a_us_holding_is_known_by_its_ticker_and_by_its_trading_212_code(conn, replies):
+    """Meta is held as FB_US_EQ and tracked as META: both names mean that holding."""
+    import positions
+    conn.execute("INSERT INTO t212_instruments (ticker, isin, type, short_name, currency) "
+                 "VALUES ('FB_US_EQ', 'US30303M1027', 'STOCK', 'META', 'USD')")
+    conn.commit()
+    _t212_synced(conn, _t212_holding(t212_ticker="FB_US_EQ", isin="US30303M1027"))
+    assert [p.ticker for p in positions.open_positions(conn)] == ["META"]
+    for text in ("/sold META", "/sold fb", "/bought FB 500", "/bought META"):
+        tb._handle_message(conn, text)
+    assert replies == ["META отслеживается из Trading 212: продайте там — бот увидит продажу сам.",
+                       "FB отслеживается из Trading 212: продайте там — бот увидит продажу сам.",
+                       "FB уже отслеживается из Trading 212.", "META уже отслеживается из Trading 212."]
+    assert [(p.ticker, p.origin) for p in positions.open_positions(conn)] == [("META", "t212")]
 
 
 def test_bought_and_sold_still_work_for_what_is_not_in_trading_212(conn, replies):
@@ -1017,6 +1029,23 @@ def test_any_other_failure_and_a_key_that_works_again_keep_the_fifteen_minutes(c
     monkeypatch.setattr(tb.t212_account, "sync", sync)
     tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=20)
     assert syncs == [1000.0, 4600.0, 5500.0, 6400.0]
+
+
+def test_a_failed_poll_does_not_print_the_bot_token(conn, monkeypatch, capsys):
+    """requests puts the whole URL -- the token in it -- into its error text."""
+    import requests
+    token = "123456789:AAH-fake_TOKEN-value_xyz"
+
+    def poll(conn_, tok, chat_id, session):
+        raise requests.ConnectionError(
+            f"HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: "
+            f"/bot{token}/getUpdates?timeout=25 (Caused by NewConnectionError('nodename nor servname'))")
+    monkeypatch.setattr(tb, "_poll_once", poll)
+    monkeypatch.setattr(tb.t212_account, "sync", lambda c: None)
+    tb._serve(conn, token, "1", object(), clock=lambda: 0.0, sleep=lambda s: None, rounds=2)
+    err = capsys.readouterr().err
+    assert err.count("poll failed") == 2 and "retrying in 5s" in err and "getUpdates" in err
+    assert token not in err and "AAH-fake" not in err and "bot<token>" in err
 
 
 def test_a_sync_that_raises_is_logged_and_the_polling_goes_on(conn, monkeypatch, capsys):

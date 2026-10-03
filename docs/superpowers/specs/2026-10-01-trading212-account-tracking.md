@@ -348,3 +348,52 @@ UTX_US_EQ RTX). This replaces §1's "a `…_US_EQ` instrument becomes the US sym
 - **A stale account value is not the account's (§7).** The weekly line is left out when the newest `t212_equity`
   row is more than 3 days older than today. The week change is left out when the snapshot it compares with is more
   than 3 days older than a week ago.
+
+### Minors
+
+- **M1. The reach of the safety tests.**
+  - Trading 212's host, the URL constants, `_auth_headers` and the names of the key's variables are referenced
+    only in `trading212.py` and `t212_account.py`, across all the project's code (tests excluded).
+  - Those two modules import no network library other than `requests`, and contain no `.send(`, `.request(`,
+    `getattr(` or `__import__(` (on top of `.post(`, `.put(`, `.patch(`, `.delete(`).
+  - The README says what the tests prove: an inspection of the source text and of the client's behaviour, not a
+    proof of impossibility. The main protection is a key with no orders permission.
+- **M2. A US holding with no matched insiders** is announced with «Слежу: стоп, срок и новости.» «Продажи
+  инсайдеров» is named only when the journal matched insiders, for a US holding too (this narrows R2).
+- **M3. A price of zero is not a price.** A day price is stored only when it is above 0, and only such rows are
+  read back. A `currentPrice` of 0 or None never becomes a `stop_base` and is shown as no price.
+- **M4. A take-over needs the same listing.** A `/bought` position with source NORWAY or SWEDEN is never taken over
+  by a US instrument under the same letters. That holding is tracked beside it, keyed by its ISIN; with no ISIN
+  it is left untracked (and does not hold back a sale). A holding keyed by its ISIN takes over a position
+  bought under the same ISIN whatever source named it, and never a position keyed by a ticker.
+- **M6. `/bought` and `/sold` "already tracked" matching (§5)** is by the position's ticker or by the symbol of
+  its stored US code only (Meta, held as FB_US_EQ and tracked as META, answers to both). A holding keyed by its
+  ISIN is not matched by the name it is shown under: 475 non-US instruments share a US company's symbol.
+- **M8. `--check` (§9)** prints a second line: «Ключи: США — 7, ISIN — 5; с ценой — 12 из 12; список и сводка
+  сходятся». It counts the holdings keyed as US, as ISIN and (when any) neither, and those with a usable price.
+  It also says whether the list adds up to the summary (I1) — «сходятся», «расходятся на N%» or «не сверить» —
+  because a sale depends on it. Nothing in it identifies the account.
+- **M9.** `telegram_bot`'s poll-error line redacts the bot token (`telegram_notify._redact`): the requests error
+  text carries the URL.
+- **M10.** `HELP_TEXT` says «/portfolio — ваш счёт Trading 212 и позиции /bought, /model — модельный портфель.»
+  The README says that a stock split can cause one false stop alert for a holding priced by Trading 212.
+
+### Tests added for Amendment 2
+
+- **I1:** an empty list with money invested (no closes, no messages, nothing stored); a partial list (opens and
+  updates, no closes, the note, one log line without amounts); the 2 % / €5 tolerance; a genuinely empty account
+  closes; with no summary value a sale needs two syncs in a row (a holding back in between, a failed sync in
+  between, a holding without its value, a list that disagrees in between); a holding that vanishes and returns
+  keeps its clock, its `stop_base` and its used alert, gets no «📥» and no burst; bought back on another day, or
+  with no purchase date, it is a new position.
+- **I2:** FB_US_EQ with short_name META is keyed META; no instrument row or an empty name falls back to the code;
+  Yahoo with no close, a price more than 20 % away or only today's bar keys by ISIN; within 20 % keeps the
+  symbol; a stored position is found by its `t212_ticker` after its key changed; one ISIN on two exchanges in
+  either order; a position stored without an id learns it.
+- **I3:** the warning after 24 hours, once a day, for each kind of failure, not from a silent sync, retried when
+  it did not go out, and ended by a sync that gets through; the hourly retry after 401 and 403; a day price
+  older than 3 days gives no price and no stop, and reads «цена на DD.MM»; the weekly line and its week change
+  with stale snapshots.
+- **Minors:** the detector flags `.send(`, `getattr(`, `__import__(` and network imports; the reach across the
+  project; the watch text of a US holding with and without insiders; a zero price; the take-over rules by
+  listing; `/bought` and `/sold` matching; the second line of `--check`; the redacted poll error; the help text.

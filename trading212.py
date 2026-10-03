@@ -113,7 +113,9 @@ def fetch_instruments(session: requests.Session | None = None) -> list[dict] | N
 def _reason(e: Exception) -> str:
     """Why a call failed, fit for a log: the exception's type and an HTTP status -- never its text,
     which for a requests error can carry the URL or the Authorization header."""
-    status = getattr(getattr(e, "response", None), "status_code", None)
+    status = None
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        status = e.response.status_code
     return f"{type(e).__name__} {status}" if status else type(e).__name__
 
 

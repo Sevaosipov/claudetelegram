@@ -126,7 +126,7 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
-             "/portfolio — ваши позиции (/bought), /model — модельный портфель.\n"
+             "/portfolio — ваш счёт Trading 212 и позиции /bought, /model — модельный портфель.\n"
              "Сводка модельного портфеля приходит по пятницам.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
@@ -504,7 +504,9 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
             _poll_once(conn, token, chat_id, session)
             backoff = 5
         except requests.RequestException as e:
-            print(f"[telegram_bot] poll failed: {e}; retrying in {backoff}s", file=sys.stderr)
+            # requests puts the whole URL -- the bot token in it -- into its error text
+            print(f"[telegram_bot] poll failed: {telegram_notify._redact(str(e), token)}; "
+                  f"retrying in {backoff}s", file=sys.stderr)
             sleep(backoff)
             backoff = min(backoff * 2, 300)
 
