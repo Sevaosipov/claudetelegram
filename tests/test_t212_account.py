@@ -507,7 +507,7 @@ def test_a_failed_fetch_changes_nothing_and_sends_nothing(conn, run, failure):
 
     def fail():
         raise failure
-    result = run(fetch=fail, now=NOW + dt.timedelta(days=1))
+    result = run(fetch=fail, now=NOW + dt.timedelta(hours=1))      # (a day of this is another matter: I3)
     assert result.error and result.opened == result.updated == result.closed == [] and run.sent == []
     assert [conn.execute(f"SELECT * FROM {t}").fetchall() for t in ("positions", "t212_prices", "t212_equity")] == before
 
@@ -1012,6 +1012,96 @@ def test_a_holding_keyed_by_its_isin_is_named_by_its_trading_212_symbol(t212_tic
     assert positions.name_of("US36467W1099", "T212", t212_ticker) == name
 
 
+# ---------------------------------------------- I3: a sync that keeps failing is not silent
+def _down(reason="HTTP 502", kind="status"):
+    def fetch():
+        raise ta.T212Error(reason, kind)
+    return fetch
+
+
+def _bad_payload():
+    raise ValueError("unexpected positions payload: dict")
+
+
+def _empty_but_invested():
+    return [], dataclasses.replace(SUMMARY, invested_value=500.0)
+
+
+def _silent_for_a_day(reason="HTTP 502"):
+    return f"⚠️ Trading 212 не отвечает уже сутки ({reason}): позиции не обновляются."
+
+
+def _hours(n):
+    return NOW + dt.timedelta(hours=n)
+
+
+def test_a_sync_that_has_failed_for_a_day_says_so_once_a_day(conn, run):
+    run(_holding())                                                 # a sync got through at NOW (01.10 14:05)
+    run.sent.clear()
+    assert run(fetch=_down(), now=_hours(23)).error == "HTTP 502" and run.sent == []   # not a day yet
+    run(fetch=_down(), now=_hours(25))                              # 02.10 15:05
+    assert run.sent == [_silent_for_a_day()]
+    run(fetch=_down(), now=_hours(26))                              # the same day: said once
+    assert run.sent == [_silent_for_a_day()]
+    run(fetch=_down("ReadTimeout", "network"), now=_hours(49))      # 03.10: again, with that day's reason
+    assert run.sent == [_silent_for_a_day(), _silent_for_a_day("ReadTimeout")]
+
+
+def test_there_is_nothing_to_miss_before_a_sync_ever_got_through(conn, run):
+    run(fetch=_down(), now=NOW)
+    run(fetch=_down(), now=NOW + dt.timedelta(days=30))
+    assert run.sent == []
+
+
+def test_a_sync_that_gets_through_again_ends_the_warning(conn, run):
+    run(_holding())
+    run(fetch=_down(), now=_hours(25))
+    run(_holding(), now=_hours(26))                                 # it is back
+    run.sent.clear()
+    run(fetch=_down(), now=_hours(27))                              # an hour without one is not a day
+    assert run.sent == []
+
+
+@pytest.mark.parametrize("fetch, reason", [
+    (_down("ключ Trading 212 не подходит", "unauthorized"), "ключ Trading 212 не подходит"),
+    (_down(ta.NO_RIGHTS, "forbidden"), ta.NO_RIGHTS),
+    (_down(ta.NO_KEY, "no_key"), ta.NO_KEY),                        # the key was there, and is gone
+    (_bad_payload, "ответ не разобран"),
+    (_empty_but_invested, "пустой список позиций при вложенных средствах")])
+def test_the_warning_gives_the_reason_whatever_kind_of_failure_it_is(conn, run, fetch, reason):
+    run(_holding())
+    run.sent.clear()
+    assert run(fetch=fetch, now=_hours(25)).error == reason
+    assert run.sent == [_silent_for_a_day(reason)]
+
+
+def test_a_silent_sync_neither_warns_nor_uses_up_the_days_warning(conn, run):
+    run(_holding())
+    run.sent.clear()
+    run(fetch=_down(), now=_hours(25), silent=True)                 # --sync: nothing is sent
+    assert run.sent == []
+    run(fetch=_down(), now=_hours(26))
+    assert run.sent == [_silent_for_a_day()]
+
+
+def test_a_warning_that_did_not_go_out_is_tried_again_at_the_next_sync(conn, run):
+    run(_holding())
+    run.sent.clear()
+    def broken(text):
+        raise RuntimeError("telegram is down")
+    run(fetch=_down(), now=_hours(25), notify=lambda text: False)   # Telegram did not take it
+    run(fetch=_down(), now=_hours(26), notify=broken)
+    run(fetch=_down(), now=_hours(27))
+    assert run.sent == [_silent_for_a_day()]
+
+
+def test_the_result_says_what_kind_of_failure_it_was(conn, run):
+    assert run(fetch=_down(ta.BAD_KEY, "unauthorized")).error_kind == "unauthorized"
+    assert run(fetch=_down(ta.NO_RIGHTS, "forbidden")).error_kind == "forbidden"
+    assert run(fetch=_down("ReadTimeout", "network")).error_kind == "network"
+    assert run(_holding()).error_kind is None
+
+
 # ---------------------------------------------- R1: holdings that pre-date tracking ("legacy")
 def _exits(conn, today, price, closes=()):
     return positions.check_exits(conn, today=today, price_fn=lambda t, s=None: price,
@@ -1298,6 +1388,19 @@ def test_the_live_view_names_a_holding_it_does_not_track_yet_by_its_market_symbo
     _instrument(conn, "FB_US_EQ", "META")
     [h] = _view(conn, _holding(**FB)).holdings
     assert (h.name, h.position) == ("META", None)
+
+
+def test_a_stored_price_older_than_three_days_is_shown_with_its_date_and_drives_no_stop(conn, run, no_yahoo):
+    """No sync for four days: the last stored price is not a price any more. It is shown as the
+    price of its day, and no stop is read from it."""
+    _synced_before(conn)
+    run(_holding())                                                 # 01.10, at 24,05
+    down = _fails(ta.T212Error("ReadTimeout", "network"))
+    [fresh] = _view(conn, fetch=down, now=NOW + dt.timedelta(days=3)).holdings
+    assert (fresh.price, fresh.price_date, fresh.status["last"]) == (24.05, None, 24.05)
+    [stale] = _view(conn, fetch=down, now=NOW + dt.timedelta(days=4)).holdings
+    assert (stale.price, stale.price_date, stale.status["last"]) == (24.05, "2026-10-01", None)
+    assert stale.status["to_stop"] is None
 
 
 def test_the_live_view_stores_the_days_prices_and_account_but_is_not_a_sync(conn, run, no_yahoo):

@@ -80,6 +80,9 @@ SYNCED_ONCE_KEY = "t212_synced_once"    # kv: set by the first sync that got thr
 SYNCED_AT_KEY = "t212_synced_at"        # kv: when the last one did, epoch seconds
 MISSING_KEY = "t212_missing"            # kv (JSON): ids of the positions missing at the last sync
                                         # that had no summary to check the list against
+WARNED_KEY = "t212_silent_{day}"        # kv: the day's «не отвечает уже сутки» warning went out
+SILENT_AFTER = dt.timedelta(hours=24)   # no sync has got through for this long: say so, once a day
+STALE_DAYS = positions.T212_STALE_DAYS  # an account snapshot or a day price older than this is not current
 _KV_FOREVER = 100 * 365 * 86400         # these two never go stale
 
 _sleep = time.sleep                     # the 429 retry's wait (tests replace it)
@@ -293,7 +296,8 @@ class SyncResult:
 
     `held` are the keys of the positions the list did not show and that were NOT closed this
     time, and `note` says why: the list did not add up to the summary, or there was no summary
-    value to check it against and the sale waits for the next sync."""
+    value to check it against and the sale waits for the next sync. `error_kind` tells a key
+    problem (unauthorized, forbidden: asking again soon is no use) from the rest."""
     opened: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
     closed: list[str] = field(default_factory=list)
@@ -301,6 +305,7 @@ class SyncResult:
     at: dt.datetime | None = None
     held: list[str] = field(default_factory=list)
     note: str | None = None
+    error_kind: str | None = None       # T212Error.kind of the failure, or "answer" for a bad answer
 
 
 def last_sync(conn) -> dt.datetime | None:
@@ -692,6 +697,40 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
     return new_texts + sold_texts
 
 
+def _warn_when_silent_for_a_day(conn, reason: str, notify, now: dt.datetime) -> None:
+    """A sync has got through before, and none has for SILENT_AFTER: the positions are not being
+    updated, and the owner is told -- once a day (the day is marked in kv once the message went
+    out, so one that did not go out is tried again at the next sync)."""
+    last = last_sync(conn)
+    if last is None or now - last < SILENT_AFTER:
+        return
+    key = WARNED_KEY.format(day=now.date().isoformat())
+    if db.get_cached_value(conn, key, _KV_FOREVER) is not None:
+        return
+    text = (f"⚠️ Trading 212 не отвечает уже сутки ({telegram_notify._esc(reason)}): "
+            f"позиции не обновляются.")
+    try:
+        sent = (notify or telegram_notify.send_text)(text)
+    except Exception as e:
+        print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
+        return
+    if sent:
+        db.save_cached_value(conn, key, 1.0)
+
+
+def _failed(conn, result: SyncResult, reason: str, kind: str, notify, silent: bool) -> SyncResult:
+    """A sync that changed nothing: the result carries why, the log says it (a missing key once
+    per process), and after a day without a sync that got through the owner is told."""
+    result.error, result.error_kind = reason, kind
+    if kind == "no_key":
+        _say_no_key()
+    else:
+        print(f"[t212] sync failed: {reason}", file=sys.stderr)
+    if not silent:
+        _warn_when_silent_for_a_day(conn, reason, notify, result.at)
+    return result
+
+
 def _say_no_key() -> None:
     global _no_key_logged
     if not _no_key_logged:
@@ -715,8 +754,10 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     that may notify then lists every holding the bot tracks.
 
     With no key it is a quiet no-op, said once per process. A failed fetch -- T212Error, or a
-    ValueError for an answer of the wrong shape -- changes nothing and sends nothing: the result
-    carries the reason. So does an empty list while the summary says money is invested.
+    ValueError for an answer of the wrong shape -- changes nothing: the result carries the
+    reason. So does an empty list while the summary says money is invested. A failure is not
+    announced -- until a sync has got through before and none has for a day: then the owner is
+    told once a day (_warn_when_silent_for_a_day; never by a silent sync).
 
     A holding that is not on the list is closed only when the list can be believed
     (_close_missing): result.held and result.note say what was not closed and why."""
@@ -725,22 +766,13 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     try:
         holdings, summary = (fetch or fetch_account)()
     except T212Error as e:
-        result.error = str(e)
-        if e.kind == "no_key":
-            _say_no_key()
-        else:
-            print(f"[t212] sync failed: {e}", file=sys.stderr)
-        return result
+        return _failed(conn, result, str(e), e.kind, notify, silent)
     except ValueError:              # its text is not printed: only what this module wrote is safe
-        result.error = BAD_ANSWER
-        print(f"[t212] sync failed: {BAD_ANSWER}", file=sys.stderr)
-        return result
+        return _failed(conn, result, BAD_ANSWER, "answer", notify, silent)
     if not holdings and (_invested(summary) or 0) > 0:
         # Money is invested and no position is listed: the list is wrong, not the account empty.
         # Believing it would call every holding sold.
-        result.error = EMPTY_LIST
-        print(f"[t212] sync failed: {EMPTY_LIST}", file=sys.stderr)
-        return result
+        return _failed(conn, result, EMPTY_LIST, "answer", notify, silent)
     try:
         messages = _apply(conn, holdings, summary, now, closes_fn, result, silent)
         conn.commit()
@@ -756,12 +788,17 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     return result
 
 
-def account_value(conn, day: dt.date) -> tuple[float, str | None] | None:
+def account_value(conn, day: dt.date, *, max_age_days: int | None = None) -> tuple[float, str | None] | None:
     """(the account's value, its currency) from the last snapshot stored on or before `day`, or
-    None when there is none that early."""
-    row = conn.execute("SELECT total_value, currency FROM t212_equity WHERE date <= ? "
+    None when there is none that early -- or, with `max_age_days`, when that snapshot is older
+    than that before `day`: the sync has not got through, and an old value is not the account's."""
+    row = conn.execute("SELECT date, total_value, currency FROM t212_equity WHERE date <= ? "
                        "AND total_value IS NOT NULL ORDER BY date DESC LIMIT 1", (day.isoformat(),)).fetchone()
-    return (row[0], row[1]) if row else None
+    if row is None:
+        return None
+    if max_age_days is not None and (day - dt.date.fromisoformat(row[0])).days > max_age_days:
+        return None
+    return row[1], row[2]
 
 
 def stored_account_line(conn) -> str | None:
@@ -789,7 +826,11 @@ class Holding:
     These are the owner's own figures, whatever the bot's rules count from: the result is on the
     average price paid, and `days` is since Trading 212's purchase date (None when it isn't
     known) -- for a holding that pre-dates tracking, not since the tracking start. `opened` (an
-    ISO date: the purchase date, else the tracking start) orders the holdings."""
+    ISO date: the purchase date, else the tracking start) orders the holdings.
+
+    `price_date` is set only when the price is a stored one that is stale (positions.t212_stale):
+    it is then shown as the price of that day, and the status has no price -- no stop is read
+    from it."""
     name: str
     quantity: float | None
     avg_price: float | None
@@ -802,6 +843,7 @@ class Holding:
     model_holds: bool = False
     opened: str = ""
     days: int | None = None
+    price_date: str | None = None       # the day of a stored price too old to be one («цена на DD.MM»)
 
 
 @dataclass
@@ -842,23 +884,26 @@ def _days_held(created: str | None, today: dt.date) -> int | None:
 def stored_holdings(conn, today: dt.date) -> list[Holding]:
     """The holdings as the last sync left them, without a call to Trading 212: quantity and
     average from the positions, the price from the last stored day price, the profit or loss in
-    the instrument's own currency (the account's is only known live)."""
+    the instrument's own currency (the account's is only known live). A stored price older than
+    STALE_DAYS is not a price: it is shown with its date, and the status has none."""
     held = positions._model_names(conn)
     rows = []
     for pos in positions.open_positions(conn):
         if pos.origin != positions.T212:
             continue
         bars = positions.t212_closes(conn, pos.ticker)
-        price = bars[-1][1] if bars else None
+        price_day, price = bars[-1] if bars else (None, None)
+        stale = price_day is not None and positions.t212_stale(price_day, today)
         known = price is not None and pos.quantity is not None and pos.currency
         rows.append(Holding(
             name=positions.display_name(pos), quantity=pos.quantity, avg_price=pos.entry_price,
             price=price, currency=pos.currency,
             pnl=(price - pos.entry_price) * pos.quantity if known else None,
             pnl_currency=pos.currency if known else None, position=pos,
-            status=_status(conn, pos, today, price),
+            status=_status(conn, pos, today, None if stale else price),
             model_holds=_model_holds(conn, pos.ticker, pos.source, held),
-            opened=pos.t212_created or pos.opened_at, days=_days_held(pos.t212_created, today)))
+            opened=pos.t212_created or pos.opened_at, days=_days_held(pos.t212_created, today),
+            price_date=price_day if stale else None))
     return rows
 
 

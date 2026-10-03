@@ -107,6 +107,7 @@ QUESTION_LATER = "Не успел ответить — вопрос в очер�
 API_URL = "https://api.telegram.org/bot{token}/{method}"
 LONG_POLL_SECONDS = 25
 T212_SYNC_SECONDS = 900          # the Trading 212 account is synced at start and then this often
+T212_KEY_RETRY_SECONDS = 3600    # ... but after a 401 or a 403 only this often: a key does not heal by itself
 STATE_OFFSET = "telegram_bot_offset"
 PERSIST_SECONDS = 30 * 365 * 24 * 3600
 
@@ -466,13 +467,17 @@ def _handle_message(conn, text: str) -> None:
     _handle_ticker(conn, asset)
 
 
-def _sync_t212(conn) -> None:
-    """One sync of the Trading 212 account (t212_account.sync). Whatever it raises is logged by
-    its type alone -- never its text -- and the polling goes on."""
+def _sync_t212(conn) -> int:
+    """One sync of the Trading 212 account (t212_account.sync), and how many seconds until the
+    next: T212_SYNC_SECONDS, or T212_KEY_RETRY_SECONDS after a 401 or a 403. Whatever it raises is
+    logged by its type alone -- never its text -- and the polling goes on."""
     try:
-        t212_account.sync(conn)
+        result = t212_account.sync(conn)
     except Exception as e:
         print(f"[telegram_bot] Trading 212 sync failed: {type(e).__name__}", file=sys.stderr)
+        return T212_SYNC_SECONDS
+    kind = result.error_kind if result is not None else None
+    return T212_KEY_RETRY_SECONDS if kind in ("unauthorized", "forbidden") else T212_SYNC_SECONDS
 
 
 def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=time.time,
@@ -484,16 +489,17 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
 
     The clock is the wall clock: time.monotonic stands still while the Mac sleeps, and the first
     thing wanted after a wake is a sync. A clock set back by more than the interval syncs at once
-    too, rather than waiting out the difference."""
-    next_sync = clock()
+    too, rather than waiting out the difference. After a 401 or a 403 the next sync is an hour
+    away, not 15 minutes: the key will not heal by itself."""
+    next_sync, wait = clock(), T212_SYNC_SECONDS
     backoff = 5
     done = 0
     while rounds is None or done < rounds:
         done += 1
         now = clock()
-        if now >= next_sync or next_sync - now > T212_SYNC_SECONDS:
-            next_sync = now + T212_SYNC_SECONDS
-            _sync_t212(conn)
+        if now >= next_sync or next_sync - now > wait:
+            wait = _sync_t212(conn)
+            next_sync = now + wait
         try:
             _poll_once(conn, token, chat_id, session)
             backoff = 5

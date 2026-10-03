@@ -799,16 +799,21 @@ def _summary_line(summary) -> str:
                                summary.currency)
 
 
-def _t212_result(h) -> float | None:
-    """A holding's result: the price now against the average price paid."""
-    return h.price / h.avg_price - 1 if h.price is not None and h.avg_price else None
+def _t212_result(h, *, stale: bool = False) -> float | None:
+    """A holding's result: the price against the average price paid. A stored price that is too
+    old to be one (h.price_date) gives no result -- unless `stale`, for the line that shows that
+    price with its date."""
+    if h.price is None or not h.avg_price or (h.price_date and not stale):
+        return None
+    return h.price / h.avg_price - 1
 
 
 def _t212_block(h, html: bool) -> str:
     """One Trading 212 holding (t212_account.Holding): «• GME — 10 шт., средняя 23,10, сейчас
     24,05 USD (+4,1%), €+8,30, 5 дн.», then -- for one the bot tracks -- the status lines of a
     /bought position. The result is on the average price paid and the days are since it was
-    bought in Trading 212. What isn't known is left out."""
+    bought in Trading 212. What isn't known is left out. A stored price that is stale reads
+    «цена на 28.09: 24,05 USD» and has no stop line under it."""
     parts = []
     if h.quantity is not None:
         parts.append(f"{quantity(h.quantity)} шт.")
@@ -817,8 +822,10 @@ def _t212_block(h, html: bool) -> str:
     if h.price is None:
         parts.append("сейчас — цена недоступна")
     else:
-        result = _t212_result(h)
-        parts.append(f"сейчас {_price(h.price)}" + (f" {h.currency}" if h.currency else "")
+        result = _t212_result(h, stale=True)
+        # a stored price too old to be one is said to be the price of its day, not «сейчас»
+        when = f"цена на {dt.date.fromisoformat(h.price_date):%d.%m}:" if h.price_date else "сейчас"
+        parts.append(f"{when} {_price(h.price)}" + (f" {h.currency}" if h.currency else "")
                      + (f" ({signed_pct(result)})" if result is not None else ""))
     if h.pnl is not None:
         parts.append(_signed_cents(h.pnl, h.pnl_currency))

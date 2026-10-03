@@ -987,6 +987,38 @@ def test_a_clock_set_back_does_not_put_the_sync_off(conn, monkeypatch):
     assert syncs == [100_000.0, 50_010.0]                           # not 50 000 seconds later
 
 
+@pytest.mark.parametrize("kind", ["unauthorized", "forbidden"])
+def test_after_a_key_error_the_loop_tries_again_in_an_hour_not_in_fifteen_minutes(conn, monkeypatch, kind):
+    """A 401 or a 403 does not heal by itself: asking every 15 minutes only hammers the API."""
+    import t212_account as ta
+    clock, syncs = _Clock(step=300.0), []
+
+    def sync(c):
+        syncs.append(clock.t)
+        return ta.SyncResult(error="ключ", error_kind=kind)
+    monkeypatch.setattr(tb, "_poll_once", clock.poll)
+    monkeypatch.setattr(tb.t212_account, "sync", sync)
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=30)
+    assert tb.T212_KEY_RETRY_SECONDS == 3600
+    assert syncs == [1000.0, 4600.0, 8200.0]
+
+
+def test_any_other_failure_and_a_key_that_works_again_keep_the_fifteen_minutes(conn, monkeypatch):
+    import t212_account as ta
+    clock, syncs = _Clock(step=300.0), []
+    answers = iter([ta.SyncResult(error="ключ", error_kind="forbidden"),          # an hour
+                    ta.SyncResult(error="ReadTimeout", error_kind="network"),      # 15 minutes
+                    ta.SyncResult(), ta.SyncResult(), ta.SyncResult()])            # 15 minutes each
+
+    def sync(c):
+        syncs.append(clock.t)
+        return next(answers)
+    monkeypatch.setattr(tb, "_poll_once", clock.poll)
+    monkeypatch.setattr(tb.t212_account, "sync", sync)
+    tb._serve(conn, "tok", "1", object(), clock=clock, sleep=clock.sleep, rounds=20)
+    assert syncs == [1000.0, 4600.0, 5500.0, 6400.0]
+
+
 def test_a_sync_that_raises_is_logged_and_the_polling_goes_on(conn, monkeypatch, capsys):
     clock = _Clock(step=1000.0)
 

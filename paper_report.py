@@ -321,13 +321,17 @@ def _week_return(conn, today: dt.date, value: float) -> float | None:
 def _t212_line(conn, today: dt.date) -> str | None:
     """«Ваш счёт Trading 212: €X (за неделю ±Y%)»: the owner's own account, from the snapshots the
     Trading 212 sync stores -- its value on the last day stored on or before `today`, against the
-    last one on or before a week earlier (left out when there is none). None with no value yet."""
-    now = t212_account.account_value(conn, today)
+    last one on or before a week earlier (left out when there is none). A snapshot more than
+    t212_account.STALE_DAYS older than the day it stands for is not used: with no fresh value there
+    is no line (the sync has not got through), and with no fresh one a week ago no week change.
+    None with no value yet."""
+    stale = t212_account.STALE_DAYS
+    now = t212_account.account_value(conn, today, max_age_days=stale)
     if now is None:
         return None
     value, currency = now
     line = f"Ваш счёт Trading 212: {telegram_notify.money(value, currency)}"
-    before = t212_account.account_value(conn, today - dt.timedelta(days=7))
+    before = t212_account.account_value(conn, today - dt.timedelta(days=7), max_age_days=stale)
     if before and before[0]:
         line += f" (за неделю {signed_pct(value / before[0] - 1)})"
     return line

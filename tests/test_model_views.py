@@ -753,6 +753,24 @@ def test_the_week_change_is_left_out_when_it_is_not_known(conn, rows):
     assert blocks[-2] == "Ваш счёт Trading 212: €12 000" and "за неделю" not in blocks[-2]
 
 
+def test_the_trading_212_line_is_left_out_when_the_account_was_last_read_more_than_three_days_ago(conn):
+    """The sync has not got through: a value of last week is not «ваш счёт» today."""
+    _week_model(conn)
+    _t212_equity(conn, [("2026-10-05", 12_000.0)])                 # FRI is 09.10: four days old
+    assert "Trading 212" not in _week(conn)
+    _t212_equity(conn, [("2026-10-06", 12_500.0)])                 # three days old: still the account
+    assert "Ваш счёт Trading 212: €12 500" in _week(conn).split("\n\n")
+
+
+def test_the_week_change_needs_a_snapshot_from_about_a_week_ago(conn):
+    """The only earlier snapshot is twelve days before 02.10: the change since then is not «за неделю»."""
+    _week_model(conn)
+    _t212_equity(conn, [("2026-09-20", 10_000.0), ("2026-10-09", 12_000.0)])
+    assert "Ваш счёт Trading 212: €12 000" in _week(conn).split("\n\n")
+    _t212_equity(conn, [("2026-09-29", 10_000.0)])                 # three days before 02.10: near enough
+    assert "Ваш счёт Trading 212: €12 000 (за неделю +20,0%)" in _week(conn).split("\n\n")
+
+
 def test_without_account_data_there_is_no_trading_212_line(conn):
     _week_model(conn)
     assert "Trading 212" not in _week(conn)
@@ -802,7 +820,8 @@ def test_menu_prices_a_trading_212_holding_from_its_stored_day_price(conn, capsy
     today = dt.date.today().isoformat()
     monkeypatch.setattr(model, "score_today", lambda c, *a, **k: [])
     monkeypatch.setattr("positions.check_exits", lambda c, *a, **k: [])
-    monkeypatch.setattr("positions.last_close", lambda ticker, source=None, conn=None: 110.0 if conn else None)
+    monkeypatch.setattr("positions.last_close",
+                        lambda ticker, source=None, conn=None, today=None: 110.0 if conn else None)
     conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price, origin, quantity, t212_ticker, "
                  "currency) VALUES ('DE0007164600', 'T212', ?, 100.0, 't212', 5, 'SAPd_EQ', 'EUR')", (today,))
     conn.commit()

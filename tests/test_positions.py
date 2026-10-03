@@ -1030,11 +1030,11 @@ def test_the_snapshots_are_the_history_of_a_holding_with_no_yahoo_listing(conn, 
     _snapshots(conn, "OTHER", [(1, 1.0)])
     series = [(_d(3), 105.0), (_d(2), 110.0), (_d(1), 120.0)]
     assert positions.daily_closes("DE0007164600", "T212", conn=conn) == series
-    assert positions.last_close("DE0007164600", "T212", conn=conn) == 120.0
+    assert positions.last_close("DE0007164600", "T212", conn=conn, today=TODAY) == 120.0
     assert positions.daily_closes("DE0007164600", "T212") == []           # no database: nothing to read
     assert positions.last_close("DE0007164600", "T212") is None
     assert positions.daily_closes("DE0007164600", "BAFIN", conn=conn) == []   # only a T212 holding has them
-    assert positions.last_close("NOPE00000000", "T212", conn=conn) is None
+    assert positions.last_close("NOPE00000000", "T212", conn=conn, today=TODAY) is None
 
 
 def _d(days_ago):
@@ -1239,3 +1239,36 @@ def test_a_position_without_a_stop_base_keeps_the_entry_as_its_floor(conn):
     _t212(conn, "GME", source=None, entry=100.0, stop=0.10, t212_ticker="GME_US_EQ", currency="USD")
     [alert] = _check(conn, price=90.0, bars=[])
     assert alert.detail == "−10% от максимума 100.00"
+
+
+# ------------------------------------- a stored Trading 212 day price that is too old is not a price
+def test_a_day_price_older_than_three_days_is_not_a_price(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    _snapshots(conn, "DE0007164600", [(9, 110.0), (4, 120.0)])
+    assert positions.last_close("DE0007164600", "T212", conn=conn, today=TODAY) is None
+    assert len(positions.daily_closes("DE0007164600", "T212", conn=conn)) == 2      # the history stays the history
+    _snapshots(conn, "DE0007164600", [(3, 121.0)])                  # three days old: a weekend and a day
+    assert positions.last_close("DE0007164600", "T212", conn=conn, today=TODAY) == 121.0
+    assert positions.T212_STALE_DAYS == 3
+
+
+def test_the_stop_check_is_skipped_for_a_holding_whose_day_price_is_stale(conn, monkeypatch, capsys):
+    """The sync has not got through for four days. The last price it stored is far under the stop,
+    but it is four days old: it drives no stop, as a holding with no price drives none."""
+    _no_yahoo(monkeypatch)
+    _t212(conn, entry=100.0, stop=0.10, days_ago=10)
+    _snapshots(conn, "DE0007164600", [(9, 130.0), (4, 50.0)])
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []
+    assert "no price for DE0007164600" in capsys.readouterr().out
+    _snapshots(conn, "DE0007164600", [(0, 50.0)])                   # a price of today
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 50.0
+
+
+def test_the_status_of_a_holding_with_a_stale_day_price_has_no_price(conn, monkeypatch):
+    _no_yahoo(monkeypatch)
+    pos = _t212(conn, entry=100.0, stop=0.10, days_ago=10)
+    _snapshots(conn, "DE0007164600", [(4, 120.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["result"], st["to_stop"]) == (None, None, None)
+    assert st["peak"] == 120.0                                      # the old close still counts for the peak

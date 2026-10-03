@@ -554,14 +554,15 @@ def test_a_quantity_is_shown_the_russian_way_without_needless_decimals(x, text):
 
 def _t212_holding(name="GME", *, qty=10.0, avg=23.10, price=24.05, currency="USD", pnl=8.30,
                   pnl_currency="EUR", tracked=True, insiders=(), held=False, opened="2026-10-01", days=None,
-                  **status):
+                  price_date=None, **status):
     """A line of «💼 Trading 212» as t212_account builds it; `tracked`: it has a position (and so a
-    status); `days`: since it was bought in Trading 212, when that is known."""
+    status); `days`: since it was bought in Trading 212, when that is known; `price_date`: the day
+    of a stored price that is too old to be a price (the status then has none)."""
     pos = _held(name, entry=avg or 1.0, opened=opened, insiders=insiders) if tracked else None
-    st = _status(price, entry=avg or 1.0, **status) if tracked else None
+    st = _status(None if price_date else price, entry=avg or 1.0, **status) if tracked else None
     return ta.Holding(name=name, quantity=qty, avg_price=avg, price=price, currency=currency, pnl=pnl,
                       pnl_currency=pnl_currency, position=pos, status=st, model_holds=held, opened=opened,
-                      days=days)
+                      days=days, price_date=price_date)
 
 
 _LIVE = ta.T212Summary("EUR", 12345.67, 2000.0, 10345.67, 10000.0, 345.67, 12.5)
@@ -730,3 +731,18 @@ def test_a_holding_that_pre_dates_tracking_shows_its_real_loss_and_a_stop_from_i
     assert block.splitlines() == [
         "• GME — 10 шт., средняя 100,00, сейчас 50,00 USD (−50,0%), €−431,00, 518 дн.",
         "   стоп 45,00 (−10% от максимума 50,00), до стопа 10,0%"]
+
+
+def test_a_stale_stored_price_is_shown_as_the_price_of_its_day_with_no_stop_line():
+    """Trading 212 has not answered for days: the last stored price is shown as what it is, the
+    price of 28.09, and no stop is read from it."""
+    stale = _t212_holding(pnl=9.5, pnl_currency="USD", days=9, price_date="2026-09-28", insiders=["Ryan Cohen"])
+    view = _view(stale, _t212_holding("NEW", avg=100.0, price=110.0, opened="2026-10-02"),
+                 error="ReadTimeout", as_of="28.09 14:05")
+    text = tn.format_my_portfolio([], t212=view)
+    gme = next(b for b in text.split("\n\n") if b.startswith("• GME"))
+    assert gme.splitlines() == [
+        "• GME — 10 шт., средняя 23,10, цена на 28.09: 24,05 USD (+4,1%), $+9,50, 9 дн.",
+        "   слежу за продажами: Ryan Cohen"]                        # no «стоп» line: nothing to measure it with
+    assert "сейчас 24,05" not in text
+    assert "Средний результат: +10,0% по 1 позиции" in text         # a stale result is not averaged in

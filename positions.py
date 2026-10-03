@@ -55,6 +55,7 @@ import model_score
 CAUTION_LOOKBACK_DAYS = 7
 MANUAL, T212 = "manual", "t212"         # a position's origin: /bought, or the Trading 212 account
 T212_SOURCE = "T212"                    # the source of a Trading 212 holding with no Yahoo listing
+T212_STALE_DAYS = 3                     # a stored Trading 212 day price older than this is not a price
 _CAUTION_TEXT = {"etf_flow": "отток из спот-ETF", "treasury": "компания продала монеты",
                  "exchange_flow": "монеты заводят на биржи"}
 
@@ -309,16 +310,25 @@ def t212_closes(conn, ticker: str) -> list[tuple[str, float]]:
         (ticker,))]
 
 
-def last_close(ticker: str, source: str | None = None, conn=None) -> float | None:
+def t212_stale(day: str, today: dt.date | None = None) -> bool:
+    """Whether a Trading 212 day price stored on `day` is too old to be a price: more than
+    T212_STALE_DAYS before `today`. The sync stores one every day it gets through, weekends too,
+    so an old one means the sync has been failing -- and a stop must not be read from it."""
+    return ((today or dt.date.today()) - dt.date.fromisoformat(day)).days > T212_STALE_DAYS
+
+
+def last_close(ticker: str, source: str | None = None, conn=None, today: dt.date | None = None) -> float | None:
     """Most recent daily close from Yahoo for the listing `source` trades the
     ticker on, or None (an ISIN, a delisting, no network). A Trading 212 holding with no
-    Yahoo listing (source T212_SOURCE) has the last price the sync stored, given `conn`."""
+    Yahoo listing (source T212_SOURCE) has the last price the sync stored, given `conn` -- unless
+    that price is stale (t212_stale, as of `today`): then there is no price."""
     symbol = yahoo_symbol(ticker, source)
     if symbol:
         return _yahoo_close(symbol)
     if source == T212_SOURCE and conn is not None:
         bars = t212_closes(conn, ticker)
-        return bars[-1][1] if bars else None
+        if bars and not t212_stale(bars[-1][0], today):
+            return bars[-1][1]
     return None
 
 
@@ -420,12 +430,14 @@ def _trailing_stop(pos: Position, bars: list[tuple[str, float]], price: float) -
     return None
 
 
-def _seams(conn, price_fn, closes_fn):
+def _seams(conn, price_fn, closes_fn, today: dt.date | None = None):
     """(price_fn, closes_fn): the ones given, else last_close and daily_closes -- looked up when
     called, so a replacement of the module's own counts -- with `conn` for a Trading 212 holding
-    with no Yahoo listing (source T212_SOURCE), whose prices are the sync's day prices."""
+    with no Yahoo listing (source T212_SOURCE), whose prices are the sync's day prices (a stale
+    one, as of `today`, is no price)."""
     def price(ticker, source=None):
-        return last_close(ticker, source, conn=conn) if source == T212_SOURCE else last_close(ticker, source)
+        return (last_close(ticker, source, conn=conn, today=today) if source == T212_SOURCE
+                else last_close(ticker, source))
 
     def closes(ticker, source=None):
         return (daily_closes(ticker, source, conn=conn) if source == T212_SOURCE
@@ -455,7 +467,7 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
                   price now: 1 - stop_level / last (the price at its peak: the stop's own
                   distance). Zero at the stop level, negative below it (how far below, as
                   a share of the price now); None with no price."""
-    price_fn, closes_fn = _seams(conn, price_fn, closes_fn)
+    price_fn, closes_fn = _seams(conn, price_fn, closes_fn, today)
     last = price_fn(pos.ticker, pos.source) or None
     bars = _completed_bars(closes_fn(pos.ticker, pos.source), today)
     stop_pct, peak = _stop_and_peak(pos, bars)
@@ -551,7 +563,7 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None, trend_fn=None
     priced, by default, from the day prices the sync stored (t212_prices)."""
     import model
     today = today or dt.date.today()
-    price_fn, closes_fn = _seams(conn, price_fn, closes_fn)
+    price_fn, closes_fn = _seams(conn, price_fn, closes_fn, today)
     trend_fn = trend_fn or crypto.price_trend
     news_fn = news_fn or model.default_news
     alerts = []

@@ -329,3 +329,22 @@ UTX_US_EQ RTX). This replaces §1's "a `…_US_EQ` instrument becomes the US sym
   when the key is certain (an ISIN); a US one is keyed by the sync.
 - A holding keyed by its ISIN is named by its Trading 212 symbol also when its code is a US one
   (GME_US_EQ → GME).
+
+### I3. A sync that keeps failing is not silent
+
+- **A day without a sync.** When a sync has got through before and none has for 24 hours, a failing sync sends
+  «⚠️ Trading 212 не отвечает уже сутки (причина): позиции не обновляются.» once per day. The day is marked in kv
+  (`t212_silent_<date>`) once the message went out, so one that did not go out is tried again at the next sync. It
+  comes from the bot loop and from the daily run alike (both call `sync`); a silent sync never sends it. The
+  reason is the failure's own: an HTTP status, a network error's type, a key that no longer fits or is gone, a bad
+  answer.
+- **`SyncResult.error_kind`** is the failure's kind (`T212Error.kind`, or "answer" for a bad answer).
+- **Hourly after a key error.** After a 401 or a 403 the bot loop syncs again in an hour
+  (`telegram_bot.T212_KEY_RETRY_SECONDS = 3600`), not in 15 minutes. Any other failure keeps the 15 minutes.
+- **A stale day price is not a price (§4).** A stored Trading 212 day price older than 3 days
+  (`positions.T212_STALE_DAYS`) is not returned by `last_close`: the stop check is skipped for that holding, as
+  with «цена недоступна». The history (`daily_closes`) is unchanged. `/portfolio`'s stored view and the analyst
+  show such a price as «цена на DD.MM: 24,05 USD», with no stop line, and leave it out of the average result.
+- **A stale account value is not the account's (§7).** The weekly line is left out when the newest `t212_equity`
+  row is more than 3 days older than today. The week change is left out when the snapshot it compares with is more
+  than 3 days older than a week ago.
