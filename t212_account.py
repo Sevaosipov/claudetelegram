@@ -532,11 +532,12 @@ def _list_agrees(holdings: list[T212Position], summary: T212Summary | None) -> b
 def _waiting(conn, now_ts: float) -> dict[int, float]:
     """Who was missing at the syncs whose list could not be checked, and when each was first missed
     (MISSING_KEY: {position id: epoch}). A list of bare ids -- an older version kept no time -- is
-    read as misses of this very moment, never as old ones."""
+    read as misses of this very moment, never as old ones, and so is a time ahead of the clock
+    (a clock set back must not hold a sale back until that time comes round)."""
     saved = db.get_cached_json(conn, MISSING_KEY)
     try:
         if isinstance(saved, dict):
-            return {int(i): float(t) for i, t in saved.items()}
+            return {int(i): min(float(t), now_ts) for i, t in saved.items()}
         if isinstance(saved, list):
             return {int(i): now_ts for i in saved}
     except (TypeError, ValueError):
@@ -936,11 +937,13 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     With no key it is a quiet no-op, said once per process. A failed fetch -- T212Error, or a
     ValueError for an answer of the wrong shape -- changes nothing: the result carries the
     reason. So does an empty list while the summary says more than LIST_TOLERANCE_MONEY is
-    invested (less is the residue of an empty account). A failure is not
-    announced -- until a sync has got through before and none has for a day: then the owner is
-    told once a day (_warn_when_silent_for_a_day; never by a silent sync). A key that is gone
-    after the account was tracked is not such a failure: it is said once (_say_key_removed), and
-    the sync then stays quiet until a key is configured again.
+    invested (less is the residue of an empty account). A failure is not announced -- until a
+    sync has got through before and none has for a day: then the owner is told once a day
+    (_warn_when_silent_for_a_day; never by a silent sync). A sync that raises while it is applied
+    is such a failure too (_crashed): it is recorded like a failed fetch, and the error goes on up
+    to the caller. A key that is gone after the account was tracked is not such a failure: it is
+    said once (_say_key_removed; not while a sync got through in the last hour), and the sync then
+    stays quiet until a key is configured again.
 
     A holding that is not on the list is closed only when the list can be believed
     (_close_missing): result.held and result.note say what was not closed and why. A list that

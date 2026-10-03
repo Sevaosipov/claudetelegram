@@ -918,6 +918,16 @@ def test_a_miss_kept_by_an_older_version_as_a_bare_id_is_a_first_miss_now(conn, 
     assert run(_holding(**SAP), summary=unknown, now=_minutes(75)).closed == ["GME"]
 
 
+def test_a_first_miss_dated_ahead_of_the_clock_is_read_as_a_miss_of_now(conn, run):
+    """A clock set back must not hold a sale back until the old time comes round again."""
+    _two_holdings_and_one_missing(conn, run)
+    gme = positions.find_open(conn, "GME")
+    db.save_cached_json(conn, ta.MISSING_KEY, {str(gme.id): (NOW + dt.timedelta(days=3)).timestamp()})
+    unknown = _invested(None)
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(60)).closed == []
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(75)).closed == ["GME"]
+
+
 # ---------------------------------------------- F5: another wallet currency than the summary's: cannot check
 @pytest.mark.parametrize("wallet, account, agrees", [
     ("EUR", "EUR", False), ("eur", "EUR", False), (None, "EUR", False), ("EUR", None, False),   # comparable
@@ -1518,7 +1528,9 @@ def test_a_list_that_cannot_be_checked_neither_warns_nor_ends_the_run(conn, run)
     run(_holding(), _holding(**SAP))
     run.sent.clear()
     _off(run, 1)
-    unknown = lambda hours: run(_holding(), _holding(**SAP), summary=_invested(None), now=_hours(hours))
+
+    def unknown(hours):
+        return run(_holding(), _holding(**SAP), summary=_invested(None), now=_hours(hours))
     assert unknown(12).agrees is None
     _off(run, 25)                                                   # the run is still the one begun at 1 h
     assert run.sent == [LIST_GAP_WARNING]

@@ -7,8 +7,9 @@ account, with its quantity and average price, and closes one that was sold there
 only reads the account and never trades. A holding that was in the account before the bot first
 looked starts its clock when tracking starts, and its stop is measured from its price then
 (stop_base), not from the average price it was bought at: see _stop_and_peak. A Trading 212 holding with a US listing is keyed and
-priced like a /bought one; any other is keyed by its ISIN with source T212_SOURCE and priced
-from the day prices the sync stores (t212_prices). Every position leaves on the model's own
+priced like a /bought one -- from Yahoo, and from the day prices the sync stores (t212_prices)
+where Yahoo has nothing or another instrument's series: _pricing; any other is keyed by its ISIN
+with source T212_SOURCE and priced from those day prices. Every position leaves on the model's own
 exits (model.py), and a close alert fires once per position, on the first of:
 
   insider_sell   one of the insiders behind the signal it came from sells
