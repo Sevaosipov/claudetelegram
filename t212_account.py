@@ -22,14 +22,21 @@ together, and only after both reads succeeded: an API error changes nothing.
 portfolio_view() is what /portfolio shows of the account: one live call (it stores the day's
 prices and snapshot like a sync, but opens and closes nothing), or -- when the call fails --
 the holdings as the last sync left them (stored_holdings), with the reason.
+
+Usage:
+    python t212_account.py --check    # does the key read the account? prints the number of
+                                      # positions and the currency, or why not -- nothing else
+    python t212_account.py --sync     # one sync now, without the Telegram messages
 """
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import math
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import requests
 
@@ -39,6 +46,7 @@ import positions
 import telegram_notify
 import trading212
 
+DB_PATH = Path(__file__).parent / "data" / "disclosures.db"
 POSITIONS_URL = "https://live.trading212.com/api/v0/equity/positions"            # 1 call / 1 s
 SUMMARY_URL = "https://live.trading212.com/api/v0/equity/account/summary"        # 1 call / 5 s
 READ_URLS = (trading212.INSTRUMENTS_URL, POSITIONS_URL, SUMMARY_URL)  # every endpoint the bot calls
@@ -601,3 +609,49 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
             model_holds=bool(key) and _model_holds(conn, key[0], key[1], held),
             opened=pos.opened_at if pos else (h.created_at or "")[:10]))
     return PortfolioView(rows, summary=summary)
+
+
+# ------------------------------------------------------------------ command line
+def check(fetch=None) -> tuple[bool, str]:
+    """Whether the key reads the account, and the line to print: the number of positions and the
+    account's currency -- nothing that identifies the account, and never the key -- or why it
+    can't (with the hint when the cure is a read-only key)."""
+    try:
+        holdings, summary = (fetch or fetch_account)()
+    except T212Error as e:
+        return False, f"Trading 212: доступа нет — {e}" + (f"\n{KEY_HINT}" if e.needs_key else "")
+    except ValueError:              # its text is not printed: only what this module wrote is safe
+        return False, f"Trading 212: доступа нет — {BAD_ANSWER}"
+    return True, (f"Trading 212: доступ есть, позиций {len(holdings)}, "
+                  f"валюта {summary.currency or 'не указана'}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="t212_account.py",
+                                 description="The Trading 212 account, read only: check the key or sync once.")
+    what = ap.add_mutually_exclusive_group(required=True)
+    what.add_argument("--check", action="store_true",
+                      help="does the key read the account: the number of positions and the currency")
+    what.add_argument("--sync", action="store_true", help="one sync now, without the Telegram messages")
+    args = ap.parse_args(argv)
+    if args.check:
+        ok, line = check()
+        print(line)
+        return 0 if ok else 1
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = db.connect(DB_PATH)
+    try:
+        result = sync(conn, notify=lambda text: False)
+    finally:
+        conn.close()
+    if result.error:
+        print(f"Trading 212: синхронизация не прошла — {result.error}"
+              + (f"\n{KEY_HINT}" if result.error in (NO_KEY, NO_RIGHTS) else ""))
+        return 1
+    print(f"Trading 212: синхронизация прошла — открыто {len(result.opened)}, "
+          f"обновлено {len(result.updated)}, закрыто {len(result.closed)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

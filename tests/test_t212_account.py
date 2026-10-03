@@ -693,3 +693,89 @@ def test_the_live_view_only_gets(conn, keyed, no_yahoo):
     session = _account()
     view = ta.portfolio_view(conn, TODAY, fetch=lambda: ta.fetch_account(session), now=NOW)
     assert view.error is None and session.calls == [("get", ta.POSITIONS_URL), ("get", ta.SUMMARY_URL)]
+
+
+# ------------------------------------------------------------------ the command line
+def _wire(monkeypatch, session):
+    """The module's own HTTP entry point answers from `session`: the whole path runs, offline."""
+    monkeypatch.setattr(ta.requests, "get", session.get)
+
+
+def test_check_says_the_key_works_with_the_count_and_the_currency_and_nothing_else(keyed, monkeypatch, capsys):
+    session = _account([FULL_POSITION, FULL_POSITION])
+    _wire(monkeypatch, session)
+    assert ta.main(["--check"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "Trading 212: доступ есть, позиций 2, валюта EUR\n" and out.err == ""
+    assert session.calls == [("get", ta.POSITIONS_URL), ("get", ta.SUMMARY_URL)]
+
+
+def test_check_prints_nothing_that_identifies_the_account_or_the_key(keyed, monkeypatch, capsys):
+    _wire(monkeypatch, _account())
+    ta.main(["--check"])
+    out = capsys.readouterr()
+    token = base64.b64encode(f"{KEY}:{SECRET}".encode()).decode()
+    for private in ("31337", "12345", "12 345", "2000", "GME", "GameStop", "US36467W1099", KEY, SECRET, token,
+                    "Basic", "Authorization"):
+        assert private not in out.out + out.err
+
+
+@pytest.mark.parametrize("status, line", [
+    (401, "Trading 212: доступа нет — ключ Trading 212 не подходит\n"),
+    (500, "Trading 212: доступа нет — HTTP 500\n"),
+    (403, "Trading 212: доступа нет — ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта\n"
+          + ta.KEY_HINT + "\n")])
+def test_check_says_why_it_cannot_read_the_account(keyed, monkeypatch, capsys, status, line):
+    _wire(monkeypatch, _Session({ta.POSITIONS_URL: [_Resp(status)], ta.SUMMARY_URL: [_Resp(status)]}))
+    assert ta.main(["--check"]) == 1
+    assert capsys.readouterr().out == line
+
+
+def test_check_needs_the_account_rights_too(keyed, monkeypatch, capsys):
+    """A key that may read the positions but not the account is not enough."""
+    _wire(monkeypatch, _Session({ta.POSITIONS_URL: [_Resp(200, [])], ta.SUMMARY_URL: [_Resp(403)]}))
+    assert ta.main(["--check"]) == 1 and "не хватает прав" in capsys.readouterr().out
+
+
+def test_check_without_a_key_says_so_and_calls_nothing(monkeypatch, capsys):
+    session = _account()
+    _wire(monkeypatch, session)
+    assert ta.main(["--check"]) == 1
+    assert capsys.readouterr().out == "Trading 212: доступа нет — ключ Trading 212 не задан\n" + ta.KEY_HINT + "\n"
+    assert session.calls == []
+
+
+def test_check_with_an_answer_of_the_wrong_shape(keyed, monkeypatch, capsys):
+    _wire(monkeypatch, _account({"positions": [FULL_POSITION]}))
+    assert ta.main(["--check"]) == 1
+    out = capsys.readouterr().out
+    assert out == "Trading 212: доступа нет — ответ не разобран\n" and "GME" not in out
+
+
+def test_the_sync_command_runs_one_sync_and_sends_nothing(keyed, monkeypatch, capsys, tmp_path):
+    session = _account()
+    _wire(monkeypatch, session)
+    monkeypatch.setattr(ta, "DB_PATH", tmp_path / "data" / "d.db")       # the folder is made
+    monkeypatch.setattr(ta.telegram_notify, "send_text", lambda text: pytest.fail("--sync must not send"))
+    monkeypatch.setattr(positions, "daily_closes", lambda ticker, source=None: [])   # the stop's history
+    assert ta.main(["--sync"]) == 0
+    assert capsys.readouterr().out == "Trading 212: синхронизация прошла — открыто 1, обновлено 0, закрыто 0\n"
+    stored = db.connect(tmp_path / "data" / "d.db")
+    assert [(p.ticker, p.origin) for p in positions.open_positions(stored)] == [("GME", "t212")]
+    assert db.get_cached_value(stored, ta.SYNCED_ONCE_KEY, 10**9) is not None
+    stored.close()
+    assert session.calls == [("get", ta.POSITIONS_URL), ("get", ta.SUMMARY_URL)]
+
+
+def test_the_sync_command_says_why_it_did_nothing(keyed, monkeypatch, capsys, tmp_path):
+    _wire(monkeypatch, _Session({ta.POSITIONS_URL: [_Resp(401)]}))
+    monkeypatch.setattr(ta, "DB_PATH", tmp_path / "d.db")
+    assert ta.main(["--sync"]) == 1
+    assert capsys.readouterr().out == "Trading 212: синхронизация не прошла — ключ Trading 212 не подходит\n"
+
+
+@pytest.mark.parametrize("argv", [[], ["--check", "--sync"], ["--order"]])
+def test_the_command_line_takes_exactly_one_of_check_and_sync(argv, capsys):
+    with pytest.raises(SystemExit) as stop:
+        ta.main(argv)
+    assert stop.value.code == 2
