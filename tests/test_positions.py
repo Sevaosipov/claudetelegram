@@ -1154,3 +1154,24 @@ def test_find_holding_is_the_trading_212_holding_meant_by_a_name(conn):
     assert positions.find_holding(conn, "GME").id == gme.id
     assert positions.find_holding(conn, "AAA") is None             # a /bought position is not a holding
     assert positions.find_holding(conn, "ZZZ") is None
+
+
+def test_the_headlines_of_a_trading_212_holding_of_an_oslo_company_are_its_oslo_listings(conn, monkeypatch):
+    """Trading 212 sells a Norwegian company as a Frankfurt listing, which has no news feed of its
+    own here (an ISIN has no Yahoo symbol): the headlines are read on the Oslo listing, the way its
+    insiders are."""
+    _no_yahoo(monkeypatch)
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    _t212(conn, "NO0010096985", t212_ticker="EQNRd_EQ", stop=0.10)
+    _t212(conn, "DE0007164600", days_ago=4)                         # no Oslo listing: asked as it is
+    _snapshots(conn, "NO0010096985", [(0, 100.0)])
+    _snapshots(conn, "DE0007164600", [(0, 100.0)])
+    asked = []
+
+    def news_fn(ticker, source=None):
+        asked.append((ticker, source))
+        return _RED if ticker == "EQNR" else []
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=news_fn)
+    assert asked == [("EQNR", "NORWAY"), ("DE0007164600", "T212")]
+    assert alert.trigger == "news" and alert.position.ticker == "NO0010096985"

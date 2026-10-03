@@ -511,7 +511,11 @@ def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes
     held = (today - dt.date.fromisoformat(pos.opened_at)).days
     if held >= model.MAX_HOLD_DAYS:
         return "time", f"{held} дн. в позиции"
-    red = model_score.news_part(news_fn(pos.ticker, pos.source), coin=coin)[1]
+    # A Trading 212 holding keyed by the ISIN of an Oslo listing has its headlines on that listing
+    # (an ISIN has no news feed of its own), the way its insiders are Oslo's.
+    oslo = oslo_ticker(conn, pos.ticker) if pos.source == T212_SOURCE else None
+    listing = (oslo, "NORWAY") if oslo else (pos.ticker, pos.source)
+    red = model_score.news_part(news_fn(*listing), coin=coin)[1]
     if red:
         return "news", f"новости: {red}"
     return None
