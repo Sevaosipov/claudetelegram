@@ -878,9 +878,12 @@ def test_portfolio_asks_trading_212_live_and_shows_the_account_then_the_rest(con
     [text] = replies
     blocks = text.split("\n\n")
     assert blocks[0] == "<b>💼 Trading 212</b>\n" + _T212_SUMMARY_LINE
+    import datetime as dt
+    held = (dt.date.today() - dt.date(2026, 9, 28)).days            # since Trading 212's purchase date
     assert blocks[1].splitlines() == [
-        "• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30",       # Trading 212's price now
-        "   стоп 19,64 (−15% от максимума 23,10), до стопа 18,4%"]               # no closes: entry and fallback
+        f"• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30, {held} дн.",   # Trading 212's price now
+        # it was in the account before the bot looked: the stop is measured from its price then (23,00)
+        "   стоп 19,55 (−15% от максимума 23,00), до стопа 18,7%"]
     assert blocks[2] == "<b>✍️ Вне Trading 212</b>" and blocks[3].startswith("• GRAB: вход 40,00 (")
     assert blocks[4].startswith("Средний результат: +14,6% по 2 позициям\n")     # (+4,1% and +25,0%) / 2
     assert text.endswith("/sold TICKER — закрыть, /model — модельный портфель.")
@@ -898,7 +901,9 @@ def test_portfolio_shows_the_stored_holdings_when_trading_212_does_not_answer(co
     head, block = text.split("\n\n")[:2]
     assert head == ("<b>💼 Trading 212</b>\n"
                     "⚠️ Trading 212 не ответил (ReadTimeout) — данные на 14:05 последней синхронизации")
-    assert block.startswith("• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), $+9,50\n   стоп ")
+    held = (dt.date.today() - dt.date(2026, 9, 28)).days
+    assert block.startswith(f"• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), $+9,50, {held} дн.\n"
+                            "   стоп ")
     assert "Счёт:" not in text and _KEY_HINT not in text
 
 

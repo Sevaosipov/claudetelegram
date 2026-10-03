@@ -806,8 +806,9 @@ def _t212_result(h) -> float | None:
 
 def _t212_block(h, html: bool) -> str:
     """One Trading 212 holding (t212_account.Holding): «• GME — 10 шт., средняя 23,10, сейчас
-    24,05 USD (+4,1%), €+8,30», then -- for one the bot tracks -- the status lines of a /bought
-    position. What isn't known is left out."""
+    24,05 USD (+4,1%), €+8,30, 5 дн.», then -- for one the bot tracks -- the status lines of a
+    /bought position. The result is on the average price paid and the days are since it was
+    bought in Trading 212. What isn't known is left out."""
     parts = []
     if h.quantity is not None:
         parts.append(f"{quantity(h.quantity)} шт.")
@@ -821,6 +822,8 @@ def _t212_block(h, html: bool) -> str:
                      + (f" ({signed_pct(result)})" if result is not None else ""))
     if h.pnl is not None:
         parts.append(_signed_cents(h.pnl, h.pnl_currency))
+    if h.days is not None:          # since Trading 212's purchase date, not since the bot's tracking
+        parts.append(f"{h.days} дн.")
     lines = [f"• {h.name} — " + ", ".join(parts)]
     if h.position is not None and h.status is not None:
         lines += _status_lines(h.position, h.status, h.model_holds)

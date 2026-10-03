@@ -19,6 +19,14 @@ that is gone is closed and announced, and each sync stores the day's price of ev
 telegram_bot.py and once in the daily run (bot.py). All of a sync's changes are committed
 together, and only after both reads succeeded: an API error changes nothing.
 
+What was in the account before the bot first looked is "legacy" (the sync that stores the first
+holding ever: _open_holding): its rules count from that day, not from the purchase, and its stop
+is measured from its price that day -- so connecting an old account brings no burst of close
+alerts. Its entry stays Trading 212's average price, so the result shown is the real one. A
+message names only what is really watched for its holding (_watched), and the one-time first
+message is left for a sync that can send it: a silent one (--sync, --no-telegram) does not use
+it up.
+
 portfolio_view() is what /portfolio shows of the account: one live call (it stores the day's
 prices and snapshot like a sync, but opens and closes nothing), or -- when the call fails --
 the holdings as the last sync left them (stored_holdings), with the reason.
@@ -32,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import math
 import sqlite3
 import sys
@@ -289,13 +298,17 @@ def _entry(h: T212Position) -> float | None:
     return None
 
 
+def _created_date(created_at: str | None) -> str | None:
+    """The date Trading 212 says a holding was bought (createdAt), or None when it isn't told."""
+    try:
+        return dt.date.fromisoformat((created_at or "")[:10]).isoformat()
+    except ValueError:
+        return None
+
+
 def _open_date(created_at: str | None, day: str) -> str:
     """The date a holding was opened (createdAt), `day` when it isn't told or lies ahead."""
-    try:
-        opened = dt.date.fromisoformat((created_at or "")[:10]).isoformat()
-    except ValueError:
-        return day
-    return min(opened, day)
+    return min(_created_date(created_at) or day, day)
 
 
 def _same(a: float | None, b: float | None) -> bool:
@@ -304,27 +317,42 @@ def _same(a: float | None, b: float | None) -> bool:
     return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
 
 
-def _open_holding(conn, key: str, source: str | None, h: T212Position, day: str, closes) -> bool:
+def _open_holding(conn, key: str, source: str | None, h: T212Position, day: str, closes,
+                  legacy: bool) -> list[str] | None:
     """A position of origin 't212' for a holding seen for the first time: entered at the average
-    price paid, opened when Trading 212 says, watching the insiders of the journal's latest signal
-    on it, the stop sized from the price history as /bought sizes it. `closes` is that history;
-    None for a holding with no Yahoo listing (and for one whose history was not fetched), which
-    has the day prices stored so far. False (and nothing stored) when there is no price to enter
-    it at."""
+    price paid, watching the insiders of the journal's latest signal on it, the stop sized from
+    the price history as /bought sizes it. `closes` is that history; None for a holding with no
+    Yahoo listing (and for one whose history was not fetched), which has the day prices stored so
+    far. Returns the insiders it watches; None (and nothing stored) when there is no price to
+    enter it at.
+
+    Opened when Trading 212 says it was bought -- unless it is `legacy`, a holding that was in
+    the account before the bot first looked: then its clock starts today (`day`), so the year and
+    the dead-money rule count from the tracking start, and its stop_base is its price now (the
+    last close of the history when Trading 212 gives none), so the stop is measured from here and
+    not from an average price it may be far below. The entry is the average price either way:
+    the result shown is the real one."""
     entry = _entry(h)
     if entry is None:
-        return False
+        return None
     signal = positions._buy_signal(conn, key, source)
     signal_id, members = signal if signal else (None, "[]")
     if closes is None:
         closes = positions.t212_closes(conn, key)
     stop = model_score.stop_distance([c for _d, c in closes], positions._kind(key))
+    base = None
+    if legacy:
+        base = h.current_price if h.current_price is not None else (closes[-1][1] if closes else None)
     conn.execute(
         "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, signal_id, stop_pct, "
-        "origin, quantity, t212_ticker, currency) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (key, source, _open_date(h.created_at, day), entry, members or "[]", signal_id, stop,
-         positions.T212, h.quantity, h.t212_ticker, h.currency))
-    return True
+        "origin, quantity, t212_ticker, currency, stop_base, t212_created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (key, source, day if legacy else _open_date(h.created_at, day), entry, members or "[]", signal_id,
+         stop, positions.T212, h.quantity, h.t212_ticker, h.currency, base, _created_date(h.created_at)))
+    try:
+        names = json.loads(members or "[]")
+    except ValueError:
+        names = []
+    return [str(n) for n in names] if isinstance(names, list) else []
 
 
 def _update_holding(conn, pos: positions.Position, h: T212Position) -> bool:
@@ -333,26 +361,42 @@ def _update_holding(conn, pos: positions.Position, h: T212Position) -> bool:
     quantity = pos.quantity if h.quantity is None else h.quantity
     entry = h.avg_price if h.avg_price is not None and h.avg_price > 0 else pos.entry_price
     changed = not (_same(quantity, pos.quantity) and _same(entry, pos.entry_price))
-    t212_ticker, currency = h.t212_ticker or pos.t212_ticker, h.currency or pos.currency
-    if changed or (t212_ticker, currency) != (pos.t212_ticker, pos.currency):
-        conn.execute("UPDATE positions SET quantity = ?, entry_price = ?, t212_ticker = ?, currency = ? "
-                     "WHERE id = ?", (quantity, entry, t212_ticker, currency, pos.id))
+    told = (h.t212_ticker or pos.t212_ticker, h.currency or pos.currency,
+            pos.t212_created or _created_date(h.created_at))       # what was not known before
+    if changed or told != (pos.t212_ticker, pos.currency, pos.t212_created):
+        conn.execute("UPDATE positions SET quantity = ?, entry_price = ?, t212_ticker = ?, currency = ?, "
+                     "t212_created = ? WHERE id = ?", (quantity, entry, *told, pos.id))
     return changed
 
 
 def _take_over(conn, pos: positions.Position, source: str | None, h: T212Position) -> None:
     """A /bought position in a name the account holds becomes the account's: its quantity and
     average price are Trading 212's from now on. One keyed by its ISIN is priced from the day
-    prices, so its source becomes T212_SOURCE; a US one keeps the source its signal gave it."""
+    prices, so its source becomes T212_SOURCE; a US one keeps the source its signal gave it. Its
+    clock is not touched: the bot has watched it since the /bought."""
     entry = _entry(h)
     conn.execute(
         "UPDATE positions SET origin = ?, quantity = ?, entry_price = ?, t212_ticker = ?, currency = ?, "
-        "source = ? WHERE id = ?",
+        "source = ?, t212_created = ? WHERE id = ?",
         (positions.T212, h.quantity, pos.entry_price if entry is None else entry, h.t212_ticker,
-         h.currency, source if source == positions.T212_SOURCE else pos.source, pos.id))
+         h.currency, source if source == positions.T212_SOURCE else pos.source,
+         _created_date(h.created_at), pos.id))
 
 
-def _new_text(name: str, h: T212Position) -> str:
+def _watched(conn, key: str, source: str | None, insiders: list[str]) -> str:
+    """What the bot really watches for a holding, as its message says it. A US holding: its stop,
+    its insiders' sales, its headlines. A holding keyed by its ISIN has no news feed of its own:
+    its stop and its time rules -- its insiders' sales only when the journal named some (BaFin
+    and FI by the ISIN, Oslo by the listing's ticker), and headlines only through an Oslo
+    listing."""
+    if source != positions.T212_SOURCE:
+        return "стоп, продажи инсайдеров, новости"
+    more = (["продажи инсайдеров"] if insiders else []) \
+        + (["новости"] if positions.oslo_ticker(conn, key) else [])
+    return "стоп и срок" + (", а также " + " и ".join(more) if more else "")
+
+
+def _new_text(name: str, h: T212Position, watched: str) -> str:
     esc = telegram_notify._esc
     lot = []
     if h.quantity is not None:
@@ -361,22 +405,30 @@ def _new_text(name: str, h: T212Position) -> str:
     if entry is not None:
         lot.append(f"по {telegram_notify._price(entry)}" + (f" {esc(h.currency)}" if h.currency else ""))
     what = (" — " + " ".join(lot)).rstrip(".") if lot else ""
-    return f"📥 Вижу в Trading 212: {esc(name)}{what}. Слежу: стоп, продажи инсайдеров, новости."
+    return f"📥 Вижу в Trading 212: {esc(name)}{what}. Слежу: {watched}."
 
 
 def _sold_text(name: str) -> str:
     return f"📤 {telegram_notify._esc(name)} больше нет в Trading 212 — слежение закрыто."
 
 
-def _first_text(names: list[str]) -> str:
-    return (f"📥 Слежу за вашими позициями в Trading 212 ({len(names)}): "
+def _first_text(names: list[str], legacy_since: str | None, day: str) -> str:
+    """The one-time message for everything the account holds. It claims nothing about what is
+    watched for each holding; it says when the rules of the holdings that pre-date tracking began
+    to count (`legacy_since`, an ISO date): today, or the day a silent sync first stored them."""
+    text = (f"📥 Слежу за вашими позициями в Trading 212 ({len(names)}): "
             + ", ".join(telegram_notify._esc(n) for n in names))
+    if legacy_since is None:
+        return text
+    since = "сегодняшнего дня" if legacy_since == day else f"{dt.date.fromisoformat(legacy_since):%d.%m}"
+    return f"{text}\nДля уже купленных бумаг правила выхода считаются с {since}."
 
 
 def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now: dt.datetime,
-           closes_fn, result: SyncResult) -> list[str]:
+           closes_fn, result: SyncResult, silent: bool) -> list[str]:
     """Bring the database in step with what the account holds, in one transaction the caller
-    commits. Fills `result` and returns the messages to send once it is committed."""
+    commits. Fills `result` and returns the messages to send once it is committed (none when
+    `silent`)."""
     day = now.date().isoformat()
     keyed, unkeyed = _keyed(holdings)
     # A new US holding's history comes from Yahoo. It is asked for here, on a first look at what is
@@ -395,23 +447,32 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
     tracked = {p.ticker: p for p in open_now if p.origin == positions.T212}
     manual = {p.ticker: p for p in open_now if p.origin != positions.T212}
     first = db.get_cached_value(conn, SYNCED_ONCE_KEY, _KV_FOREVER) is None
+    # No holding was ever stored (open or since sold): what the account holds now was there before
+    # the bot looked. This is about the positions, not about the message flag above.
+    legacy = conn.execute("SELECT 1 FROM positions WHERE origin = ? LIMIT 1",
+                          (positions.T212,)).fetchone() is None
 
     _store_snapshot(conn, keyed, summary, day)
-    new_texts, sold_texts, names = [], [], []
+    new_texts, sold_texts, names, legacy_days = [], [], [], []
     for key, source, h in keyed:
         name = positions.name_of(key, source, h.t212_ticker)
         if key in tracked:
             if _update_holding(conn, tracked[key], h):
                 result.updated.append(key)
+            if tracked[key].stop_base is not None:
+                legacy_days.append(tracked[key].opened_at)
         elif key in manual:
             _take_over(conn, manual[key], source, h)
             result.updated.append(key)
-        elif _open_holding(conn, key, source, h, day, histories.get(key)):
-            result.opened.append(key)
-            new_texts.append(_new_text(name, h))
         else:
-            print(f"[t212] {name}: no price to enter it at, not tracked yet", file=sys.stderr)
-            continue
+            insiders = _open_holding(conn, key, source, h, day, histories.get(key), legacy)
+            if insiders is None:
+                print(f"[t212] {name}: no price to enter it at, not tracked yet", file=sys.stderr)
+                continue
+            result.opened.append(key)
+            new_texts.append(_new_text(name, h, _watched(conn, key, source, insiders)))
+            if legacy:
+                legacy_days.append(day)
         names.append(name)
 
     if unkeyed:
@@ -427,10 +488,14 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
                 result.closed.append(key)
                 sold_texts.append(_sold_text(positions.display_name(pos)))
 
-    if first:           # one message for everything the account holds, not one per holding
-        new_texts = [_first_text(names)] if names else []
-        db.save_cached_value(conn, SYNCED_ONCE_KEY, 1.0, commit=False)
     db.save_cached_value(conn, SYNCED_AT_KEY, now.timestamp(), commit=False)
+    if silent:          # nothing is said, and the one-time first message is left for a sync that can
+        return []
+    if first:           # one message for everything the account holds, not one per holding
+        new_texts = []
+        if names:       # the flag is this message's: an account that holds nothing has not used it
+            new_texts = [_first_text(names, min(legacy_days, default=None), day)]
+            db.save_cached_value(conn, SYNCED_ONCE_KEY, 1.0, commit=False)
     return new_texts + sold_texts
 
 
@@ -441,7 +506,8 @@ def _say_no_key() -> None:
         print("[t212] Trading 212 key not set (TRADING212_API_KEY in .env): the account is not tracked")
 
 
-def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, closes_fn=None) -> SyncResult:
+def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, closes_fn=None,
+         silent: bool = False) -> SyncResult:
     """One sync of the bot's positions with the account (see the top of the file).
 
     `fetch()` returns (positions, summary) -- fetch_account by default; `notify(text)` sends a
@@ -449,6 +515,11 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     undo the sync; `now` is the sync's time (its date is the day of the stored price and account
     rows); `closes_fn(ticker, source)` is the price history a new US holding's stop is sized
     from, positions.daily_closes by default.
+
+    `silent` is a sync with the notifications off (`--sync`, a --no-telegram run): it stores
+    everything and sends nothing, and it does not use up the one-time first message -- the flag
+    SYNCED_ONCE_KEY is set only by a sync that sent that message, or tried to. The first sync
+    that may notify then lists every holding the bot tracks.
 
     With no key it is a quiet no-op, said once per process. A failed fetch -- T212Error, or a
     ValueError for an answer of the wrong shape -- changes nothing and sends nothing: the result
@@ -469,7 +540,7 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
         print(f"[t212] sync failed: {BAD_ANSWER}", file=sys.stderr)
         return result
     try:
-        messages = _apply(conn, holdings, summary, now, closes_fn, result)
+        messages = _apply(conn, holdings, summary, now, closes_fn, result, silent)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -511,7 +582,12 @@ class Holding:
     """One line of «💼 Trading 212» (telegram_notify.t212_blocks): a holding by the name the user
     knows it by, its shares, average price and price now (in the instrument's `currency`) and the
     money it has made or lost (`pnl`, in `pnl_currency`). One the bot tracks comes with its
-    position and positions.position_status at that price; `opened` (an ISO date) orders them."""
+    position and positions.position_status at that price.
+
+    These are the owner's own figures, whatever the bot's rules count from: the result is on the
+    average price paid, and `days` is since Trading 212's purchase date (None when it isn't
+    known) -- for a holding that pre-dates tracking, not since the tracking start. `opened` (an
+    ISO date: the purchase date, else the tracking start) orders the holdings."""
     name: str
     quantity: float | None
     avg_price: float | None
@@ -523,6 +599,7 @@ class Holding:
     status: dict | None = None
     model_holds: bool = False
     opened: str = ""
+    days: int | None = None
 
 
 @dataclass
@@ -552,6 +629,14 @@ def _model_holds(conn, ticker: str, source: str | None, held: set) -> bool:
     return bool(oslo) and positions._asset_key(oslo, "NORWAY") in held
 
 
+def _days_held(created: str | None, today: dt.date) -> int | None:
+    """Days since Trading 212's purchase date, or None when it isn't known."""
+    try:
+        return max((today - dt.date.fromisoformat(created)).days, 0) if created else None
+    except ValueError:
+        return None
+
+
 def stored_holdings(conn, today: dt.date) -> list[Holding]:
     """The holdings as the last sync left them, without a call to Trading 212: quantity and
     average from the positions, the price from the last stored day price, the profit or loss in
@@ -570,7 +655,8 @@ def stored_holdings(conn, today: dt.date) -> list[Holding]:
             pnl=(price - pos.entry_price) * pos.quantity if known else None,
             pnl_currency=pos.currency if known else None, position=pos,
             status=_status(conn, pos, today, price),
-            model_holds=_model_holds(conn, pos.ticker, pos.source, held), opened=pos.opened_at))
+            model_holds=_model_holds(conn, pos.ticker, pos.source, held),
+            opened=pos.t212_created or pos.opened_at, days=_days_held(pos.t212_created, today)))
     return rows
 
 
@@ -613,13 +699,14 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
     for h in holdings:
         key = position_key(h.t212_ticker, h.isin)
         pos = tracked.get(key[0]) if key else None
+        created = _created_date(h.created_at) or (pos.t212_created if pos else None)
         rows.append(Holding(
             name=positions.name_of(key[0], key[1], h.t212_ticker) if key else _untracked_name(h),
             quantity=h.quantity, avg_price=h.avg_price, price=h.current_price, currency=h.currency,
             pnl=h.pnl_eur, pnl_currency=h.account_currency or (summary.currency if summary else None),
             position=pos, status=_status(conn, pos, today, h.current_price) if pos else None,
             model_holds=bool(key) and _model_holds(conn, key[0], key[1], held),
-            opened=pos.opened_at if pos else (h.created_at or "")[:10]))
+            opened=created or (pos.opened_at if pos else ""), days=_days_held(created, today)))
     return PortfolioView(rows, summary=summary)
 
 
@@ -653,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(DB_PATH)
     try:
-        result = sync(conn, notify=lambda text: False)
+        result = sync(conn, silent=True)
     finally:
         conn.close()
     if result.error:

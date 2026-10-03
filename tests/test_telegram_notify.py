@@ -553,13 +553,15 @@ def test_a_quantity_is_shown_the_russian_way_without_needless_decimals(x, text):
 
 
 def _t212_holding(name="GME", *, qty=10.0, avg=23.10, price=24.05, currency="USD", pnl=8.30,
-                  pnl_currency="EUR", tracked=True, insiders=(), held=False, opened="2026-10-01", **status):
+                  pnl_currency="EUR", tracked=True, insiders=(), held=False, opened="2026-10-01", days=None,
+                  **status):
     """A line of «💼 Trading 212» as t212_account builds it; `tracked`: it has a position (and so a
-    status)."""
+    status); `days`: since it was bought in Trading 212, when that is known."""
     pos = _held(name, entry=avg or 1.0, opened=opened, insiders=insiders) if tracked else None
     st = _status(price, entry=avg or 1.0, **status) if tracked else None
     return ta.Holding(name=name, quantity=qty, avg_price=avg, price=price, currency=currency, pnl=pnl,
-                      pnl_currency=pnl_currency, position=pos, status=st, model_holds=held, opened=opened)
+                      pnl_currency=pnl_currency, position=pos, status=st, model_holds=held, opened=opened,
+                      days=days)
 
 
 _LIVE = ta.T212Summary("EUR", 12345.67, 2000.0, 10345.67, 10000.0, 345.67, 12.5)
@@ -710,3 +712,21 @@ def test_a_close_alert_names_a_trading_212_holding_by_its_symbol_not_its_isin():
                             0.10, "t212", 5.0, "GME_US_EQ", "USD")
     assert telegram_notify.format_close_alert(positions.CloseAlert(us, "time", "d", None), html=False) \
         .startswith("🚪 GME — год в позиции\n")
+
+
+def test_a_trading_212_holding_shows_the_days_since_it_was_bought_there():
+    block = tn.format_my_portfolio([], t212=_view(_t212_holding(days=5))).split("\n\n")[1]
+    assert block.splitlines()[0] == "• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30, 5 дн."
+    unpriced = tn.format_my_portfolio([], t212=_view(_t212_holding(price=None, pnl=None, days=0)))
+    assert "• GME — 10 шт., средняя 23,10, сейчас — цена недоступна, 0 дн." in unpriced
+    assert "дн." not in tn.format_my_portfolio([], t212=_view(_t212_holding())).split("\n\n")[1]   # not known
+
+
+def test_a_holding_that_pre_dates_tracking_shows_its_real_loss_and_a_stop_from_its_floor():
+    """Bought at 100 long ago, at 50 when the bot first saw it: −50% is the truth, and the stop is
+    measured from 50."""
+    legacy = _t212_holding(avg=100.0, price=50.0, pnl=-431.0, days=518, peak=50.0, stop_level=45.0)
+    block = tn.format_my_portfolio([], t212=_view(legacy)).split("\n\n")[1]
+    assert block.splitlines() == [
+        "• GME — 10 шт., средняя 100,00, сейчас 50,00 USD (−50,0%), €−431,00, 518 дн.",
+        "   стоп 45,00 (−10% от максимума 50,00), до стопа 10,0%"]

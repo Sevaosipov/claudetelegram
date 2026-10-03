@@ -351,20 +351,19 @@ def _journal(conn, signals: list, report) -> None:
     _commit_signals(conn, signals)
 
 
-def _log_only(text: str) -> bool:
-    """What a --no-telegram run does with a message: it goes to the log, not to Telegram."""
-    print(text)
-    return False
-
-
 def _sync_t212(conn, args) -> None:
     """Bring the positions in step with the Trading 212 account (t212_account.sync: read only)
     before the exits are checked, so a holding bought or sold there today counts today. Only on a
     full run -- a filtered one leaves the positions alone, as it leaves the model. Without a key
-    it does nothing; a crash is reported like a failed source."""
+    it does nothing; a crash is reported like a failed source. A --no-telegram run syncs silently:
+    it sends nothing and leaves the one-time first message for a run that can send it. What a
+    sync changed goes to the log."""
     if _filtered_run(args):
         return
-    _run_source("T212", t212_account.sync, conn, notify=_log_only if args.no_telegram else None)
+    result = _run_source("T212", t212_account.sync, conn, silent=args.no_telegram)
+    if result is not None and (result.opened or result.updated or result.closed):
+        print(f"[T212] opened {len(result.opened)}, updated {len(result.updated)}, "
+              f"closed {len(result.closed)}")
 
 
 def _send_closes(conn, closes: list) -> bool:

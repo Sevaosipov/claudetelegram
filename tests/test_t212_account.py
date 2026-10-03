@@ -346,13 +346,13 @@ class _Run:
     def __init__(self, conn):
         self.conn, self.sent, self.histories = conn, [], []
 
-    def __call__(self, *holdings, now=NOW, summary=SUMMARY, fetch=None, notify=None):
+    def __call__(self, *holdings, now=NOW, summary=SUMMARY, fetch=None, notify=None, silent=False):
         def closes(ticker, source=None):
             self.histories.append((ticker, source))
             return GME_DAYS
         return ta.sync(self.conn, fetch=fetch or (lambda: (list(holdings), summary)),
                        notify=notify or (lambda text: self.sent.append(text) or True), now=now,
-                       closes_fn=closes)
+                       closes_fn=closes, silent=silent)
 
 
 @pytest.fixture
@@ -361,7 +361,21 @@ def run(conn):
 
 
 def _synced_before(conn):
+    """The account is tracked already: the first-sync message went out, and a holding was stored
+    before (it has been sold since). What a sync finds now is new -- not a holding that pre-dates
+    tracking, and not something for the first message."""
     db.save_cached_value(conn, ta.SYNCED_ONCE_KEY, 1.0)
+    conn.execute("INSERT INTO positions (ticker, opened_at, entry_price, origin, closed_at, close_reason) "
+                 "VALUES ('WAS', '2026-01-05', 10.0, 't212', '2026-02-01', ?)", (ta.SOLD_REASON,))
+    conn.commit()
+
+
+def _flag(conn):
+    return db.get_cached_value(conn, ta.SYNCED_ONCE_KEY, 10**9)
+
+
+LEGACY_LINE = "Для уже купленных бумаг правила выхода считаются с сегодняшнего дня."
+OLD = "2024-05-01T10:00:00Z"            # bought long before the bot first looked
 
 
 def _row(conn, ticker):
@@ -377,20 +391,26 @@ def _journal(conn, ticker, members, source="SEC"):
 
 def test_the_first_sync_sends_one_message_for_all_holdings(conn, run):
     result = run(_holding(), _holding(**SAP))
-    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (2): GME, SAP"]
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (2): GME, SAP\n" + LEGACY_LINE]
     assert result.opened == ["GME", "DE0007164600"] and result.error is None and result.at == NOW
     assert {p.ticker: p.origin for p in positions.open_positions(conn)} == {"GME": "t212", "DE0007164600": "t212"}
-    assert db.get_cached_value(conn, ta.SYNCED_ONCE_KEY, 10**9) is not None
+    assert _flag(conn) is not None
     run(_holding(), _holding(**SAP))
     assert len(run.sent) == 1                                       # nothing new, nothing to say
 
 
-def test_a_first_sync_of_an_empty_account_says_nothing_but_counts(conn, run):
-    assert run().opened == [] and run.sent == []
-    assert db.get_cached_value(conn, ta.SYNCED_ONCE_KEY, 10**9) is not None
-    run(_holding())
-    assert run.sent == ["📥 Вижу в Trading 212: GME — 10 шт. по 23,10 USD. "
-                        "Слежу: стоп, продажи инсайдеров, новости."]
+def test_the_first_message_claims_nothing_it_does_not_watch(conn, run):
+    """It lists the holdings and says when their rules start: no «новости», no «инсайдеры» for a
+    Frankfurt holding that has neither."""
+    run(_holding(), _holding(**SAP))
+    assert "новост" not in run.sent[0] and "инсайдер" not in run.sent[0]
+
+
+def test_an_empty_account_does_not_use_up_the_first_message(conn, run):
+    assert run().opened == [] and run.sent == [] and _flag(conn) is None
+    run(_holding())                                                 # the first holding: the first message
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (1): GME\n" + LEGACY_LINE]
+    assert _flag(conn) is not None
 
 
 def test_a_new_holding_is_announced_and_opened_with_its_fields(conn, run):
@@ -417,8 +437,7 @@ def test_a_holding_with_no_yahoo_listing_is_keyed_by_isin_and_sized_on_its_own_p
     run(_holding(**SAP))
     ticker, source, *_ = _row(conn, "DE0007164600")
     assert (ticker, source) == ("DE0007164600", "T212") and run.histories == []     # never Yahoo
-    assert run.sent == ["📥 Вижу в Trading 212: SAP — 10 шт. по 120,00 EUR. "
-                        "Слежу: стоп, продажи инсайдеров, новости."]
+    assert run.sent == ["📥 Вижу в Trading 212: SAP — 10 шт. по 120,00 EUR. Слежу: стоп и срок."]
     assert _row(conn, "DE0007164600")[6] is None                   # one day of prices sizes no stop
 
 
@@ -539,8 +558,9 @@ def test_a_failure_while_applying_rolls_everything_back(conn, run, monkeypatch):
     monkeypatch.setattr(ta, "_open_holding", boom)
     with pytest.raises(RuntimeError):
         run(_holding())
-    for table in ("positions", "t212_prices", "t212_equity"):
+    for table in ("t212_prices", "t212_equity"):
         assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+    assert positions.open_positions(conn) == []
     assert ta.last_sync(conn) is None and run.sent == []
 
 
@@ -592,7 +612,7 @@ def test_the_sync_reads_through_the_client_and_only_gets(conn, keyed):
 def test_a_holding_with_no_price_at_all_waits_for_one(conn, run, capsys):
     result = run(_holding(avg=None, price=None), _holding(**SAP))
     assert result.opened == ["DE0007164600"] and positions.find_open(conn, "GME") is None
-    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (1): SAP"]
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (1): SAP\n" + LEGACY_LINE]
     assert "GME" in capsys.readouterr().err
     run(_holding(avg=23.10, price=24.05), _holding(**SAP))          # the price arrived
     assert positions.find_open(conn, "GME").entry_price == 23.10
@@ -609,8 +629,7 @@ def test_a_missing_average_enters_at_the_price_now_and_never_overwrites_an_entry
 def test_the_messages_show_fractional_shares_and_escape_what_trading_212_names(conn, run):
     _synced_before(conn)
     run(_holding("A&Bd_EQ", "DE000A1EWWW0", qty=0.52347, avg=1234.5, currency="EUR"))
-    assert run.sent == ["📥 Вижу в Trading 212: A&amp;B — 0,5235 шт. по 1 234,50 EUR. "
-                        "Слежу: стоп, продажи инсайдеров, новости."]
+    assert run.sent == ["📥 Вижу в Trading 212: A&amp;B — 0,5235 шт. по 1 234,50 EUR. Слежу: стоп и срок."]
     run()
     assert run.sent[-1] == "📤 A&amp;B больше нет в Trading 212 — слежение закрыто."
 
@@ -632,6 +651,217 @@ def test_a_sync_opens_no_position_twice_and_reopens_one_bought_back(conn, run):
     assert result.opened == ["GME"] and len(run.sent) == 1 and run.sent[0].startswith("📥 Вижу")
     rows = conn.execute("SELECT closed_at FROM positions WHERE ticker = 'GME' ORDER BY id").fetchall()
     assert rows == [(NOW.date().isoformat(),), (None,)]
+
+
+# ---------------------------------------------- R1: holdings that pre-date tracking ("legacy")
+def _exits(conn, today, price, closes=()):
+    return positions.check_exits(conn, today=today, price_fn=lambda t, s=None: price,
+                                 closes_fn=lambda t, s=None: list(closes), news_fn=lambda t, s=None: [])
+
+
+def _since(*closes):
+    """Completed closes from the day tracking began."""
+    return [((NOW.date() + dt.timedelta(days=i)).isoformat(), c) for i, c in enumerate(closes)]
+
+
+def test_a_holding_that_pre_dates_tracking_starts_its_clock_and_its_stop_at_the_first_sync(conn, run):
+    run(_holding(created=OLD, avg=100.0, price=50.0))
+    pos = positions.find_open(conn, "GME")
+    assert (pos.opened_at, pos.entry_price, pos.stop_base, pos.t212_created) == \
+        (NOW.date().isoformat(), 100.0, 50.0, "2024-05-01")       # the entry stays Trading 212's average
+    assert pos.stop_pct == 0.10 and run.histories == [("GME", None)]   # sized as usual, from the history before
+
+
+def test_a_legacy_holding_deep_under_water_raises_no_alert_at_the_first_check(conn, run):
+    """Bought at 100 two years ago, at 50 now, once at 200: with the old rules it would be stopped
+    out (and a year old, and dead money) the day the account is connected."""
+    run(_holding(created=OLD, avg=100.0, price=50.0))
+    highs = [((NOW.date() - dt.timedelta(days=400 - i)).isoformat(), 200.0) for i in range(300)]
+    assert _exits(conn, NOW.date(), 50.0, highs) == []
+    assert _exits(conn, NOW.date() + dt.timedelta(days=1), 46.0, highs + _since(50.0)) == []
+
+
+def test_a_fall_of_the_stop_from_the_peak_since_tracking_fires_for_a_legacy_holding(conn, run):
+    run(_holding(created=OLD, avg=100.0, price=50.0))
+    later, closes = NOW.date() + dt.timedelta(days=5), _since(50.0, 55.0, 60.0, 58.0)
+    assert _exits(conn, later, 54.1, closes) == []
+    [alert] = _exits(conn, later, 54.0, closes)
+    assert alert.trigger == "trailing_stop" and alert.detail == "−10% от максимума 60.00"
+
+
+def test_the_year_counts_from_the_tracking_start_for_a_legacy_holding(conn, run):
+    import model
+    run(_holding(created=OLD, avg=100.0, price=110.0))             # held two years already
+    day = NOW.date()
+    assert _exits(conn, day, 110.0) == []
+    assert _exits(conn, day + dt.timedelta(days=model.MAX_HOLD_DAYS - 1), 110.0) == []
+    [alert] = _exits(conn, day + dt.timedelta(days=model.MAX_HOLD_DAYS), 110.0)
+    assert alert.trigger == "time" and alert.detail == f"{model.MAX_HOLD_DAYS} дн. в позиции"
+
+
+def test_dead_money_counts_its_days_from_the_tracking_start_and_its_result_from_the_average(conn, run):
+    import model
+    import paper
+    run(_holding(created=OLD, avg=100.0, price=101.0))             # +1% on the average price paid
+    day = NOW.date()
+    while paper.business_days_between(NOW.date().isoformat(), day) < model.DEAD_MONEY_BDAYS:
+        day += dt.timedelta(days=1)
+    assert _exits(conn, day - dt.timedelta(days=1), 101.0) == []
+    [alert] = _exits(conn, day, 101.0)
+    assert alert.trigger == "dead_money"
+    assert _exits(conn, day, 106.0) == []                           # +6% on the average: not dead money
+
+
+def test_a_holding_first_seen_after_the_first_sync_opens_at_its_trading_212_date(conn, run):
+    run(_holding(**SAP))                                            # the first sync: SAP pre-dates tracking
+    run(_holding(**SAP), _holding(created="2026-09-28T14:03:11.000+02:00"))
+    gme, sap = positions.find_open(conn, "GME"), positions.find_open(conn, "DE0007164600")
+    assert (gme.opened_at, gme.entry_price, gme.stop_base, gme.t212_created) == \
+        ("2026-09-28", 23.10, None, "2026-09-28")
+    assert (sap.opened_at, sap.stop_base) == (NOW.date().isoformat(), 125.0)
+
+
+def test_legacy_keys_on_whether_a_holding_was_ever_stored_not_on_the_message_flag(conn, run):
+    db.save_cached_value(conn, ta.SYNCED_ONCE_KEY, 1.0)             # the flag alone: nothing stored yet
+    run(_holding(created=OLD, price=20.0))
+    pos = positions.find_open(conn, "GME")
+    assert (pos.opened_at, pos.stop_base) == (NOW.date().isoformat(), 20.0)
+    assert run.sent == ["📥 Вижу в Trading 212: GME — 10 шт. по 23,10 USD. "
+                        "Слежу: стоп, продажи инсайдеров, новости."]       # the flag decides the message only
+
+
+def test_a_sold_holding_still_counts_as_stored_before(conn, run):
+    run(_holding(**SAP))
+    run()                                                           # sold: no holding is open any more
+    run(_holding(created="2026-09-28T14:03:11.000+02:00"))
+    assert positions.find_open(conn, "GME").opened_at == "2026-09-28"
+
+
+def test_a_bought_position_taken_over_at_the_first_sync_keeps_its_own_clock(conn, run):
+    manual = positions.open_position(conn, "GME", 20.0, today=dt.date(2026, 9, 1), closes_fn=lambda t, s=None: [])
+    run(_holding(created=OLD))
+    pos = positions.find_open(conn, "GME")
+    assert (pos.id, pos.origin, pos.opened_at, pos.stop_base, pos.t212_created) == \
+        (manual.id, "t212", "2026-09-01", None, "2024-05-01")     # the bot has watched it since /bought
+
+
+def test_without_a_price_from_trading_212_the_stop_base_is_the_last_close_of_the_history(conn, run):
+    run(_holding(created=OLD, avg=140.0, price=None))
+    assert positions.find_open(conn, "GME").stop_base == GME_DAYS[-1][1] == 100.0
+
+
+def test_a_tracked_holding_learns_its_trading_212_date_when_it_is_told_later(conn, run):
+    _synced_before(conn)
+    run(_holding(created=None))
+    assert positions.find_open(conn, "GME").t212_created is None
+    run(_holding(created="2026-09-28T14:03:11.000+02:00"))
+    pos = positions.find_open(conn, "GME")
+    assert (pos.t212_created, pos.opened_at) == ("2026-09-28", NOW.date().isoformat())   # its clock is not moved
+
+
+# ---------------------------------------------- R2: a message names only what is really watched
+_OSLO = dict(t212_ticker="EQNRd_EQ", isin="NO0010096985", avg=25.0, price=26.0, currency="EUR")
+
+
+def _watched(run, **holding):
+    run(_holding(**holding))
+    return run.sent[-1].split(". Слежу: ")[1]
+
+
+def test_a_us_holding_is_watched_for_its_stop_its_insiders_and_its_news(conn, run):
+    _synced_before(conn)
+    assert _watched(run) == "стоп, продажи инсайдеров, новости."
+
+
+def test_a_holding_with_no_news_feed_and_no_matched_insiders_is_watched_for_its_stop_and_its_time(conn, run):
+    _synced_before(conn)
+    _journal(conn, "SAP", ["US Boss"], source="SEC")               # the US SAP: not this listing's insiders
+    assert _watched(run, **SAP) == "стоп и срок."
+
+
+@pytest.mark.parametrize("source", ["BAFIN", "SWEDEN"])
+def test_insiders_the_journal_matches_by_isin_are_named(conn, run, source):
+    _synced_before(conn)
+    _journal(conn, "DE0007164600", ["Vorstand"], source=source)
+    assert _watched(run, **SAP) == "стоп и срок, а также продажи инсайдеров."
+    assert positions.find_open(conn, "DE0007164600").insiders == ["Vorstand"]
+
+
+def test_an_oslo_company_is_watched_for_its_oslo_insiders_and_its_oslo_news(conn, run):
+    _synced_before(conn)
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    _journal(conn, "EQNR", ["Oslo Boss"], source="NORWAY")
+    assert _watched(run, **_OSLO) == "стоп и срок, а также продажи инсайдеров и новости."
+
+
+def test_an_oslo_company_with_no_signal_is_watched_for_its_news_but_not_for_insiders(conn, run):
+    _synced_before(conn)
+    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
+                 "'2026-09-01T00:00:00')")
+    assert _watched(run, **_OSLO) == "стоп и срок, а также новости."
+
+
+def test_a_signal_with_no_names_matches_no_insiders(conn, run):
+    _synced_before(conn)
+    _journal(conn, "DE0007164600", [], source="BAFIN")
+    assert _watched(run, **SAP) == "стоп и срок."
+
+
+# ---------------------------------------------- R3: a silent sync leaves the first message
+def test_a_silent_sync_sends_nothing_and_leaves_the_first_message_for_a_notifying_one(conn, run):
+    result = run(_holding(created=OLD), _holding(**SAP), silent=True)
+    assert result.opened == ["GME", "DE0007164600"] and run.sent == [] and _flag(conn) is None
+    assert positions.find_open(conn, "GME").stop_base == 24.05     # the legacy rule does not wait for a message
+    result = run(_holding(created=OLD), _holding(**SAP), now=NOW + dt.timedelta(hours=1))
+    assert result.opened == [] and _flag(conn) is not None          # nothing new, yet everything is listed
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (2): GME, SAP\n" + LEGACY_LINE]
+    run(_holding(created=OLD), _holding(**SAP), now=NOW + dt.timedelta(hours=2))
+    assert len(run.sent) == 1                                       # once
+
+
+def test_the_first_message_names_the_day_the_rules_started_when_it_is_not_today(conn, run):
+    run(_holding(created=OLD), silent=True)                         # 01.10
+    run(_holding(created=OLD), now=NOW + dt.timedelta(days=2))
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (1): GME\n"
+                        "Для уже купленных бумаг правила выхода считаются с 01.10."]
+
+
+def test_a_holding_bought_between_a_silent_sync_and_the_first_message_is_listed_but_not_legacy(conn, run):
+    run(_holding(**SAP), silent=True)
+    run(_holding(**SAP), _holding(created="2026-09-30T09:00:00Z"))
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (2): SAP, GME\n" + LEGACY_LINE]
+    gme = positions.find_open(conn, "GME")
+    assert (gme.opened_at, gme.stop_base) == ("2026-09-30", None)
+
+
+def test_the_first_message_has_no_legacy_line_when_nothing_pre_dates_tracking(conn, run):
+    """Everything the account holds was /bought before: the bot has watched it since."""
+    positions.open_position(conn, "GME", 20.0, today=dt.date(2026, 9, 1), closes_fn=lambda t, s=None: [])
+    run(_holding())
+    assert run.sent == ["📥 Слежу за вашими позициями в Trading 212 (1): GME"]
+
+
+def test_a_notifying_sync_whose_send_fails_has_still_used_the_first_message(conn, run):
+    def broken(text):
+        raise RuntimeError("telegram is down")
+    run(_holding(), notify=broken)
+    assert _flag(conn) is not None                                  # it tried, with notifications on
+    run(_holding(), _holding(**SAP))
+    assert run.sent == ["📥 Вижу в Trading 212: SAP — 10 шт. по 120,00 EUR. Слежу: стоп и срок."]
+
+
+def test_a_silent_sync_after_the_first_message_says_nothing_either(conn, run):
+    _synced_before(conn)
+    assert run(_holding(), silent=True).opened == ["GME"] and run.sent == []
+    assert run(silent=True).closed == ["GME"] and run.sent == []
+    assert _flag(conn) is not None
+
+
+def test_a_silent_sync_never_calls_notify(conn):
+    result = ta.sync(conn, fetch=lambda: ([_holding()], SUMMARY), now=NOW, closes_fn=lambda t, s=None: [],
+                     notify=lambda text: pytest.fail("a silent sync sends nothing"), silent=True)
+    assert result.opened == ["GME"]
 
 
 # ------------------------------------------------------------------ /portfolio's live view
@@ -671,7 +901,29 @@ def test_the_live_view_is_what_the_account_holds_now_with_each_tracked_holdings_
         ("GME", 12.0, 23.50, 25.00, "USD", 15.5, "EUR", "2026-09-28")     # the account's own figures, now
     assert h.position.ticker == "GME" and h.position.insiders == ["Ryan Cohen"]
     assert h.status["last"] == 25.00 and h.status["stop_pct"] == 0.10     # the stop the sync fixed
-    assert h.model_holds is False
+    assert h.model_holds is False and h.days == 3                   # bought 28.09, today is 01.10
+
+
+def test_a_legacy_holding_is_shown_with_its_real_result_and_its_days_since_the_purchase(conn, run, no_yahoo):
+    """Its rules count from the tracking start, but what the owner sees is what Trading 212 knows:
+    the result on the average price paid and the days since it was bought there."""
+    run(_holding(created=OLD, avg=100.0, price=50.0))               # the first sync
+    held = (TODAY - dt.date(2024, 5, 1)).days
+    [h] = _view(conn, _holding(created=OLD, avg=100.0, price=50.0, pnl=-431.0)).holdings
+    assert (h.days, h.opened, h.avg_price, h.price, h.pnl) == (held, "2024-05-01", 100.0, 50.0, -431.0)
+    assert (h.status["peak"], h.status["result"]) == (50.0, pytest.approx(-0.50))
+    assert h.status["stop_level"] == pytest.approx(45.0)            # the stop is measured from the floor
+    [s] = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status"))).holdings
+    assert (s.days, s.opened, s.avg_price, s.price) == (held, "2024-05-01", 100.0, 50.0)
+    assert s.pnl == pytest.approx(-500.0) and s.status["peak"] == 50.0
+
+
+def test_the_days_are_left_out_when_the_purchase_date_is_not_known(conn, run, no_yahoo):
+    run(_holding(created=None))
+    assert _view(conn, _holding(created=None)).holdings[0].days is None
+    [stored] = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status"))).holdings
+    assert stored.days is None and stored.opened == TODAY.isoformat()      # ordered by its tracking start then
+    assert _view(conn, _holding(created="2026-09-30T08:00:00Z")).holdings[0].days == 1   # told live: known
 
 
 def test_the_live_view_stores_the_days_prices_and_account_but_is_not_a_sync(conn, run, no_yahoo):
@@ -852,7 +1104,7 @@ def test_the_sync_command_runs_one_sync_and_sends_nothing(keyed, monkeypatch, ca
     assert capsys.readouterr().out == "Trading 212: синхронизация прошла — открыто 1, обновлено 0, закрыто 0\n"
     stored = db.connect(tmp_path / "data" / "d.db")
     assert [(p.ticker, p.origin) for p in positions.open_positions(stored)] == [("GME", "t212")]
-    assert db.get_cached_value(stored, ta.SYNCED_ONCE_KEY, 10**9) is not None
+    assert _flag(stored) is None                    # the one-time first message is left for the bot
     stored.close()
     assert session.calls == [("get", ta.POSITIONS_URL), ("get", ta.SUMMARY_URL)]
 
@@ -885,3 +1137,16 @@ def test_the_readme_says_what_is_read_how_often_and_that_nothing_is_traded():
         assert phrase in section, phrase
     key = " ".join(readme[readme.index("### Ключ Trading 212\n"):].split())[:1500]
     assert "Portfolio" in key and "Account data" in key and "не включайте" in key   # a read-only key
+
+
+def test_the_readme_says_how_a_holding_that_pre_dates_tracking_is_treated():
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    for phrase in ("Для уже купленных бумаг правила выхода считаются с сегодняшнего дня.",   # the first message
+                   "от цены на день первой синхронизации",                              # the stop's floor
+                   "от средней цены покупки",                                           # the result stays real
+                   "Слежу: стоп и срок",                                                # R2: only what is watched
+                   "не расходует"):                                                     # R3: --sync, --no-telegram
+        assert phrase in section, phrase
+    assert "может прийти сразу после первой синхронизации" not in section   # no burst of alerts any more

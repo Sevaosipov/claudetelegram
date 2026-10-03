@@ -959,12 +959,13 @@ def test_portfolio_keeps_the_model_when_your_positions_cannot_be_shown(conn, my_
 
 # ---- the Trading 212 account in the analyst's portfolio (stored data: no live call)
 def _t212_held(conn, ticker="GME", *, source=None, entry=23.10, qty=10.0, t212_ticker="GME_US_EQ",
-               currency="USD", opened="2026-09-28", stop=0.10, insiders="[]"):
-    """A holding as the Trading 212 sync stored it."""
+               currency="USD", opened="2026-09-28", stop=0.10, insiders="[]", base=None, created=None):
+    """A holding as the Trading 212 sync stored it; `base` and `created`: one that pre-dates
+    tracking has the stop's floor and the date Trading 212 says it was bought."""
     conn.execute(
         "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, stop_pct, origin, "
-        "quantity, t212_ticker, currency) VALUES (?,?,?,?,?,?,'t212',?,?,?)",
-        (ticker, source, opened, entry, insiders, stop, qty, t212_ticker, currency))
+        "quantity, t212_ticker, currency, stop_base, t212_created) VALUES (?,?,?,?,?,?,'t212',?,?,?,?,?)",
+        (ticker, source, opened, entry, insiders, stop, qty, t212_ticker, currency, base, created))
     conn.commit()
 
 
@@ -1027,6 +1028,22 @@ def test_portfolio_shows_the_trading_212_account_from_what_the_sync_stored(conn,
     assert "GME: вход" not in "\n".join(lines)                       # a holding is not listed twice
 
 
+def test_portfolio_shows_a_legacy_holding_with_its_real_result_and_days_since_the_purchase(
+        conn, my_prices, no_live_call):
+    """The owner's own figures: the result on the average price and how long it has been held in
+    Trading 212, not since the bot began to track it."""
+    today = dt.date.today()
+    _t212_held(conn, entry=100.0, opened=today.isoformat(), base=50.0, created="2024-05-01")
+    _t212_price(conn, "GME", 50.0)
+    lines = analyst.portfolio(conn, scored=[]).splitlines()
+    held = (today - dt.date(2024, 5, 1)).days
+    assert lines[:4] == [
+        "ВАШИ ПОЗИЦИИ (Trading 212 и /bought):",
+        "В Trading 212:",
+        f"• GME — 10 шт., средняя 100,00, сейчас 50,00 USD (−50,0%), $−500,00, {held} дн.",
+        "   стоп 45,00 (−10% от максимума 50,00), до стопа 10,0%"]
+
+
 def test_portfolio_with_only_the_trading_212_account(conn, my_prices, no_live_call):
     _t212_held(conn)
     _t212_snapshot(conn)
@@ -1078,6 +1095,8 @@ def test_the_method_names_the_trading_212_account_in_the_portfolio_output():
     method = " ".join(_text("analyst_method.txt").split())
     assert "«ВАШИ ПОЗИЦИИ (Trading 212 и /bought):»" in method and "Trading 212 account" in method
     assert "as the bot last stored" in method
+    assert "the days since it was bought in Trading 212" in method
+    assert "before the bot began to track the account" in method and "its price on that day" in method
 
 
 def test_the_analyst_uses_the_one_venue_split_the_bot_uses():
