@@ -690,6 +690,12 @@ def _price(x: float) -> str:
     return f"{x:,.2f}".replace(",", " ").replace(".", ",")
 
 
+def quantity(x: float) -> str:
+    """A number of shares, «10», «1 234,5» or «0,1235»: at most four decimals, none it doesn't need."""
+    text = f"{x:,.4f}".rstrip("0").rstrip(".")
+    return text.replace(",", " ").replace(".", ",")
+
+
 def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
     """One position: how it stands now, the stop, who it watches, and whether the model holds
     it too. `st` is positions.position_status; its to_stop is how far the price can still fall

@@ -122,14 +122,19 @@ def find_open(conn, ticker: str) -> Position | None:
 _EXCHANGE_SUFFIX = re.compile(r"[a-z]*_EQ$")
 
 
+def name_of(ticker: str, source: str | None = None, t212_ticker: str | None = None) -> str:
+    """How the user knows a name: a coin by its symbol, a Trading 212 holding keyed by its ISIN
+    by its Trading 212 symbol (SAPd_EQ -> SAP), anything else by its ticker."""
+    if crypto.is_crypto(ticker):
+        return crypto.symbol_of(ticker)
+    if source == T212_SOURCE and t212_ticker:
+        return _EXCHANGE_SUFFIX.sub("", t212_ticker) or ticker
+    return ticker
+
+
 def display_name(pos: Position) -> str:
-    """How the user knows a position: a coin by its symbol, a Trading 212 holding keyed by its
-    ISIN by its Trading 212 symbol (SAPd_EQ -> SAP), anything else by its ticker."""
-    if crypto.is_crypto(pos.ticker):
-        return crypto.symbol_of(pos.ticker)
-    if pos.source == T212_SOURCE and pos.t212_ticker:
-        return _EXCHANGE_SUFFIX.sub("", pos.t212_ticker) or pos.ticker
-    return pos.ticker
+    """name_of an open position."""
+    return name_of(pos.ticker, pos.source, pos.t212_ticker)
 
 
 def oslo_ticker(conn, isin: str) -> str | None:

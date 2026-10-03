@@ -542,3 +542,10 @@ def test_my_position_blocks_are_the_positions_alone():
     assert len(blocks) == 2 and blocks[0].startswith("• GME: вход 23,10 (01.10)")
     assert blocks[1] == "• BBB: вход 23,10 (02.10), сейчас — цена недоступна, 3 дн."
     assert tn.my_position_blocks([], html=False) == []
+
+
+# ------------------------------------------------------------ Trading 212 (/portfolio's first section)
+@pytest.mark.parametrize("x, text", [(10.0, "10"), (100.0, "100"), (1234.5, "1 234,5"), (0.52347, "0,5235"),
+                                     (2.5, "2,5"), (0.0, "0")])
+def test_a_quantity_is_shown_the_russian_way_without_needless_decimals(x, text):
+    assert tn.quantity(x) == text

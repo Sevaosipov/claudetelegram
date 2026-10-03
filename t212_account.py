@@ -10,16 +10,29 @@ TRADING212_API_SECRET in .env); a read-only key is enough (Portfolio and Account
 Nothing here prints the key, the secret or the header made from them, not even in an error:
 a failed call is a T212Error whose text is a reason for the user, and a network error is
 named by its type only.
+
+sync() keeps the bot's positions (positions.py) in step with the account: every holding is an
+open position of origin 't212', so the exits (positions.check_exits) and /portfolio cover it. A
+new holding is opened and announced, a changed quantity or average price is updated, a holding
+that is gone is closed and announced, and each sync stores the day's price of every holding
+(t212_prices) and the day's account snapshot (t212_equity). It runs every 15 minutes in
+telegram_bot.py and once in the daily run (bot.py). All of a sync's changes are committed
+together, and only after both reads succeeded: an API error changes nothing.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
+import db
+import model_score
 import positions
+import telegram_notify
 import trading212
 
 POSITIONS_URL = "https://live.trading212.com/api/v0/equity/positions"            # 1 call / 1 s
@@ -32,8 +45,13 @@ NO_KEY = "ключ Trading 212 не задан"
 BAD_KEY = "ключ Trading 212 не подходит"
 NO_RIGHTS = "ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта"
 TOO_OFTEN = "Trading 212 просит реже: слишком много запросов (429)"
+BAD_ANSWER = "ответ не разобран"
 KEY_HINT = ("Создайте в Trading 212 → Настройки → API ключ только для чтения (Portfolio, Account data) "
             "и положите в .env")
+SOLD_REASON = "продано в Trading 212"   # close_reason of a holding the account no longer has
+SYNCED_ONCE_KEY = "t212_synced_once"    # kv: set by the first sync that got through
+SYNCED_AT_KEY = "t212_synced_at"        # kv: when the last one did, epoch seconds
+_KV_FOREVER = 100 * 365 * 86400         # these two never go stale
 
 _sleep = time.sleep                     # the 429 retry's wait (tests replace it)
 
@@ -96,7 +114,7 @@ def _get(url: str, session=None):
         failed = None
         try:
             resp = client.get(url, headers=headers, timeout=TIMEOUT_SECONDS)
-        except requests.RequestException as e:
+        except Exception as e:      # requests' own errors, and whatever the layers under it raise
             failed = type(e).__name__
         if failed:
             # The type name only, raised out here rather than in the except: the error's own text
@@ -197,3 +215,248 @@ def position_key(t212_ticker: str | None, isin: str | None) -> tuple[str, str | 
     if len(isin) == 12 and isin[:2].isalpha() and isin[2:].isalnum():
         return isin, positions.T212_SOURCE
     return None
+
+
+# ------------------------------------------------------------------ the sync
+_no_key_logged = False                  # the missing key is said once per process
+
+
+@dataclass
+class SyncResult:
+    """What one sync did: the keys of the positions it opened, updated (a changed quantity or
+    average price, or a /bought position taken over) and closed; `error` -- the reason -- when it
+    changed nothing; `at`, when it ran."""
+    opened: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)
+    closed: list[str] = field(default_factory=list)
+    error: str | None = None
+    at: dt.datetime | None = None
+
+
+def last_sync(conn) -> dt.datetime | None:
+    """When the last sync got through, or None before the first."""
+    stamp = db.get_cached_value(conn, SYNCED_AT_KEY, _KV_FOREVER)
+    return None if stamp is None else dt.datetime.fromtimestamp(stamp)
+
+
+def _keyed(holdings: list[T212Position]) -> tuple[list[tuple[str, str | None, T212Position]], int]:
+    """([(ticker, source, holding)], how many could not be keyed). The same key twice (one ISIN
+    held on two exchanges) keeps the first."""
+    keyed, seen, unkeyed = [], set(), 0
+    for h in holdings:
+        key = position_key(h.t212_ticker, h.isin)
+        if key is None:
+            unkeyed += 1
+        elif key[0] not in seen:
+            seen.add(key[0])
+            keyed.append((key[0], key[1], h))
+    return keyed, unkeyed
+
+
+def _store_snapshot(conn, keyed, summary: T212Summary | None, day: str) -> None:
+    """The day's price of every holding and the day's account snapshot: one row a day each, the
+    last one of the day replacing the earlier ones. Not committed here."""
+    for key, _source, h in keyed:
+        if h.current_price is not None:
+            conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES (?,?,?)",
+                         (key, day, h.current_price))
+    if summary is not None and summary.total_value is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO t212_equity (date, total_value, invested_value, invested_cost, "
+            "cash_free, currency) VALUES (?,?,?,?,?,?)",
+            (day, summary.total_value, summary.invested_value, summary.invested_cost,
+             summary.cash_free, summary.currency))
+
+
+def _entry(h: T212Position) -> float | None:
+    """The price a holding is entered at: its average price paid, else the price now."""
+    for price in (h.avg_price, h.current_price):
+        if price is not None and price > 0:
+            return price
+    return None
+
+
+def _open_date(created_at: str | None, day: str) -> str:
+    """The date a holding was opened (createdAt), `day` when it isn't told or lies ahead."""
+    try:
+        opened = dt.date.fromisoformat((created_at or "")[:10]).isoformat()
+    except ValueError:
+        return day
+    return min(opened, day)
+
+
+def _same(a: float | None, b: float | None) -> bool:
+    if a is None or b is None:
+        return a is b
+    return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _open_holding(conn, key: str, source: str | None, h: T212Position, day: str, closes) -> bool:
+    """A position of origin 't212' for a holding seen for the first time: entered at the average
+    price paid, opened when Trading 212 says, watching the insiders of the journal's latest signal
+    on it, the stop sized from the price history as /bought sizes it. `closes` is that history;
+    None for a holding with no Yahoo listing, which has the day prices stored so far. False (and
+    nothing stored) when there is no price to enter it at."""
+    entry = _entry(h)
+    if entry is None:
+        return False
+    signal = positions._buy_signal(conn, key, source)
+    signal_id, members = signal if signal else (None, "[]")
+    if closes is None:
+        closes = positions.t212_closes(conn, key)
+    stop = model_score.stop_distance([c for _d, c in closes], positions._kind(key))
+    conn.execute(
+        "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, signal_id, stop_pct, "
+        "origin, quantity, t212_ticker, currency) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (key, source, _open_date(h.created_at, day), entry, members or "[]", signal_id, stop,
+         positions.T212, h.quantity, h.t212_ticker, h.currency))
+    return True
+
+
+def _update_holding(conn, pos: positions.Position, h: T212Position) -> bool:
+    """The account's quantity and average price on a holding already tracked (shares were added or
+    trimmed). True when either changed."""
+    quantity = pos.quantity if h.quantity is None else h.quantity
+    entry = h.avg_price if h.avg_price is not None and h.avg_price > 0 else pos.entry_price
+    changed = not (_same(quantity, pos.quantity) and _same(entry, pos.entry_price))
+    t212_ticker, currency = h.t212_ticker or pos.t212_ticker, h.currency or pos.currency
+    if changed or (t212_ticker, currency) != (pos.t212_ticker, pos.currency):
+        conn.execute("UPDATE positions SET quantity = ?, entry_price = ?, t212_ticker = ?, currency = ? "
+                     "WHERE id = ?", (quantity, entry, t212_ticker, currency, pos.id))
+    return changed
+
+
+def _take_over(conn, pos: positions.Position, source: str | None, h: T212Position) -> None:
+    """A /bought position in a name the account holds becomes the account's: its quantity and
+    average price are Trading 212's from now on. One keyed by its ISIN is priced from the day
+    prices, so its source becomes T212_SOURCE; a US one keeps the source its signal gave it."""
+    entry = _entry(h)
+    conn.execute(
+        "UPDATE positions SET origin = ?, quantity = ?, entry_price = ?, t212_ticker = ?, currency = ?, "
+        "source = ? WHERE id = ?",
+        (positions.T212, h.quantity, pos.entry_price if entry is None else entry, h.t212_ticker,
+         h.currency, source if source == positions.T212_SOURCE else pos.source, pos.id))
+
+
+def _new_text(name: str, h: T212Position) -> str:
+    esc = telegram_notify._esc
+    lot = []
+    if h.quantity is not None:
+        lot.append(f"{telegram_notify.quantity(h.quantity)} шт.")
+    entry = _entry(h)
+    if entry is not None:
+        lot.append(f"по {telegram_notify._price(entry)}" + (f" {esc(h.currency)}" if h.currency else ""))
+    what = (" — " + " ".join(lot)).rstrip(".") if lot else ""
+    return f"📥 Вижу в Trading 212: {esc(name)}{what}. Слежу: стоп, продажи инсайдеров, новости."
+
+
+def _sold_text(name: str) -> str:
+    return f"📤 {telegram_notify._esc(name)} больше нет в Trading 212 — слежение закрыто."
+
+
+def _first_text(names: list[str]) -> str:
+    return (f"📥 Слежу за вашими позициями в Trading 212 ({len(names)}): "
+            + ", ".join(telegram_notify._esc(n) for n in names))
+
+
+def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now: dt.datetime,
+           closes_fn, result: SyncResult) -> list[str]:
+    """Bring the database in step with what the account holds, in one transaction the caller
+    commits. Fills `result` and returns the messages to send once it is committed."""
+    day = now.date().isoformat()
+    keyed, unkeyed = _keyed(holdings)
+    open_now = positions.open_positions(conn)
+    tracked = {p.ticker: p for p in open_now if p.origin == positions.T212}
+    manual = {p.ticker: p for p in open_now if p.origin != positions.T212}
+    first = db.get_cached_value(conn, SYNCED_ONCE_KEY, _KV_FOREVER) is None
+    # A US holding's history comes from Yahoo. It is asked for here, before the first write: the
+    # database is not kept locked while Yahoo answers.
+    closes_fn = closes_fn or positions.daily_closes
+    histories = {key: closes_fn(key, source) for key, source, _h in keyed
+                 if key not in tracked and key not in manual and source != positions.T212_SOURCE}
+
+    _store_snapshot(conn, keyed, summary, day)
+    new_texts, sold_texts, names = [], [], []
+    for key, source, h in keyed:
+        name = positions.name_of(key, source, h.t212_ticker)
+        if key in tracked:
+            if _update_holding(conn, tracked[key], h):
+                result.updated.append(key)
+        elif key in manual:
+            _take_over(conn, manual[key], source, h)
+            result.updated.append(key)
+        elif _open_holding(conn, key, source, h, day, histories.get(key)):
+            result.opened.append(key)
+            new_texts.append(_new_text(name, h))
+        else:
+            print(f"[t212] {name}: no price to enter it at, not tracked yet", file=sys.stderr)
+            continue
+        names.append(name)
+
+    if unkeyed:
+        # It can't be matched to a position, so it may be one of them: nothing is called sold.
+        print(f"[t212] {unkeyed} holding(s) with neither a US ticker nor an ISIN; "
+              f"no position is closed this time", file=sys.stderr)
+    else:
+        held = {key for key, _source, _h in keyed}
+        for key, pos in tracked.items():
+            if key not in held:
+                conn.execute("UPDATE positions SET closed_at = ?, close_reason = ? WHERE id = ?",
+                             (day, SOLD_REASON, pos.id))
+                result.closed.append(key)
+                sold_texts.append(_sold_text(positions.display_name(pos)))
+
+    if first:           # one message for everything the account holds, not one per holding
+        new_texts = [_first_text(names)] if names else []
+        db.save_cached_value(conn, SYNCED_ONCE_KEY, 1.0, commit=False)
+    db.save_cached_value(conn, SYNCED_AT_KEY, now.timestamp(), commit=False)
+    return new_texts + sold_texts
+
+
+def _say_no_key() -> None:
+    global _no_key_logged
+    if not _no_key_logged:
+        _no_key_logged = True
+        print("[t212] Trading 212 key not set (TRADING212_API_KEY in .env): the account is not tracked")
+
+
+def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, closes_fn=None) -> SyncResult:
+    """One sync of the bot's positions with the account (see the top of the file).
+
+    `fetch()` returns (positions, summary) -- fetch_account by default; `notify(text)` sends a
+    message -- telegram_notify.send_text by default -- and is best effort: a failed send does not
+    undo the sync; `now` is the sync's time (its date is the day of the stored price and account
+    rows); `closes_fn(ticker, source)` is the price history a new US holding's stop is sized
+    from, positions.daily_closes by default.
+
+    With no key it is a quiet no-op, said once per process. A failed fetch -- T212Error, or a
+    ValueError for an answer of the wrong shape -- changes nothing and sends nothing: the result
+    carries the reason."""
+    now = now or dt.datetime.now()
+    result = SyncResult(at=now)
+    try:
+        holdings, summary = (fetch or fetch_account)()
+    except T212Error as e:
+        result.error = str(e)
+        if e.kind == "no_key":
+            _say_no_key()
+        else:
+            print(f"[t212] sync failed: {e}", file=sys.stderr)
+        return result
+    except ValueError:              # its text is not printed: only what this module wrote is safe
+        result.error = BAD_ANSWER
+        print(f"[t212] sync failed: {BAD_ANSWER}", file=sys.stderr)
+        return result
+    try:
+        messages = _apply(conn, holdings, summary, now, closes_fn, result)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    notify = notify or telegram_notify.send_text
+    for text in messages:
+        try:
+            notify(text)
+        except Exception as e:
+            print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
+    return result
