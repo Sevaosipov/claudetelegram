@@ -263,7 +263,8 @@ def position_key(t212_ticker: str | None, isin: str | None, conn=None) -> tuple[
     positions.T212_SOURCE, priced from the day prices a sync stores. None when there is neither.
 
     This is the key by the instrument alone. A sync still checks, when it opens a US holding,
-    that Yahoo's price is that instrument's (_yahoo_is_its_own), and keys it by its ISIN if not."""
+    that Yahoo's series is not another instrument's (_yahoo_is_its_own), and keys it by its ISIN
+    if it is."""
     symbol = _market_symbol(conn, t212_ticker)
     if symbol:
         return symbol, None
@@ -272,15 +273,17 @@ def position_key(t212_ticker: str | None, isin: str | None, conn=None) -> tuple[
 
 
 def _yahoo_is_its_own(closes, price: float | None, day: str) -> bool:
-    """Whether Yahoo's history under a US holding's symbol is that holding's: there is a completed
-    close (one before `day`), and the last one is within YAHOO_TOLERANCE of Trading 212's own
-    price. A symbol Yahoo does not know, or knows as another instrument, would price the holding
-    wrong -- or not at all -- for the stop. With no price from Trading 212 there is nothing to
-    compare, and a known symbol is taken."""
+    """Whether a US holding may be keyed by its symbol, going by Yahoo's history under it. False
+    only when Yahoo has a series and it is another instrument's: its last completed close (one
+    before `day`) is more than YAHOO_TOLERANCE from Trading 212's own price -- Yahoo would price
+    the holding wrong for the stop.
+
+    No history at all is not a verdict: Yahoo may be down, or not know a symbol the instrument
+    list vouches for. The symbol stands (the holding keeps its insiders and its news), and its
+    stop is priced from the sync's own day prices (positions._pricing). With no price from
+    Trading 212 there is nothing to compare either."""
     completed = [c for d, c in closes or [] if d < day and c and c > 0]
-    if not completed:
-        return False
-    if price is None or price <= 0:
+    if not completed or price is None or price <= 0:
         return True
     return abs(completed[-1] / price - 1) <= YAHOO_TOLERANCE
 
@@ -373,9 +376,9 @@ def _open_holding(conn, key: str, source: str | None, h: T212Position, day: str,
                   legacy: bool) -> list[str] | None:
     """A position of origin 't212' for a holding seen for the first time: entered at the average
     price paid, watching the insiders of the journal's latest signal on it, the stop sized from
-    the price history as /bought sizes it. `closes` is that history; None for a holding with no
-    Yahoo listing (and for one whose history was not fetched), which has the day prices stored so
-    far. Returns the insiders it watches; None (and nothing stored) when there is no price to
+    the price history as /bought sizes it. `closes` is Yahoo's history; when there is none (a
+    holding keyed by its ISIN, a symbol Yahoo has nothing for, a history not fetched) the day
+    prices stored so far are the history. Returns the insiders it watches; None (and nothing stored) when there is no price to
     enter it at.
 
     Opened when Trading 212 says it was bought -- unless it is `legacy`, a holding that was in
@@ -389,7 +392,7 @@ def _open_holding(conn, key: str, source: str | None, h: T212Position, day: str,
         return None
     signal = positions._buy_signal(conn, key, source)
     signal_id, members = signal if signal else (None, "[]")
-    if closes is None:
+    if not closes:                  # no Yahoo history (an ISIN, an unknown symbol, an outage)
         closes = positions.t212_closes(conn, key)
     stop = model_score.stop_distance([c for _d, c in closes], positions._kind(key))
     base = None
@@ -593,8 +596,8 @@ def _same_listing(bought: positions.Position, source: str | None) -> bool:
 def _plan(conn, h: T212Position, tracked_ids: set, bought: dict, closes_fn, day: str) -> _Plan:
     """The key of a holding. A US one the bot does not track yet has Yahoo asked for its history
     (here, before the lock: the database is not kept locked while Yahoo answers), and is keyed by
-    its symbol only when Yahoo's price is its own (_yahoo_is_its_own): else by its ISIN, priced
-    from the sync's own day prices. A holding that is tracked already, or goes to an open /bought
+    its symbol unless Yahoo's series is another instrument's (_yahoo_is_its_own): then by its
+    ISIN, priced from the sync's own day prices. No history from Yahoo leaves it its symbol. A holding that is tracked already, or goes to an open /bought
     position of the same listing, is not put to Yahoo: its position has its key. One whose symbol
     is a position bought on another exchange is keyed by its ISIN, beside that position."""
     key = position_key(h.t212_ticker, h.isin, conn)

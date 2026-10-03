@@ -322,6 +322,13 @@ def t212_stale(day: str, today: dt.date | None = None) -> bool:
     return ((today or dt.date.today()) - dt.date.fromisoformat(day)).days > T212_STALE_DAYS
 
 
+def t212_price(conn, ticker: str, today: dt.date | None = None) -> float | None:
+    """The last day price the Trading 212 sync stored for `ticker`, or None: none is stored, or
+    the last one is stale (t212_stale, as of `today`)."""
+    bars = t212_closes(conn, ticker)
+    return bars[-1][1] if bars and not t212_stale(bars[-1][0], today) else None
+
+
 def last_close(ticker: str, source: str | None = None, conn=None, today: dt.date | None = None) -> float | None:
     """Most recent daily close from Yahoo for the listing `source` trades the
     ticker on, or None (an ISIN, a delisting, no network). A Trading 212 holding with no
@@ -331,9 +338,7 @@ def last_close(ticker: str, source: str | None = None, conn=None, today: dt.date
     if symbol:
         return _yahoo_close(symbol)
     if source == T212_SOURCE and conn is not None:
-        bars = t212_closes(conn, ticker)
-        if bars and not t212_stale(bars[-1][0], today):
-            return bars[-1][1]
+        return t212_price(conn, ticker, today)
     return None
 
 
@@ -435,31 +440,47 @@ def _trailing_stop(pos: Position, bars: list[tuple[str, float]], price: float) -
     return None
 
 
-def _seams(conn, price_fn, closes_fn, today: dt.date | None = None):
-    """(price_fn, closes_fn): the ones given, else last_close and daily_closes -- looked up when
-    called, so a replacement of the module's own counts -- with `conn` for a Trading 212 holding
-    with no Yahoo listing (source T212_SOURCE), whose prices are the sync's day prices (a stale
-    one, as of `today`, is no price)."""
-    def price(ticker, source=None):
-        return (last_close(ticker, source, conn=conn, today=today) if source == T212_SOURCE
-                else last_close(ticker, source))
+def _pricing(conn, price_fn, closes_fn, today: dt.date | None = None):
+    """(price_of, closes_of): the price and the history of a position, as the exits and the status
+    read them.
 
-    def closes(ticker, source=None):
-        return (daily_closes(ticker, source, conn=conn) if source == T212_SOURCE
-                else daily_closes(ticker, source))
-    return price_fn or price, closes_fn or closes
+    Seams handed in -- `(ticker, source)` -- are used as they are. Otherwise the price is
+    last_close and the history daily_closes (looked up when called, so a replacement of the
+    module's own counts): Yahoo's. A position read from the Trading 212 account (origin T212)
+    that Yahoo has nothing for -- it is keyed by its ISIN, Yahoo does not know its symbol, or
+    Yahoo is down -- falls back on the day prices the sync stored for it (the same instrument,
+    the same currency), each of the two on its own: its stop still works. The stored history
+    obeys the completed-bars rule like any other, and a stored price that is stale (t212_stale,
+    as of `today`) is no price. A /bought position never reads the account's prices."""
+    def price_of(pos):
+        if price_fn is not None:
+            return price_fn(pos.ticker, pos.source)
+        price = last_close(pos.ticker, pos.source)
+        if not price and pos.origin == T212 and conn is not None:
+            price = t212_price(conn, pos.ticker, today)
+        return price
+
+    def closes_of(pos):
+        if closes_fn is not None:
+            return closes_fn(pos.ticker, pos.source)
+        bars = daily_closes(pos.ticker, pos.source)
+        if not bars and pos.origin == T212 and conn is not None:
+            bars = t212_closes(conn, pos.ticker)
+        return bars
+    return price_of, closes_of
 
 
 def last_price(conn, ticker: str, source: str | None = None) -> float | None:
-    """The price check_exits and /portfolio read for a position by default: last_close, with the
-    database for a Trading 212 holding that has no Yahoo listing."""
-    return _seams(conn, None, None)[0](ticker, source)
+    """The price check_exits and /portfolio read by default for the open position in `ticker`
+    (_pricing); with no such position, Yahoo's last close."""
+    pos = find_open(conn, ticker)
+    return last_close(ticker, source) if pos is None else _pricing(conn, None, None)[0](pos)
 
 
 def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=None, conn=None) -> dict:
     """How an open position stands, from the same price and history the exits read (`price_fn`
-    and `closes_fn`, `(ticker, source)` seams with check_exits' defaults; `conn` prices a
-    Trading 212 holding with no Yahoo listing from the sync's day prices):
+    and `closes_fn`, `(ticker, source)` seams with check_exits' defaults; `conn` lets a Trading
+    212 holding Yahoo has nothing for fall back on the sync's day prices: _pricing):
       last        the price, or None when there isn't one;
       result      last / entry price - 1, or None;
       days        days since the open;
@@ -472,9 +493,9 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
                   price now: 1 - stop_level / last (the price at its peak: the stop's own
                   distance). Zero at the stop level, negative below it (how far below, as
                   a share of the price now); None with no price."""
-    price_fn, closes_fn = _seams(conn, price_fn, closes_fn, today)
-    last = price_fn(pos.ticker, pos.source) or None
-    bars = _completed_bars(closes_fn(pos.ticker, pos.source), today)
+    price_of, closes_of = _pricing(conn, price_fn, closes_fn, today)
+    last = price_of(pos) or None
+    bars = _completed_bars(closes_of(pos), today)
     stop_pct, peak = _stop_and_peak(pos, bars)
     stop_level = peak * (1 - stop_pct)
     return {"last": last,
@@ -517,7 +538,7 @@ def _pct(x: float) -> str:
     return f"{x:.1f}%".replace(".", ",")
 
 
-def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes_fn,
+def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes_of,
                 news_fn) -> tuple[str, str] | None:
     """The model's exits (model.py) for a position that no insider or caution rule closed:
     (trigger, detail) for the first that holds, else None -- in the model's order, with the
@@ -526,7 +547,7 @@ def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes
     import model
     import paper
     coin = crypto.is_crypto(pos.ticker)
-    bars = _completed_bars(closes_fn(pos.ticker, pos.source), today)
+    bars = _completed_bars(closes_of(pos), today)
     if price is None:
         print(f"[positions] no price for {pos.ticker}; stop check skipped today")
     else:
@@ -564,11 +585,11 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None, trend_fn=None
     rule that holds (see the top of the file). Seams, all `(ticker, source)`: `price_fn`
     the current price (default last_close), `closes_fn` the history (default daily_closes),
     `news_fn` the recent headlines (default model.default_news); `trend_fn(conn, symbol)`
-    is the coin trend a caution is confirmed by. A Trading 212 holding with no Yahoo listing is
-    priced, by default, from the day prices the sync stored (t212_prices)."""
+    is the coin trend a caution is confirmed by. A Trading 212 holding Yahoo has nothing for is
+    priced, by default, from the day prices the sync stored (t212_prices): _pricing."""
     import model
     today = today or dt.date.today()
-    price_fn, closes_fn = _seams(conn, price_fn, closes_fn, today)
+    price_of, closes_of = _pricing(conn, price_fn, closes_fn, today)
     trend_fn = trend_fn or crypto.price_trend
     news_fn = news_fn or model.default_news
     alerts = []
@@ -576,7 +597,7 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None, trend_fn=None
         if pos.close_alerted_at:
             continue
         sale = _insider_sale(conn, pos)
-        price = price_fn(pos.ticker, pos.source)
+        price = price_of(pos)
         if sale:
             alerts.append(CloseAlert(pos, "insider_sell", sale, price))
             continue
@@ -584,7 +605,7 @@ def check_exits(conn, today: dt.date | None = None, price_fn=None, trend_fn=None
         if caution:
             alerts.append(CloseAlert(pos, "caution", caution, price))
             continue
-        found = _model_exit(conn, pos, today, price, closes_fn, news_fn)
+        found = _model_exit(conn, pos, today, price, closes_of, news_fn)
         if found:
             alerts.append(CloseAlert(pos, found[0], found[1], price))
     return alerts

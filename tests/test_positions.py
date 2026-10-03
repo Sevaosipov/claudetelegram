@@ -1245,6 +1245,82 @@ def test_a_position_without_a_stop_base_keeps_the_entry_as_its_floor(conn):
     assert alert.detail == "−10% от максимума 100.00"
 
 
+# ------------------------------------- K1: a holding Yahoo has nothing for is priced from its day prices
+def _us_holding(conn, **over):
+    """A Trading 212 holding keyed by its US symbol (like a /bought position)."""
+    fields = dict(source=None, entry=100.0, stop=0.10, days_ago=5, t212_ticker="GME_US_EQ", currency="USD")
+    return _t212(conn, "GME", **{**fields, **over})
+
+
+def _yahoo_has_nothing(monkeypatch):
+    """Yahoo is down, or does not know the symbol: no history (see _no_network_seams), no last close."""
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+
+
+def test_a_us_keyed_holding_yahoo_has_nothing_for_is_priced_from_its_day_prices(conn, monkeypatch):
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(5, 100.0), (4, 110.0), (3, 130.0), (2, 125.0), (0, 116.0)])
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.trigger == "trailing_stop" and alert.last_price == 116.0
+    assert alert.detail == "−10% от максимума 130.00"              # today's stored price is not a completed bar
+
+
+def test_the_price_and_the_history_fall_back_each_on_its_own(conn, monkeypatch):
+    """Yahoo has the history but no last close just now: the history is Yahoo's, the price the sync's."""
+    _yahoo_has_nothing(monkeypatch)
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: _held_bars([], [100.0, 130.0, 125.0]))
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(3, 999.0), (0, 116.0)])              # the stored history is not read: Yahoo has one
+    [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
+    assert alert.last_price == 116.0 and alert.detail == "−10% от максимума 130.00"
+
+
+def test_a_stale_day_price_is_no_price_for_a_us_keyed_holding_either(conn, monkeypatch, capsys):
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn, days_ago=10)
+    _snapshots(conn, "GME", [(9, 130.0), (4, 50.0)])               # far under the stop, four days ago
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []
+    assert "no price for GME" in capsys.readouterr().out
+
+
+def test_the_status_of_a_us_keyed_holding_yahoo_has_nothing_for_reads_its_day_prices(conn, monkeypatch):
+    _yahoo_has_nothing(monkeypatch)
+    pos = _us_holding(conn)
+    _snapshots(conn, "GME", [(3, 130.0), (0, 120.0)])
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (120.0, 130.0) and st["result"] == pytest.approx(0.20)
+    assert positions.last_price(conn, "GME") is None               # as of the real today that price is stale
+
+
+def test_a_bought_position_is_never_priced_from_trading_212_day_prices(conn, monkeypatch):
+    """Day prices left under GME by a holding since sold are not the price of a /bought GME."""
+    _yahoo_has_nothing(monkeypatch)
+    pos = _open(conn, "GME", 100.0, stop=0.10)
+    _snapshots(conn, "GME", [(3, 130.0), (0, 50.0)])
+    assert positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: []) == []
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert (st["last"], st["peak"]) == (None, 100.0)
+
+
+def test_seams_handed_in_are_not_second_guessed(conn, monkeypatch):
+    """A caller's own price and history are what the exits read, whatever is stored."""
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn)
+    _snapshots(conn, "GME", [(3, 500.0), (0, 50.0)])
+    assert positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 95.0,
+                                 closes_fn=lambda t, s=None: [], news_fn=lambda t, s=None: []) == []
+
+
+def test_last_price_is_the_price_the_exits_read_for_a_position(conn, monkeypatch):
+    _yahoo_has_nothing(monkeypatch)
+    _us_holding(conn)
+    today = dt.date.today().isoformat()
+    conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES ('GME', ?, 111.0)", (today,))
+    assert positions.last_price(conn, "GME") == 111.0
+    assert positions.last_price(conn, "ZZZ") is None               # no position: Yahoo's word alone
+
+
 # ------------------------------------- a stored Trading 212 day price that is too old is not a price
 def test_a_day_price_older_than_three_days_is_not_a_price(conn, monkeypatch):
     _no_yahoo(monkeypatch)

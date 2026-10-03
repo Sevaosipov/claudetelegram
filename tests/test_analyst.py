@@ -969,7 +969,10 @@ def _t212_held(conn, ticker="GME", *, source=None, entry=23.10, qty=10.0, t212_t
     conn.commit()
 
 
-def _t212_price(conn, ticker, price, day="2026-10-01"):
+def _t212_price(conn, ticker, price, days_ago=0):
+    """A day price the sync stored `days_ago` days before today (the analyst reads the real clock,
+    and a stored price older than three days is no price)."""
+    day = (dt.date.today() - dt.timedelta(days=days_ago)).isoformat()
     conn.execute("INSERT OR REPLACE INTO t212_prices (ticker, date, price) VALUES (?,?,?)", (ticker, day, price))
     conn.commit()
 
@@ -1004,7 +1007,7 @@ def test_portfolio_shows_the_trading_212_account_from_what_the_sync_stored(conn,
     _t212_held(conn, insiders='["Ryan Cohen"]')
     _t212_held(conn, "DE0007164600", source="T212", entry=120.0, qty=2.5, t212_ticker="SAPd_EQ",
                currency="EUR", opened="2026-09-29")
-    _t212_price(conn, "GME", 23.00, day="2026-09-30")
+    _t212_price(conn, "GME", 23.00, days_ago=1)
     _t212_price(conn, "GME", 24.05)                                  # the last stored price is the one shown
     _t212_price(conn, "DE0007164600", 126.0)
     _t212_snapshot(conn, "2026-09-30", total=1.0)

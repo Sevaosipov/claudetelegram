@@ -397,3 +397,26 @@ UTX_US_EQ RTX). This replaces §1's "a `…_US_EQ` instrument becomes the US sym
 - **Minors:** the detector flags `.send(`, `getattr(`, `__import__(` and network imports; the reach across the
   project; the watch text of a US holding with and without insiders; a zero price; the take-over rules by
   listing; `/bought` and `/sold` matching; the second line of `--check`; the redacted poll error; the help text.
+
+### K1. A Yahoo outage does not key a US holding by its ISIN (ruling on I2, 2026-10-03)
+
+The price history cannot tell "Yahoo does not know the symbol" from "Yahoo is unreachable": both return nothing.
+Under I2 an outage at the moment a US holding was first seen keyed it by its ISIN for good, without its US
+insiders and its news. This narrows I2's check and widens §4's pricing.
+
+- **(a) The key.** When Yahoo returns NO history for a US instrument's market symbol at open, the holding is keyed
+  by the US symbol anyway: the instrument list vouches for the symbol. Only a Yahoo series that EXISTS — it has a
+  completed close — and whose last completed close differs from Trading 212's `currentPrice` by more than 20 %
+  keys the holding by its ISIN with source "T212".
+- **(b) Pricing of any `origin='t212'` position** (`positions._pricing`, the defaults of `check_exits` and
+  `position_status`): Yahoo's last close and Yahoo's closes when Yahoo has them; otherwise the day prices the
+  sync stored for that holding (the same instrument, the same currency). The price and the history fall back
+  each on its own. So a US-keyed holding Yahoo does not know is still priced, and its stop still works.
+  - The stored history obeys the completed-bars rule: today's stored price is not a close.
+  - The 3-day staleness rule stays: a stored price older than 3 days is no price.
+  - A `/bought` position never reads the account's day prices. Seams handed to `check_exits` are used as given.
+  - A new holding with no Yahoo history sizes its stop from the stored day prices it has.
+- **Tests:** an empty Yahoo answer and a today-only bar keep the symbol; a series more than 20 % away keys by
+  ISIN; a US-keyed holding with no Yahoo data trips its trailing stop on the stored day prices (peak from
+  completed stored days); the price and the history fall back independently; a stale stored price gives no
+  price; a `/bought` position is not priced from them; handed-in seams are not second-guessed.

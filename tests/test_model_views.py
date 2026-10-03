@@ -820,10 +820,10 @@ def test_menu_prices_a_trading_212_holding_from_its_stored_day_price(conn, capsy
     today = dt.date.today().isoformat()
     monkeypatch.setattr(model, "score_today", lambda c, *a, **k: [])
     monkeypatch.setattr("positions.check_exits", lambda c, *a, **k: [])
-    monkeypatch.setattr("positions.last_close",
-                        lambda ticker, source=None, conn=None, today=None: 110.0 if conn else None)
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: None)     # Yahoo has no ISIN
     conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price, origin, quantity, t212_ticker, "
                  "currency) VALUES ('DE0007164600', 'T212', ?, 100.0, 't212', 5, 'SAPd_EQ', 'EUR')", (today,))
+    conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES ('DE0007164600', ?, 110.0)", (today,))
     conn.commit()
     menu.show_signals(conn)
     out = capsys.readouterr().out

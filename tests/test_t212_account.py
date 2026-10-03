@@ -862,7 +862,7 @@ def test_a_holding_that_vanishes_and_returns_keeps_its_clock_and_its_stop_base(c
 def test_a_restored_holding_is_named_in_the_first_message_as_its_own_row_has_it(conn, run):
     """Stored under its ISIN while Yahoo did not know the symbol, sold, and back when Yahoo does:
     it is the stored row again -- still keyed by its ISIN -- and is listed once, by its name."""
-    run.yahoo = lambda ticker: []
+    run.yahoo = lambda ticker: _closes(500.0)                       # another instrument's price
     run(_holding(), silent=True)                                    # keyed US36467W1099; no message yet
     run(silent=True, now=NOW + dt.timedelta(hours=1))               # gone
     run.yahoo = None
@@ -962,13 +962,15 @@ def test_without_an_instrument_row_the_code_is_the_symbol(conn, run):
 
 
 @pytest.mark.parametrize("yahoo, by_isin", [
-    ([], True),                                                     # Yahoo has no close for the symbol
-    (_closes(480.0, 500.0), True),                                  # another instrument's price (24,05 here)
+    ([], False),                                                    # no history at all: an outage is not a verdict
+    (_closes(24.0, ends_days_ago=0), False),                        # only today's bar: no completed close to compare
+    (_closes(480.0, 500.0), True),                                  # a series that exists, and is another instrument's
     (_closes(19.0), True), (_closes(29.0), True),                   # more than 20 % away
     (_closes(20.5), False), (_closes(28.0), False),                 # within 20 %
-    (_closes(24.0, ends_days_ago=0), True),                         # only today's bar: no completed close
     (_closes(500.0, 24.0), False)])                                 # the LAST completed close counts
-def test_a_us_holding_is_keyed_by_its_symbol_only_when_yahoos_price_is_its_own(conn, run, yahoo, by_isin):
+def test_a_us_holding_is_keyed_by_its_isin_only_when_yahoos_series_is_another_instruments(conn, run, yahoo, by_isin):
+    """K1: Yahoo returning nothing (it is down, or does not know the symbol) must not key the holding
+    by its ISIN for good. Only a series that exists and is far from Trading 212's price does."""
     _synced_before(conn)
     run.yahoo = lambda ticker: yahoo
     result = run(_holding())                                        # GME, 24,05 at Trading 212
@@ -991,18 +993,45 @@ def test_a_us_holding_with_no_price_from_trading_212_keeps_its_symbol_when_yahoo
 
 def test_a_us_holding_with_no_isin_to_fall_back_on_keeps_its_symbol(conn, run):
     _synced_before(conn)
-    run.yahoo = lambda ticker: []
+    run.yahoo = lambda ticker: _closes(500.0)                       # another instrument's, but no ISIN to key it by
     assert run(_holding("GME_US_EQ", None)).opened == ["GME"]
 
 
-def test_a_holding_keyed_by_its_isin_is_priced_from_the_days_prices_and_trips_its_stop_there(conn, run):
+@pytest.fixture
+def yahoo_has_nothing(monkeypatch):
+    """Yahoo is down, or does not know the symbol: no history and no last close for anything."""
+    import paper
+    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+
+
+def test_a_us_holding_yahoo_has_nothing_for_keeps_its_symbol_and_is_priced_from_the_day_prices(
+        conn, run, yahoo_has_nothing):
+    """K1: keyed GME all the same (its insiders and its news are GME's), and its stop still works --
+    on the prices the sync stores."""
     _synced_before(conn)
+    _journal(conn, "GME", ["Ryan Cohen"])
     run.yahoo = lambda ticker: []
     run(_holding(avg=100.0, price=100.0))
+    pos = positions.find_open(conn, "GME")
+    assert (pos.source, pos.t212_ticker, pos.insiders) == (None, "GME_US_EQ", ["Ryan Cohen"])
+    assert run.sent[-1].endswith("Слежу: стоп, продажи инсайдеров, новости.")
     run(_holding(avg=100.0, price=130.0), now=NOW + dt.timedelta(days=1))
     run(_holding(avg=100.0, price=110.0), now=NOW + dt.timedelta(days=2))
-    [alert] = positions.check_exits(conn, today=NOW.date() + dt.timedelta(days=2), news_fn=lambda t, s=None: [])
+    day = NOW.date() + dt.timedelta(days=2)
+    [alert] = positions.check_exits(conn, today=day, news_fn=lambda t, s=None: [])
     assert alert.trigger == "trailing_stop" and alert.last_price == 110.0
+    assert alert.detail == "−15% от максимума 130.00"               # the peak: yesterday's stored price
+
+
+def test_a_us_holding_with_no_yahoo_history_sizes_its_stop_from_the_day_prices_it_has(conn, run):
+    _synced_before(conn)
+    for day, price in _flat(24.0):                                  # stored while it was held before
+        conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES ('GME', ?, ?)", (day, price))
+    conn.commit()
+    run.yahoo = lambda ticker: []
+    run(_holding())
+    assert positions.find_open(conn, "GME").stop_pct == 0.10
 
 
 def test_a_tracked_position_is_found_by_its_stored_trading_212_id_not_by_the_key(conn, run):
@@ -1019,9 +1048,9 @@ def test_a_tracked_position_is_found_by_its_stored_trading_212_id_not_by_the_key
     assert conn.execute("SELECT ticker, price FROM t212_prices").fetchall() == [("FB", 510.0)]   # its own ticker
 
 
-def test_a_holding_keyed_by_its_isin_at_open_stays_one_position_when_yahoo_knows_it_later(conn, run):
+def test_a_holding_keyed_by_its_isin_at_open_stays_one_position_when_yahoo_agrees_later(conn, run):
     _synced_before(conn)
-    run.yahoo = lambda ticker: []
+    run.yahoo = lambda ticker: _closes(500.0)                       # another instrument's price: keyed by its ISIN
     run(_holding())
     run.yahoo = None
     result = run(_holding(), now=NOW + dt.timedelta(hours=1))
@@ -1817,3 +1846,11 @@ def test_the_readme_claims_of_the_safety_tests_only_what_they_prove():
         assert phrase in section, phrase
     assert "торговать нечем" not in section and "падают, если в них появится хоть один вызов" not in section
     assert "сплит" in section                                       # M10: one false stop after a stock split
+
+
+def test_the_readme_says_what_happens_when_yahoo_has_nothing_for_a_us_holding():
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    assert "Если Yahoo не ответил или не знает тикер, бумага остаётся под своим тикером" in section
+    assert "если Yahoo не знает такого тикера или" not in section    # that no longer keys it by its ISIN
