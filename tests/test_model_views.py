@@ -808,7 +808,8 @@ def test_menu_prices_a_trading_212_holding_from_its_stored_day_price(conn, capsy
     conn.commit()
     menu.show_signals(conn)
     out = capsys.readouterr().out
-    assert "сейчас 110.00 (+10.0%)" in out and "цена недоступна" not in out
+    assert "• SAP: вход 100.00, сейчас 110.00 (+10.0%)" in out and "цена недоступна" not in out
+    assert "DE0007164600" not in out                               # by the name its owner knows
 
 
 def test_menu_signals_survive_a_failing_score(conn, capsys, monkeypatch):

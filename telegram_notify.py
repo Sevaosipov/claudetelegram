@@ -583,9 +583,10 @@ _CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution":
                  "time": "год в позиции", "trend_down": "тренд вниз", "news": "плохие новости"}
 
 
-def _alert_name(pos) -> str:
-    """What a close alert calls its position: the ticker -- but a Trading 212 holding keyed by its
-    ISIN by its Trading 212 symbol (SAP, not DE0007164600), the name its owner knows."""
+def _position_name(pos) -> str:
+    """What a close alert and the menu's list call a position: its ticker -- but a Trading 212
+    holding keyed by its ISIN by its Trading 212 symbol (SAP, not DE0007164600), the name its
+    owner knows."""
     import positions        # light, and positions never imports this module
     if pos.source == positions.T212_SOURCE:
         return positions.name_of(pos.ticker, pos.source, pos.t212_ticker)
@@ -599,7 +600,7 @@ def format_close_alert(alert, *, html: bool = True) -> str:
     if alert.last_price:
         change = (alert.last_price / pos.entry_price - 1) * 100
         price = f" · вход {pos.entry_price:,.2f} → {alert.last_price:,.2f} ({change:+.1f}%)"
-    head = f"🚪 {_alert_name(pos)} — {reason}"
+    head = f"🚪 {_position_name(pos)} — {reason}"
     detail = f"{alert.detail}{price} · открыта {datefmt.fmt(pos.opened_at)}"
     return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
 
@@ -613,7 +614,7 @@ def format_positions(positions: list, price_fn) -> str:
         price = price_fn(p.ticker, p.source)
         change = f"{(price / p.entry_price - 1) * 100:+.1f}%" if price else "цена недоступна"
         days = (today - dt.date.fromisoformat(p.opened_at)).days
-        lines.append(f"• {p.ticker}: вход {p.entry_price:,.2f}, сейчас "
+        lines.append(f"• {_position_name(p)}: вход {p.entry_price:,.2f}, сейчас "
                      f"{f'{price:,.2f}' if price else '—'} ({change}), {days} дн.")
     return "\n".join(lines)
 
