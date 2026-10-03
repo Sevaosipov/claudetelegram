@@ -73,14 +73,20 @@ KEY_HINT = ("Создайте в Trading 212 → Настройки → API кл
             "и положите в .env")
 EMPTY_LIST = "пустой список позиций при вложенных средствах"
 LIST_DISAGREES = "список позиций не сходится со сводкой счёта"
-SALE_UNCONFIRMED = "нет суммы вложений в сводке: продажу подтвердит следующая синхронизация"
+SALE_UNCONFIRMED = "список нельзя сверить со сводкой: продажу подтвердит следующая синхронизация"
 UNKEYED_HOLDING = "есть бумага без тикера США и без ISIN: продажи не разбираются"
 LIST_TOLERANCE, LIST_TOLERANCE_MONEY = 0.02, 5.0   # how far the list may be from the summary: 2 % or €5
 SOLD_REASON = "продано в Trading 212"   # close_reason of a holding the account no longer has
 SYNCED_ONCE_KEY = "t212_synced_once"    # kv: set by the first sync that got through
 SYNCED_AT_KEY = "t212_synced_at"        # kv: when the last one did, epoch seconds
-MISSING_KEY = "t212_missing"            # kv (JSON): ids of the positions missing at the last sync
-                                        # that had no summary to check the list against
+MISSING_KEY = "t212_missing"            # kv (JSON {position id: epoch of its first miss}): who was missing at
+                                        # the syncs whose list could not be checked against the summary
+CONFIRM_AFTER = dt.timedelta(minutes=10)   # the second miss counts only this long after the first: the daily
+                                        # run and the bot loop are two processes and may meet one bad answer
+LIST_GAP_KEY = "t212_list_gap_since"    # kv: epoch of the first sync of the run of syncs whose list disagreed
+LIST_OK_KEY = "t212_list_ok"            # kv: some sync's list added up to its summary (the success history)
+GAP_WARNED_KEY = "t212_gap_{day}"       # kv: the day's «список не сходится» warning went out
+LIST_GAP_WARNING = "⚠️ Trading 212: список позиций не сходится со счётом уже сутки — продажи не отмечаю."
 WARNED_KEY = "t212_silent_{day}"        # kv: the day's «не отвечает уже сутки» warning went out
 KEY_REMOVED_KEY = "t212_key_removed"    # kv: «ключ убран» was said; cleared when a key is there again
 KEY_REMOVED = ("Ключ Trading 212 убран — слежение за счётом остановлено. "
@@ -304,9 +310,11 @@ class SyncResult:
     `error` -- the reason -- when it changed nothing; `at`, when it ran.
 
     `held` are the keys of the positions the list did not show and that were NOT closed this
-    time, and `note` says why: the list did not add up to the summary, or there was no summary
-    value to check it against and the sale waits for the next sync. `error_kind` tells a key
-    problem (unauthorized, forbidden: asking again soon is no use) from the rest."""
+    time, and `note` says why: the list did not add up to the summary, or it could not be checked
+    against it (no summary value, a holding without a value of its own, another currency) and the
+    sale waits for a later sync, at least CONFIRM_AFTER on. `error_kind` tells a key
+    problem (unauthorized, forbidden: asking again soon is no use) from the rest. `agrees` is
+    whether the list added up to the summary of the sync (None: it could not be told)."""
     opened: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
     closed: list[str] = field(default_factory=list)
@@ -315,6 +323,7 @@ class SyncResult:
     held: list[str] = field(default_factory=list)
     note: str | None = None
     error_kind: str | None = None       # T212Error.kind of the failure, or "answer" for a bad answer
+    agrees: bool | None = None
 
 
 def last_sync(conn) -> dt.datetime | None:
@@ -489,13 +498,22 @@ def _invested(summary: T212Summary | None) -> float | None:
     return None if summary is None else summary.invested_value
 
 
+def _currency(code: str | None) -> str:
+    return (code or "").strip().upper()
+
+
 def _list_gap(holdings: list[T212Position], summary: T212Summary | None) -> float | None:
     """How far the positions list is from the summary of the same sync: the holdings' summed value
     less the value the summary says is invested (both in the account's currency). None when it
-    can't be told: the summary has no such value, or a holding has no value of its own."""
+    can't be told: the summary has no such value, a holding has no value of its own, or a holding's
+    walletImpact is in another currency than the summary's -- two sums in two currencies are not a
+    disagreement, they are not comparable (a currency that is not told is not a mismatch)."""
     invested = _invested(summary)
     values = [h.value_eur for h in holdings]
     if invested is None or any(v is None for v in values):
+        return None
+    account = _currency(summary.currency)
+    if account and any(_currency(h.account_currency) not in ("", account) for h in holdings):
         return None
     return sum(values) - invested
 
@@ -510,19 +528,40 @@ def _list_agrees(holdings: list[T212Position], summary: T212Summary | None) -> b
     return abs(gap) <= max(LIST_TOLERANCE * abs(_invested(summary)), LIST_TOLERANCE_MONEY)
 
 
+def _waiting(conn, now_ts: float) -> dict[int, float]:
+    """Who was missing at the syncs whose list could not be checked, and when each was first missed
+    (MISSING_KEY: {position id: epoch}). A list of bare ids -- an older version kept no time -- is
+    read as misses of this very moment, never as old ones."""
+    saved = db.get_cached_json(conn, MISSING_KEY)
+    try:
+        if isinstance(saved, dict):
+            return {int(i): float(t) for i, t in saved.items()}
+        if isinstance(saved, list):
+            return {int(i): now_ts for i in saved}
+    except (TypeError, ValueError):
+        pass
+    return {}
+
+
 def _close_missing(conn, missing: list[positions.Position], holdings: list[T212Position],
-                   summary: T212Summary | None, unkeyed: int, day: str, result: SyncResult) -> list[str]:
-    """Close the tracked positions the list did not show -- when the list can be believed. Returns
-    the «📤» messages of those closed; the others go to result.held with result.note.
+                   summary: T212Summary | None, agrees: bool | None, unkeyed: int, now: dt.datetime,
+                   result: SyncResult) -> list[str]:
+    """Close the tracked positions the list did not show -- when the list can be believed
+    (`agrees`: _list_agrees). Returns the «📤» messages of those closed; the others go to
+    result.held with result.note.
 
       the list adds up to the summary     every missing one was sold: closed;
       it does not add up                  the list is short, not the account: none is closed;
-      it can't be checked                 a missing one is closed only when it was missing at the
-                                          sync before too (MISSING_KEY keeps who was);
+      it can't be checked                 a missing one is closed only when it was missing at an
+                                          earlier sync too, and that first miss was at least
+                                          CONFIRM_AFTER before this one (MISSING_KEY keeps who was
+                                          missing, and when they first were: the daily run and the
+                                          bot loop are separate processes, and two syncs seconds
+                                          apart can meet the same bad answer);
       a holding that can't be keyed       it may be one of the missing: none is closed.
     """
-    agrees = _list_agrees(holdings, summary)
-    waiting = set(db.get_cached_json(conn, MISSING_KEY) or [])
+    day, now_ts = now.date().isoformat(), now.timestamp()
+    waiting = _waiting(conn, now_ts)
     if unkeyed:
         sold, reason = [], UNKEYED_HOLDING
         print(f"[t212] {unkeyed} holding(s) with neither a US ticker nor an ISIN; "
@@ -534,7 +573,9 @@ def _close_missing(conn, missing: list[positions.Position], holdings: list[T212P
         print(f"[t212] the positions list and the account summary disagree {how_far}: "
               f"no position is closed this time", file=sys.stderr)
     elif agrees is None:
-        sold, reason = [p for p in missing if p.id in waiting], SALE_UNCONFIRMED
+        confirmed = CONFIRM_AFTER.total_seconds()
+        sold = [p for p in missing if p.id in waiting and now_ts - waiting[p.id] >= confirmed]
+        reason = SALE_UNCONFIRMED
     else:
         sold, reason = missing, None
     texts = []
@@ -547,17 +588,34 @@ def _close_missing(conn, missing: list[positions.Position], holdings: list[T212P
     kept = [p for p in missing if p.id not in closed]
     if kept:
         result.held, result.note = [p.ticker for p in kept], reason
-    # Who is waiting for a second sync: after a list that could not be checked, everyone it missed
-    # and did not close; after one that did not add up, whoever was waiting and is still missing
-    # (that sync is no evidence either way); after one that adds up, nobody.
+    # Who is waiting for a second sync, and since when: after a list that could not be checked,
+    # everyone it missed and did not close, each keeping the time of its FIRST miss (a second miss
+    # too soon does not start the count again); after one that did not add up, whoever was waiting
+    # and is still missing (that sync is no evidence either way); after one that adds up, nobody.
     if agrees is None and not unkeyed:
-        pending = [p.id for p in kept]
+        pending = {p.id: waiting.get(p.id, now_ts) for p in kept}
     elif agrees is True and not unkeyed:
-        pending = []
+        pending = {}
     else:
-        pending = [p.id for p in kept if p.id in waiting]
-    db.save_cached_value(conn, MISSING_KEY, json.dumps(pending), commit=False)
+        pending = {p.id: waiting[p.id] for p in kept if p.id in waiting}
+    db.save_cached_value(conn, MISSING_KEY, json.dumps({str(i): t for i, t in pending.items()}),
+                         commit=False)
     return texts
+
+
+def _track_list(conn, agrees: bool | None, now: dt.datetime) -> None:
+    """What the syncs say about the list over time, in the sync's own transaction: LIST_GAP_KEY is
+    when the run of syncs whose list disagrees with the summary began, and LIST_OK_KEY that a list
+    has added up at least once (the success history _warn_about_the_list wants). A sync whose list
+    adds up ends the run; one that can't be checked is no evidence either way. It writes only when
+    something changes."""
+    if agrees is True:
+        if db.get_cached_value(conn, LIST_OK_KEY, _KV_FOREVER) is None:
+            db.save_cached_value(conn, LIST_OK_KEY, 1.0, commit=False)
+        if db.get_cached_value(conn, LIST_GAP_KEY, _KV_FOREVER) is not None:
+            conn.execute("DELETE FROM kv_cache WHERE key = ?", (LIST_GAP_KEY,))
+    elif agrees is False and db.get_cached_value(conn, LIST_GAP_KEY, _KV_FOREVER) is None:
+        db.save_cached_value(conn, LIST_GAP_KEY, now.timestamp(), commit=False)
 
 
 def _restore(conn, h: T212Position, in_use: set[str]) -> positions.Position | None:
@@ -656,6 +714,8 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
                           (positions.T212,)).fetchone() is None
 
     _store_equity(conn, summary, day)
+    agrees = result.agrees = _list_agrees(holdings, summary)
+    _track_list(conn, agrees, now)
     listed: set[int] = set()            # the tracked positions the list shows
     taken = set(by_key)                 # tickers that have their position: one position a ticker
     new_texts, names, legacy_days, unkeyed = [], [], [], 0
@@ -713,7 +773,7 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
         names.append(name)
 
     missing = [pos for pos in tracked if pos.id not in listed]
-    sold_texts = _close_missing(conn, missing, holdings, summary, unkeyed, day, result)
+    sold_texts = _close_missing(conn, missing, holdings, summary, agrees, unkeyed, now, result)
 
     _key_is_there(conn, commit=False)
     db.save_cached_value(conn, SYNCED_AT_KEY, now.timestamp(), commit=False)
@@ -725,6 +785,53 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
             new_texts = [_first_text(names, min(legacy_days, default=None), day)]
             db.save_cached_value(conn, SYNCED_ONCE_KEY, 1.0, commit=False)
     return new_texts + sold_texts
+
+
+def _say_once(conn, key: str, text: str, notify) -> bool:
+    """Say `text` once, as marked by `key` in kv; True when it went out. The mark is written -- and
+    committed -- BEFORE the send: a database that can't be written (the other process holds it) or a
+    mark that fails to be stored means nothing is sent, so a message is never repeated because its
+    mark was lost after it went out; the next sync tries again. A send that did not go out (Telegram
+    refused it, or raised) gives the mark back, so that the next sync tries again; should even that
+    fail, the mark stays and the message is not repeated. Nothing is logged but error types."""
+    try:
+        if db.get_cached_value(conn, key, _KV_FOREVER) is not None:
+            return False
+        db.save_cached_value(conn, key, 1.0)
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"[t212] a message was not sent, its mark was not stored: {type(e).__name__}", file=sys.stderr)
+        return False
+    try:
+        sent = bool((notify or telegram_notify.send_text)(text))
+    except Exception as e:
+        print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
+        sent = False
+    if not sent:
+        try:
+            conn.execute("DELETE FROM kv_cache WHERE key = ?", (key,))
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+    return sent
+
+
+def _warn_about_the_list(conn, notify, now: dt.datetime) -> None:
+    """The list has disagreed with the summary for SILENT_AFTER -- the run of syncs LIST_GAP_KEY
+    dates -- after it had added up before (LIST_OK_KEY: on first contact `--check` is what says
+    «расходятся»), so sales are not being marked: the owner is told, once a day (_say_once). Called
+    by a sync whose list disagrees now, after that sync was committed: whatever the database does
+    now, it must not turn a sync that got through into one that raised."""
+    try:
+        since = db.get_cached_value(conn, LIST_GAP_KEY, _KV_FOREVER)
+        if since is None or now.timestamp() - since < SILENT_AFTER.total_seconds():
+            return
+        if db.get_cached_value(conn, LIST_OK_KEY, _KV_FOREVER) is None:
+            return
+    except sqlite3.Error as e:
+        print(f"[t212] the list's history was not read: {type(e).__name__}", file=sys.stderr)
+        return
+    _say_once(conn, GAP_WARNED_KEY.format(day=now.date().isoformat()), LIST_GAP_WARNING, notify)
 
 
 def _warn_when_silent_for_a_day(conn, reason: str, notify, now: dt.datetime) -> None:
@@ -840,7 +947,9 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     the sync then stays quiet until a key is configured again.
 
     A holding that is not on the list is closed only when the list can be believed
-    (_close_missing): result.held and result.note say what was not closed and why."""
+    (_close_missing): result.held and result.note say what was not closed and why. A list that
+    keeps disagreeing with the summary is not silent either: after a day of it (it having added
+    up before) the owner is told, once a day (_warn_about_the_list; never by a silent sync)."""
     now = now or dt.datetime.now()
     result = SyncResult(at=now)
     try:
@@ -866,6 +975,8 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
             notify(text)
         except Exception as e:
             print(f"[t212] notification not sent: {type(e).__name__}", file=sys.stderr)
+    if not silent and result.agrees is False:
+        _warn_about_the_list(conn, notify, now)
     return result
 
 

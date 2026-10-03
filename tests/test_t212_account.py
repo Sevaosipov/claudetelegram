@@ -804,14 +804,18 @@ def test_the_list_is_trusted_within_two_percent_or_five_euros_of_the_summary(con
     assert (result.closed == ["GME"]) is trusted and (result.held == ["GME"]) is not trusted
 
 
+def _minutes(n):
+    return NOW + dt.timedelta(minutes=n)
+
+
 def test_without_a_summary_value_a_sale_needs_two_syncs_in_a_row(conn, run):
     _synced_before(conn)
     run(_holding(), _holding(**SAP))
     run.sent.clear()
-    first = run(_holding(**SAP), summary=_invested(None))
+    first = run(_holding(**SAP), summary=_invested(None), now=_minutes(15))
     assert first.closed == [] and first.held == ["GME"] and run.sent == []
-    assert first.note == "нет суммы вложений в сводке: продажу подтвердит следующая синхронизация"
-    second = run(_holding(**SAP), summary=_invested(None))
+    assert first.note == ta.SALE_UNCONFIRMED == "список нельзя сверить со сводкой: продажу подтвердит следующая синхронизация"
+    second = run(_holding(**SAP), summary=_invested(None), now=_minutes(30))
     assert second.closed == ["GME"] and second.held == []
     assert run.sent == ["📤 GME больше нет в Trading 212 — слежение закрыто."]
 
@@ -820,22 +824,22 @@ def test_a_holding_that_is_back_in_between_starts_the_count_again(conn, run):
     _synced_before(conn)
     run(_holding(), _holding(**SAP))
     unknown = _invested(None)
-    assert run(_holding(**SAP), summary=unknown).held == ["GME"]
-    assert run(_holding(), _holding(**SAP), summary=unknown).held == []          # it is there again
-    assert run(_holding(**SAP), summary=unknown).closed == []                    # the first miss, again
-    assert run(_holding(**SAP), summary=unknown).closed == ["GME"]
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(15)).held == ["GME"]
+    assert run(_holding(), _holding(**SAP), summary=unknown, now=_minutes(30)).held == []   # it is there again
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(45)).closed == []             # the first miss, again
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(60)).closed == ["GME"]
 
 
 def test_a_failed_sync_between_two_misses_is_not_a_sync(conn, run):
     _synced_before(conn)
     run(_holding(), _holding(**SAP))
     unknown = _invested(None)
-    run(_holding(**SAP), summary=unknown)
+    run(_holding(**SAP), summary=unknown, now=_minutes(15))
 
     def down():
         raise ta.T212Error("HTTP 502", "status")
-    assert run(fetch=down).error == "HTTP 502"
-    assert run(_holding(**SAP), summary=unknown).closed == ["GME"]              # two successful ones in a row
+    assert run(fetch=down, now=_minutes(30)).error == "HTTP 502"
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(45)).closed == ["GME"]    # two successful ones in a row
 
 
 def test_a_holding_without_its_value_cannot_vouch_for_the_list(conn, run):
@@ -844,24 +848,102 @@ def test_a_holding_without_its_value_cannot_vouch_for_the_list(conn, run):
     _synced_before(conn)
     run(_holding(), _holding(**SAP))
     partial = (_holding(**dict(SAP, value=None)),)
-    assert run(*partial, summary=_invested(100.0)).closed == []
-    assert run(*partial, summary=_invested(100.0)).closed == ["GME"]
+    assert run(*partial, summary=_invested(100.0), now=_minutes(15)).closed == []
+    assert run(*partial, summary=_invested(100.0), now=_minutes(30)).closed == ["GME"]
 
 
 def test_a_list_that_disagrees_does_not_count_as_a_miss_nor_clear_one(conn, run):
     _synced_before(conn)
     run(_holding(), _holding(**SAP))
-    assert run(_holding(**SAP), summary=_invested(None)).held == ["GME"]        # the first miss
-    assert run(_holding(**SAP), summary=_invested(500.0)).closed == []          # a list that does not add up
-    assert run(_holding(**SAP), summary=_invested(None)).closed == ["GME"]      # the second miss
+    assert run(_holding(**SAP), summary=_invested(None), now=_minutes(15)).held == ["GME"]   # the first miss
+    assert run(_holding(**SAP), summary=_invested(500.0), now=_minutes(30)).closed == []     # a list that does not add up
+    assert run(_holding(**SAP), summary=_invested(None), now=_minutes(45)).closed == ["GME"]  # the second miss
 
 
 def test_a_list_that_adds_up_closes_at_once_and_forgets_the_pending_miss(conn, run):
     _synced_before(conn)
     run(_holding(), _holding(**SAP))
-    run(_holding(**SAP), summary=_invested(None))
-    assert run(_holding(**SAP)).closed == ["GME"]                               # verified: no waiting
-    assert db.get_cached_json(conn, ta.MISSING_KEY) == []
+    run(_holding(**SAP), summary=_invested(None), now=_minutes(15))
+    assert run(_holding(**SAP), now=_minutes(30)).closed == ["GME"]             # verified: no waiting
+    assert db.get_cached_json(conn, ta.MISSING_KEY) == {}
+
+
+# ---------------------------------------------- F6: the second miss counts only ten minutes after the first
+def _two_holdings_and_one_missing(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+
+
+def test_the_second_miss_needs_to_be_ten_minutes_after_the_first(conn, run):
+    """The daily run and the bot loop are separate processes: two syncs seconds apart can meet one bad
+    answer. 2 s apart is one miss and no close; 15 minutes apart is two."""
+    _two_holdings_and_one_missing(conn, run)
+    unknown = _invested(None)
+    first = run(_holding(**SAP), summary=unknown, now=_minutes(60))
+    soon = run(_holding(**SAP), summary=unknown, now=_minutes(60) + dt.timedelta(seconds=2))
+    assert first.closed == soon.closed == [] and soon.held == ["GME"] and soon.note == ta.SALE_UNCONFIRMED
+    assert positions.find_open(conn, "GME") is not None and run.sent == []
+    later = run(_holding(**SAP), summary=unknown, now=_minutes(75))
+    assert later.closed == ["GME"] and later.held == []
+    assert run.sent == ["📤 GME больше нет в Trading 212 — слежение закрыто."]
+
+
+@pytest.mark.parametrize("seconds, closes", [(2, False), (599, False), (600, True), (901, True)])
+def test_the_close_needs_the_second_miss_at_least_ten_minutes_later(conn, run, seconds, closes):
+    _two_holdings_and_one_missing(conn, run)
+    unknown = _invested(None)
+    run(_holding(**SAP), summary=unknown, now=_minutes(60))
+    second = run(_holding(**SAP), summary=unknown, now=_minutes(60) + dt.timedelta(seconds=seconds))
+    assert (second.closed == ["GME"]) is closes
+
+
+def test_the_two_sync_rule_keeps_the_time_of_the_first_miss(conn, run):
+    """A second miss too soon does not start the count again: the third sync, 11 minutes after the first
+    miss and 5 after the second, closes."""
+    _two_holdings_and_one_missing(conn, run)
+    unknown = _invested(None)
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(60)).closed == []
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(66)).closed == []
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(71)).closed == ["GME"]
+
+
+def test_a_miss_kept_by_an_older_version_as_a_bare_id_is_a_first_miss_now(conn, run):
+    """MISSING_KEY once held a list of ids, with no time: it is never read as an old miss."""
+    _two_holdings_and_one_missing(conn, run)
+    gme = positions.find_open(conn, "GME")
+    db.save_cached_json(conn, ta.MISSING_KEY, [gme.id])
+    unknown = _invested(None)
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(60)).closed == []
+    assert run(_holding(**SAP), summary=unknown, now=_minutes(75)).closed == ["GME"]
+
+
+# ---------------------------------------------- F5: another wallet currency than the summary's: cannot check
+@pytest.mark.parametrize("wallet, account, agrees", [
+    ("EUR", "EUR", False), ("eur", "EUR", False), (None, "EUR", False), ("EUR", None, False),   # comparable
+    ("USD", "EUR", None), ("GBP", "eur", None)])                    # not the same currency: cannot be told
+def test_a_list_is_compared_with_the_summary_only_in_one_currency(wallet, account, agrees):
+    holdings = [dataclasses.replace(_holding(value=100.0), account_currency=wallet)]
+    summary = dataclasses.replace(_invested(5000.0), currency=account)
+    assert ta._list_agrees(holdings, summary) is agrees
+    assert (ta._list_gap(holdings, summary) is None) is (agrees is None)
+
+
+def test_a_wallet_currency_other_than_the_summarys_falls_to_the_two_sync_rule_and_is_no_disagreement(conn, run):
+    _two_holdings_and_one_missing(conn, run)
+    usd = dataclasses.replace(_holding(**SAP), account_currency="USD")
+    first = run(usd, summary=_invested(5000.0), now=_minutes(60))   # the numbers are far apart: other currencies
+    assert first.agrees is None and first.closed == [] and first.held == ["GME"]
+    assert first.note == ta.SALE_UNCONFIRMED                        # not «не сходится со сводкой»
+    second = run(usd, summary=_invested(5000.0), now=_minutes(75))
+    assert second.closed == ["GME"] and second.held == []
+
+
+def test_check_cannot_compare_a_list_in_another_currency_with_the_summary(keyed, monkeypatch, capsys):
+    held = _payload("SAPd_EQ", "DE0007164600")
+    held["walletImpact"]["currency"] = "USD"                        # the summary is in EUR
+    lines = _check_line(monkeypatch, capsys, [held], dict(FULL_SUMMARY, investments={"currentValue": 400.0}))
+    assert lines[1].endswith("список и сводку не сверить")
 
 
 # ---------------------------------------------- I1: a holding that returns is restored
@@ -1382,6 +1464,78 @@ def test_a_process_that_was_keyless_clears_the_mark_by_a_sync_that_reaches_tradi
     assert _mark(conn) is not None
     run(fetch=_down(ta.BAD_KEY, "unauthorized"), now=_hours(3))     # a key is there now (it does not fit)
     assert _mark(conn) is None
+
+
+# ---------------------------------------------- F4: a list that keeps disagreeing with the summary is not silent
+LIST_GAP_WARNING = "⚠️ Trading 212: список позиций не сходится со счётом уже сутки — продажи не отмечаю."
+
+
+def _off(run, hours, **kw):
+    """A sync whose list (two holdings, EUR 200) is nowhere near the summary (EUR 1000 invested)."""
+    return run(_holding(), _holding(**SAP), summary=_invested(1000.0), now=_hours(hours), **kw)
+
+
+def test_a_list_that_has_disagreed_for_a_day_says_so_once_a_day(conn, run):
+    run(_holding(), _holding(**SAP))                                # 01.10 14:05: the list adds up
+    run.sent.clear()
+    for hours in (1, 6, 12, 24):                                    # the run of disagreement begins at 15:05
+        assert _off(run, hours).agrees is False
+    assert run.sent == []                                           # 23 hours of it: not a day yet
+    _off(run, 25)                                                   # 02.10 15:05: a day
+    assert run.sent == [LIST_GAP_WARNING]
+    assert db.get_cached_value(conn, "t212_gap_2026-10-02", 10**9) is not None       # the day's mark
+    _off(run, 26)
+    _off(run, 33)                                                   # the same day, 23:05: said once
+    assert run.sent == [LIST_GAP_WARNING]
+    _off(run, 34)                                                   # 03.10 00:05: another day, another warning
+    assert run.sent == [LIST_GAP_WARNING] * 2
+    assert positions.find_open(conn, "GME") is not None             # and nothing was closed meanwhile
+
+
+def test_a_list_that_adds_up_again_ends_the_run_of_disagreement(conn, run):
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    _off(run, 1)
+    _off(run, 13)
+    assert run(_holding(), _holding(**SAP), now=_hours(14)).agrees is True
+    _off(run, 15)                                                   # a new run begins
+    _off(run, 26)                                                   # 25 hours after the first run began, 11 after this
+    assert run.sent == []
+    _off(run, 40)
+    assert run.sent == [LIST_GAP_WARNING]
+
+
+def test_a_list_that_never_added_up_is_not_warned_about(conn, run):
+    """Only after a success history: on first contact `--check` says «расходятся»; a list that has never
+    added up is not a list that stopped doing so."""
+    _synced_before(conn)
+    for hours in (0, 12, 25, 49, 73):
+        assert _off(run, hours).agrees is False
+    assert LIST_GAP_WARNING not in run.sent
+
+
+def test_a_list_that_cannot_be_checked_neither_warns_nor_ends_the_run(conn, run):
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    _off(run, 1)
+    unknown = lambda hours: run(_holding(), _holding(**SAP), summary=_invested(None), now=_hours(hours))
+    assert unknown(12).agrees is None
+    _off(run, 25)                                                   # the run is still the one begun at 1 h
+    assert run.sent == [LIST_GAP_WARNING]
+    unknown(49)                                                     # a new day, but no evidence: no warning
+    assert run.sent == [LIST_GAP_WARNING]
+    _off(run, 50)
+    assert run.sent == [LIST_GAP_WARNING] * 2
+
+
+def test_a_silent_sync_neither_warns_about_the_list_nor_uses_up_the_days_warning(conn, run):
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    _off(run, 1)
+    _off(run, 26, silent=True)                                      # --sync: nothing is sent
+    assert run.sent == []
+    _off(run, 27)
+    assert run.sent == [LIST_GAP_WARNING]
 
 
 # ---------------------------------------------- M3: a price of zero is not a price
@@ -2119,3 +2273,13 @@ def test_the_readme_says_an_empty_list_is_a_bad_answer_only_above_five_euros():
     start = readme.index("### Trading 212\n")
     section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
     assert "Пустой список, когда во вложениях больше €5, — плохой ответ" in section
+
+
+def test_the_readme_says_what_a_list_that_cannot_be_checked_and_one_that_keeps_disagreeing_do():
+    """F4, F5, F6."""
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### Trading 212\n")
+    section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
+    assert LIST_GAP_WARNING in section and "а раньше сходился" in section                       # F4
+    assert "в другой валюте, чем в сводке" in section                                           # F5
+    assert "не раньше чем через 10 минут после первой" in section                              # F6
