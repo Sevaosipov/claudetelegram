@@ -2479,3 +2479,23 @@ def test_the_readme_says_how_a_foreign_yahoo_series_a_failed_sync_and_a_locked_d
     assert "расходится с сохранённой свежей ценой Trading 212 больше чем на 20%" in section          # F7
     assert "и про сбой самой синхронизации" in section                                              # F8
     assert "помечается в базе до отправки" in section                                               # F9
+
+
+# ---------------------------------------------- F10: stale text
+def test_the_bots_comment_says_a_holding_is_matched_by_its_ticker_or_its_stored_code_only():
+    """telegram_bot used to say a holding was also found by the name it is shown under: it never is
+    (positions.find_holding: the position's ticker, or the symbol of the Trading 212 code stored with it)."""
+    source = (Path(ta.__file__).parent / "telegram_bot.py").read_text(encoding="utf-8")
+    start = source.index("# A ticker the Trading 212 account holds")
+    comment = " ".join(source[start:source.index("held = positions.find_open(", start)].replace("#", " ").split())
+    assert "by the name the holding is shown under" not in comment          # the stale claim
+    assert "the position's own ticker" in comment and "t212_ticker" in comment
+    assert "not by the name" in comment and "keyed by its ISIN" in comment
+
+
+def test_the_readme_split_note_applies_to_any_holding_priced_by_trading_212():
+    readme = (Path(ta.__file__).parent / "README.md").read_text(encoding="utf-8")
+    note = " ".join(readme[readme.index("**Сплит акций.**"):readme.index("### Ключ Trading 212")].split())
+    assert "Для любой бумаги, которая оценивается по ценам Trading 212" in note
+    assert "хранится по ISIN" in note and "американская" in note       # the ones it covers
+    assert "сплит" in note and "ложное" in note

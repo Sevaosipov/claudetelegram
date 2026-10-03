@@ -224,9 +224,12 @@ def _handle_positions_command(conn, text: str) -> bool:
         telegram_notify.send_text(POSITIONS_USAGE)
         return True
     ticker, venue_source = listing
-    # A ticker the Trading 212 account holds -- by its key or, when nothing was /bought under that
-    # ticker, by the name the holding is shown under (SAP for an ISIN-keyed SAPd_EQ) -- is tracked
-    # from the account: the sync sees a buy or a sale there by itself.
+    # A ticker the Trading 212 account holds is tracked from the account: the sync sees a buy or a
+    # sale there by itself. It is matched by the position's own ticker or by the symbol of the
+    # t212_ticker stored with it (Meta, held as FB_US_EQ and tracked as META, answers to both) --
+    # not by the name a holding keyed by its ISIN is shown under: hundreds of non-US instruments
+    # share a US company's symbol, so SAP here is the US stock and the Frankfurt SAPd_EQ is named
+    # by its ISIN.
     held = positions.find_open(conn, ticker) or positions.find_holding(conn, ticker)
     if held is not None and held.origin == positions.T212:
         name = telegram_notify._esc(ticker)
