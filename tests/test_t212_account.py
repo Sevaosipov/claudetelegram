@@ -333,8 +333,14 @@ GME_DAYS = [((NOW.date() - dt.timedelta(days=60 - i)).isoformat(), 100.0) for i 
 
 
 def _holding(t212_ticker="GME_US_EQ", isin="US36467W1099", *, qty=10.0, avg=23.10, price=24.05,
-             created="2026-09-28T14:03:11.000+02:00", currency="USD", pnl=8.30):
-    return ta.T212Position(t212_ticker, None, isin, currency, qty, avg, price, created, None, None, pnl, "EUR")
+             created="2026-09-28T14:03:11.000+02:00", currency="USD", pnl=8.30, value=100.0):
+    """`value`: what the holding is worth in the account's currency (walletImpact.currentValue)."""
+    return ta.T212Position(t212_ticker, None, isin, currency, qty, avg, price, created, value, None, pnl, "EUR")
+
+
+def _agreeing(holdings):
+    """The account summary that goes with a list: the holdings' value is what is invested."""
+    return dataclasses.replace(SUMMARY, invested_value=sum(h.value_eur or 0.0 for h in holdings))
 
 
 SAP = dict(t212_ticker="SAPd_EQ", isin="DE0007164600", avg=120.0, price=125.0, currency="EUR")
@@ -346,10 +352,13 @@ class _Run:
     def __init__(self, conn):
         self.conn, self.sent, self.histories = conn, [], []
 
-    def __call__(self, *holdings, now=NOW, summary=SUMMARY, fetch=None, notify=None, silent=False):
+    def __call__(self, *holdings, now=NOW, summary=None, fetch=None, notify=None, silent=False):
+        """`summary`: the account summary of the same sync; by default one that agrees with the
+        list (so what is missing from the list was sold)."""
         def closes(ticker, source=None):
             self.histories.append((ticker, source))
             return GME_DAYS
+        summary = _agreeing(holdings) if summary is None else summary
         return ta.sync(self.conn, fetch=fetch or (lambda: (list(holdings), summary)),
                        notify=notify or (lambda text: self.sent.append(text) or True), now=now,
                        closes_fn=closes, silent=silent)
@@ -651,6 +660,187 @@ def test_a_sync_opens_no_position_twice_and_reopens_one_bought_back(conn, run):
     assert result.opened == ["GME"] and len(run.sent) == 1 and run.sent[0].startswith("📥 Вижу")
     rows = conn.execute("SELECT closed_at FROM positions WHERE ticker = 'GME' ORDER BY id").fetchall()
     assert rows == [(NOW.date().isoformat(),), (None,)]
+
+
+# ---------------------------------------------- I1: a sale is believed only when the list adds up
+def _invested(amount):
+    return dataclasses.replace(SUMMARY, invested_value=amount)
+
+
+def _tables(conn):
+    return [conn.execute(f"SELECT * FROM {t}").fetchall() for t in ("positions", "t212_prices", "t212_equity")]
+
+
+def test_an_empty_list_while_money_is_invested_is_a_bad_answer(conn, run, capsys):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    before, synced = _tables(conn), ta.last_sync(conn)
+    result = run(summary=_invested(200.0), now=NOW + dt.timedelta(hours=1))
+    assert result.error == "пустой список позиций при вложенных средствах"
+    assert result.closed == result.opened == result.updated == [] and run.sent == []
+    assert _tables(conn) == before and ta.last_sync(conn) == synced     # nothing changed: not a sync that got through
+    assert "пустой список" in capsys.readouterr().err
+
+
+def test_a_genuinely_empty_account_closes_what_was_held(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    result = run(summary=_invested(0.0))                            # nothing invested, nothing listed
+    assert sorted(result.closed) == ["DE0007164600", "GME"] and result.error is None
+    assert sorted(run.sent) == ["📤 GME больше нет в Trading 212 — слежение закрыто.",
+                                "📤 SAP больше нет в Trading 212 — слежение закрыто."]
+
+
+def test_a_partial_list_closes_nothing_but_still_opens_and_updates(conn, run, capsys):
+    """The summary says €300 is invested and the list adds up to €200: GME is not on it, but that
+    is the list's fault. What it does show is applied."""
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    capsys.readouterr()
+    nvda = _holding("NVDA_US_EQ", "US67066G1040", avg=100.0, price=110.0)
+    result = run(_holding(**dict(SAP, qty=7.0)), nvda, summary=_invested(300.0))
+    assert result.closed == [] and result.held == ["GME"]
+    assert result.note == "список позиций не сходится со сводкой счёта"
+    assert result.updated == ["DE0007164600"] and result.opened == ["NVDA"]
+    assert positions.find_open(conn, "GME") is not None and positions.find_open(conn, "DE0007164600").quantity == 7.0
+    assert [text[:2] for text in run.sent] == ["📥 "]               # NVDA, and no «📤»
+    err = capsys.readouterr().err
+    assert err.count("disagree") == 1 and "33%" in err              # one line, and no amount in it
+    assert "300" not in err and "200" not in err
+
+
+@pytest.mark.parametrize("invested, listed, trusted", [
+    (1000.0, 985.0, True), (1000.0, 979.0, False),                  # within / beyond 2 %
+    (1000.0, 1015.0, True), (1000.0, 1021.0, False),
+    (100.0, 96.0, True), (100.0, 94.0, False),                      # a small account: within / beyond €5
+    (0.0, 4.0, True), (0.0, 6.0, False)])
+def test_the_list_is_trusted_within_two_percent_or_five_euros_of_the_summary(conn, run, invested, listed, trusted):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    result = run(_holding(**dict(SAP, value=listed)), summary=_invested(invested))
+    assert (result.closed == ["GME"]) is trusted and (result.held == ["GME"]) is not trusted
+
+
+def test_without_a_summary_value_a_sale_needs_two_syncs_in_a_row(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run.sent.clear()
+    first = run(_holding(**SAP), summary=_invested(None))
+    assert first.closed == [] and first.held == ["GME"] and run.sent == []
+    assert first.note == "нет суммы вложений в сводке: продажу подтвердит следующая синхронизация"
+    second = run(_holding(**SAP), summary=_invested(None))
+    assert second.closed == ["GME"] and second.held == []
+    assert run.sent == ["📤 GME больше нет в Trading 212 — слежение закрыто."]
+
+
+def test_a_holding_that_is_back_in_between_starts_the_count_again(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    unknown = _invested(None)
+    assert run(_holding(**SAP), summary=unknown).held == ["GME"]
+    assert run(_holding(), _holding(**SAP), summary=unknown).held == []          # it is there again
+    assert run(_holding(**SAP), summary=unknown).closed == []                    # the first miss, again
+    assert run(_holding(**SAP), summary=unknown).closed == ["GME"]
+
+
+def test_a_failed_sync_between_two_misses_is_not_a_sync(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    unknown = _invested(None)
+    run(_holding(**SAP), summary=unknown)
+
+    def down():
+        raise ta.T212Error("HTTP 502", "status")
+    assert run(fetch=down).error == "HTTP 502"
+    assert run(_holding(**SAP), summary=unknown).closed == ["GME"]              # two successful ones in a row
+
+
+def test_a_holding_without_its_value_cannot_vouch_for_the_list(conn, run):
+    """The summary is there, but one holding has no value: the sum can't be checked, so a sale
+    waits for the next sync like it does with no summary."""
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    partial = (_holding(**dict(SAP, value=None)),)
+    assert run(*partial, summary=_invested(100.0)).closed == []
+    assert run(*partial, summary=_invested(100.0)).closed == ["GME"]
+
+
+def test_a_list_that_disagrees_does_not_count_as_a_miss_nor_clear_one(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    assert run(_holding(**SAP), summary=_invested(None)).held == ["GME"]        # the first miss
+    assert run(_holding(**SAP), summary=_invested(500.0)).closed == []          # a list that does not add up
+    assert run(_holding(**SAP), summary=_invested(None)).closed == ["GME"]      # the second miss
+
+
+def test_a_list_that_adds_up_closes_at_once_and_forgets_the_pending_miss(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run(_holding(**SAP), summary=_invested(None))
+    assert run(_holding(**SAP)).closed == ["GME"]                               # verified: no waiting
+    assert db.get_cached_json(conn, ta.MISSING_KEY) == []
+
+
+# ---------------------------------------------- I1: a holding that returns is restored
+def test_a_holding_that_vanishes_and_returns_keeps_its_clock_and_its_stop_base(conn, run):
+    """It pre-dates tracking: opened at the first sync, its stop measured from 50. Closed by a sync
+    that did not list it, it comes back -- as itself, not as a new position bought two years ago."""
+    run(_holding(created=OLD, avg=100.0, price=50.0))               # the first sync: legacy
+    first = positions.find_open(conn, "GME")
+    conn.execute("UPDATE positions SET close_alerted_at = '2026-10-01' WHERE id = ?", (first.id,))
+    conn.commit()
+    assert run(now=NOW + dt.timedelta(hours=1)).closed == ["GME"]
+    run.sent.clear()
+    result = run(_holding(created=OLD, avg=100.0, price=48.0, qty=12.0), now=NOW + dt.timedelta(days=3))
+    assert result.opened == [] and result.updated == ["GME"] and run.sent == []      # no «📥»
+    back = positions.find_open(conn, "GME")
+    assert (back.id, back.opened_at, back.stop_base, back.stop_pct, back.t212_created) == \
+        (first.id, NOW.date().isoformat(), 50.0, first.stop_pct, "2024-05-01")
+    assert (back.closed_at, back.close_reason, back.close_alerted_at, back.quantity) == \
+        (None, None, "2026-10-01", 12.0)
+    assert conn.execute("SELECT COUNT(*) FROM positions WHERE ticker = 'GME'").fetchone() == (1,)
+
+
+def test_a_restored_holding_brings_no_burst_of_alerts(conn, run):
+    run(_holding(created=OLD, avg=100.0, price=50.0))
+    run(now=NOW + dt.timedelta(hours=1))
+    run(_holding(created=OLD, avg=100.0, price=50.0), now=NOW + dt.timedelta(days=1))
+    day = NOW.date() + dt.timedelta(days=1)
+    highs = [((NOW.date() - dt.timedelta(days=400 - i)).isoformat(), 200.0) for i in range(300)]
+    assert _exits(conn, day, 50.0, highs) == []                     # no stop, no year, no dead money
+
+
+def test_a_holding_bought_back_on_another_day_is_a_new_position(conn, run):
+    _synced_before(conn)
+    run(_holding())                                                 # bought 28.09
+    run()
+    run.sent.clear()
+    result = run(_holding(created="2026-10-01T09:00:00Z"))
+    assert result.opened == ["GME"] and run.sent[0].startswith("📥 Вижу")
+    assert conn.execute("SELECT COUNT(*) FROM positions WHERE ticker = 'GME'").fetchone() == (2,)
+
+
+def test_a_returning_holding_with_no_purchase_date_is_opened_anew(conn, run):
+    """Without the date there is nothing to tell the same holding from a new purchase: an old
+    row -- with its old clock and an alert already used -- is not woken up for it."""
+    _synced_before(conn)
+    run(_holding(created=None))
+    run()
+    assert run(_holding(created=None)).opened == ["GME"]
+    assert conn.execute("SELECT COUNT(*) FROM positions WHERE ticker = 'GME'").fetchone() == (2,)
+
+
+def test_a_bought_position_recorded_meanwhile_is_taken_over_rather_than_the_old_row_restored(conn, run):
+    _synced_before(conn)
+    run(_holding())
+    run()
+    manual = positions.open_position(conn, "GME", 20.0, today=dt.date(2026, 10, 1), closes_fn=lambda t, s=None: [])
+    result = run(_holding())
+    assert result.updated == ["GME"] and positions.find_open(conn, "GME").id == manual.id
+    assert len(positions.open_positions(conn)) == 1
 
 
 # ---------------------------------------------- R1: holdings that pre-date tracking ("legacy")

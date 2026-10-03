@@ -70,9 +70,16 @@ TOO_OFTEN = "Trading 212 просит реже: слишком много зап
 BAD_ANSWER = "ответ не разобран"
 KEY_HINT = ("Создайте в Trading 212 → Настройки → API ключ только для чтения (Portfolio, Account data) "
             "и положите в .env")
+EMPTY_LIST = "пустой список позиций при вложенных средствах"
+LIST_DISAGREES = "список позиций не сходится со сводкой счёта"
+SALE_UNCONFIRMED = "нет суммы вложений в сводке: продажу подтвердит следующая синхронизация"
+UNKEYED_HOLDING = "есть бумага без тикера США и без ISIN: продажи не разбираются"
+LIST_TOLERANCE, LIST_TOLERANCE_MONEY = 0.02, 5.0   # how far the list may be from the summary: 2 % or €5
 SOLD_REASON = "продано в Trading 212"   # close_reason of a holding the account no longer has
 SYNCED_ONCE_KEY = "t212_synced_once"    # kv: set by the first sync that got through
 SYNCED_AT_KEY = "t212_synced_at"        # kv: when the last one did, epoch seconds
+MISSING_KEY = "t212_missing"            # kv (JSON): ids of the positions missing at the last sync
+                                        # that had no summary to check the list against
 _KV_FOREVER = 100 * 365 * 86400         # these two never go stale
 
 _sleep = time.sleep                     # the 429 retry's wait (tests replace it)
@@ -246,13 +253,19 @@ _no_key_logged = False                  # the missing key is said once per proce
 @dataclass
 class SyncResult:
     """What one sync did: the keys of the positions it opened, updated (a changed quantity or
-    average price, or a /bought position taken over) and closed; `error` -- the reason -- when it
-    changed nothing; `at`, when it ran."""
+    average price, a /bought position taken over, a returning holding restored) and closed;
+    `error` -- the reason -- when it changed nothing; `at`, when it ran.
+
+    `held` are the keys of the positions the list did not show and that were NOT closed this
+    time, and `note` says why: the list did not add up to the summary, or there was no summary
+    value to check it against and the sale waits for the next sync."""
     opened: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
     closed: list[str] = field(default_factory=list)
     error: str | None = None
     at: dt.datetime | None = None
+    held: list[str] = field(default_factory=list)
+    note: str | None = None
 
 
 def last_sync(conn) -> dt.datetime | None:
@@ -424,6 +437,99 @@ def _first_text(names: list[str], legacy_since: str | None, day: str) -> str:
     return f"{text}\nДля уже купленных бумаг правила выхода считаются с {since}."
 
 
+def _invested(summary: T212Summary | None) -> float | None:
+    return None if summary is None else summary.invested_value
+
+
+def _list_gap(holdings: list[T212Position], summary: T212Summary | None) -> float | None:
+    """How far the positions list is from the summary of the same sync: the holdings' summed value
+    less the value the summary says is invested (both in the account's currency). None when it
+    can't be told: the summary has no such value, or a holding has no value of its own."""
+    invested = _invested(summary)
+    values = [h.value_eur for h in holdings]
+    if invested is None or any(v is None for v in values):
+        return None
+    return sum(values) - invested
+
+
+def _list_agrees(holdings: list[T212Position], summary: T212Summary | None) -> bool | None:
+    """Whether the list accounts for the money invested, within LIST_TOLERANCE (or
+    LIST_TOLERANCE_MONEY, for a small account): only then is a holding that is not on it believed
+    sold. None when it can't be told (_list_gap)."""
+    gap = _list_gap(holdings, summary)
+    if gap is None:
+        return None
+    return abs(gap) <= max(LIST_TOLERANCE * abs(_invested(summary)), LIST_TOLERANCE_MONEY)
+
+
+def _close_missing(conn, missing: list[positions.Position], holdings: list[T212Position],
+                   summary: T212Summary | None, unkeyed: int, day: str, result: SyncResult) -> list[str]:
+    """Close the tracked positions the list did not show -- when the list can be believed. Returns
+    the «📤» messages of those closed; the others go to result.held with result.note.
+
+      the list adds up to the summary     every missing one was sold: closed;
+      it does not add up                  the list is short, not the account: none is closed;
+      it can't be checked                 a missing one is closed only when it was missing at the
+                                          sync before too (MISSING_KEY keeps who was);
+      a holding that can't be keyed       it may be one of the missing: none is closed.
+    """
+    agrees = _list_agrees(holdings, summary)
+    waiting = set(db.get_cached_json(conn, MISSING_KEY) or [])
+    if unkeyed:
+        sold, reason = [], UNKEYED_HOLDING
+        print(f"[t212] {unkeyed} holding(s) with neither a US ticker nor an ISIN; "
+              f"no position is closed this time", file=sys.stderr)
+    elif agrees is False:
+        sold, reason = [], LIST_DISAGREES
+        gap, invested = _list_gap(holdings, summary), abs(_invested(summary))
+        how_far = f"by {abs(gap) / invested:.0%}" if invested else "though nothing is invested"
+        print(f"[t212] the positions list and the account summary disagree {how_far}: "
+              f"no position is closed this time", file=sys.stderr)
+    elif agrees is None:
+        sold, reason = [p for p in missing if p.id in waiting], SALE_UNCONFIRMED
+    else:
+        sold, reason = missing, None
+    texts = []
+    for pos in sold:
+        conn.execute("UPDATE positions SET closed_at = ?, close_reason = ? WHERE id = ?",
+                     (day, SOLD_REASON, pos.id))
+        result.closed.append(pos.ticker)
+        texts.append(_sold_text(positions.display_name(pos)))
+    kept = [p for p in missing if p not in sold]
+    if kept:
+        result.held, result.note = [p.ticker for p in kept], reason
+    # Who is waiting for a second sync: after a list that could not be checked, everyone it missed
+    # and did not close; after one that did not add up, whoever was waiting and is still missing
+    # (that sync is no evidence either way); after one that adds up, nobody.
+    if agrees is None and not unkeyed:
+        pending = [p.id for p in kept]
+    elif agrees is True and not unkeyed:
+        pending = []
+    else:
+        pending = [p.id for p in kept if p.id in waiting]
+    db.save_cached_value(conn, MISSING_KEY, json.dumps(pending), commit=False)
+    return texts
+
+
+def _restore(conn, h: T212Position, in_use: set[str]) -> positions.Position | None:
+    """A holding that is back: the closed position of the very same holding -- the same Trading 212
+    instrument, bought on the same day -- is reopened, not opened anew. It keeps its clock
+    (opened_at), its stop (stop_base, stop_pct), its insiders and the alert it has already raised,
+    so a holding that pre-dates tracking does not come back as one bought years ago. None when
+    there is no such row, the purchase date is not known (nothing then tells the same holding from
+    a new purchase), or its ticker is in use by an open position."""
+    created = _created_date(h.created_at)
+    if not h.t212_ticker or created is None:
+        return None
+    row = conn.execute(
+        "SELECT id, ticker FROM positions WHERE origin = ? AND closed_at IS NOT NULL AND t212_ticker = ? "
+        "AND t212_created = ? ORDER BY id DESC LIMIT 1", (positions.T212, h.t212_ticker, created)).fetchone()
+    if row is None or row[1] in in_use:
+        return None
+    conn.execute("UPDATE positions SET closed_at = NULL, close_reason = NULL WHERE id = ?", (row[0],))
+    return next(p for p in positions.open_positions(conn) if p.id == row[0])
+
+
 def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now: dt.datetime,
            closes_fn, result: SyncResult, silent: bool) -> list[str]:
     """Bring the database in step with what the account holds, in one transaction the caller
@@ -453,7 +559,7 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
                           (positions.T212,)).fetchone() is None
 
     _store_snapshot(conn, keyed, summary, day)
-    new_texts, sold_texts, names, legacy_days = [], [], [], []
+    new_texts, names, legacy_days = [], [], []
     for key, source, h in keyed:
         name = positions.name_of(key, source, h.t212_ticker)
         if key in tracked:
@@ -464,6 +570,11 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
         elif key in manual:
             _take_over(conn, manual[key], source, h)
             result.updated.append(key)
+        elif (back := _restore(conn, h, set(tracked) | set(manual))) is not None:
+            _update_holding(conn, back, h)
+            result.updated.append(back.ticker)
+            if back.stop_base is not None:
+                legacy_days.append(back.opened_at)
         else:
             insiders = _open_holding(conn, key, source, h, day, histories.get(key), legacy)
             if insiders is None:
@@ -475,18 +586,9 @@ def _apply(conn, holdings: list[T212Position], summary: T212Summary | None, now:
                 legacy_days.append(day)
         names.append(name)
 
-    if unkeyed:
-        # It can't be matched to a position, so it may be one of them: nothing is called sold.
-        print(f"[t212] {unkeyed} holding(s) with neither a US ticker nor an ISIN; "
-              f"no position is closed this time", file=sys.stderr)
-    else:
-        held = {key for key, _source, _h in keyed}
-        for key, pos in tracked.items():
-            if key not in held:
-                conn.execute("UPDATE positions SET closed_at = ?, close_reason = ? WHERE id = ?",
-                             (day, SOLD_REASON, pos.id))
-                result.closed.append(key)
-                sold_texts.append(_sold_text(positions.display_name(pos)))
+    listed = {key for key, _source, _h in keyed}
+    missing = [pos for key, pos in tracked.items() if key not in listed]
+    sold_texts = _close_missing(conn, missing, holdings, summary, unkeyed, day, result)
 
     db.save_cached_value(conn, SYNCED_AT_KEY, now.timestamp(), commit=False)
     if silent:          # nothing is said, and the one-time first message is left for a sync that can
@@ -523,7 +625,10 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
 
     With no key it is a quiet no-op, said once per process. A failed fetch -- T212Error, or a
     ValueError for an answer of the wrong shape -- changes nothing and sends nothing: the result
-    carries the reason."""
+    carries the reason. So does an empty list while the summary says money is invested.
+
+    A holding that is not on the list is closed only when the list can be believed
+    (_close_missing): result.held and result.note say what was not closed and why."""
     now = now or dt.datetime.now()
     result = SyncResult(at=now)
     try:
@@ -538,6 +643,12 @@ def sync(conn, *, fetch=None, notify=None, now: dt.datetime | None = None, close
     except ValueError:              # its text is not printed: only what this module wrote is safe
         result.error = BAD_ANSWER
         print(f"[t212] sync failed: {BAD_ANSWER}", file=sys.stderr)
+        return result
+    if not holdings and (_invested(summary) or 0) > 0:
+        # Money is invested and no position is listed: the list is wrong, not the account empty.
+        # Believing it would call every holding sold.
+        result.error = EMPTY_LIST
+        print(f"[t212] sync failed: {EMPTY_LIST}", file=sys.stderr)
         return result
     try:
         messages = _apply(conn, holdings, summary, now, closes_fn, result, silent)

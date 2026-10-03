@@ -279,3 +279,31 @@ The first-sync message lists the holdings and says when the rules start. It make
   - the next notifying sync lists every tracked holding and sets the flag;
   - a failed send still sets it, and an empty account does not;
   - `--sync` and `--no-telegram` are silent.
+
+## Amendment 2 (coordinator rulings after the whole-change review, 2026-10-03)
+
+The review found the change spec-compliant, read-only and secret-safe, and asked for fixes. These rulings change
+§1 (the key of an instrument), §2 (sync), §4 (prices for exits), §5 (`/bought`, `/sold`), §6, §7, §9 and the
+safety tests. Where they differ from the text above, they win. Not done, by ruling: M5 (a holding that can't be
+keyed) and a code change for M7 (stock splits).
+
+### I1. A sale is believed only when the list adds up; a returning holding is restored
+
+**a) Closes need a list that agrees with the summary of the same sync.**
+- `summary.invested_value` known and above 0 with an EMPTY positions list is a bad answer: nothing changes, and
+  `SyncResult.error` is «пустой список позиций при вложенных средствах».
+- A list whose summed `value_eur` differs from `invested_value` by more than max(2 %, €5) applies opens and
+  updates but NO closes. One line is logged (with the relative difference, no amounts), and `SyncResult.held`
+  lists the positions not closed with `SyncResult.note` «список позиций не сходится со сводкой счёта».
+- With no value to check against (the summary has no `invested_value`, or a holding has no `value_eur`), a
+  position is closed only when it was missing in two consecutive successful syncs. The kv entry `t212_missing`
+  (JSON, position ids) keeps who was missing at the last such sync. A sync whose list does not add up is no
+  evidence either way: it neither counts as a miss nor clears one.
+- A genuinely empty account (nothing invested, nothing listed) closes what was held.
+
+**b) A returning holding is restored, not re-created.** When a holding is not tracked and a closed position of
+origin 't212' has the same `t212_ticker` and the same `t212_created`, that row is reopened: `closed_at` and
+`close_reason` are cleared; `opened_at`, `stop_base`, `stop_pct`, `insiders` and `close_alerted_at` are kept;
+quantity and average price are updated. No «📥» is sent. A legacy holding (R1) therefore does not come back as a
+position bought years ago. Without a known purchase date nothing tells the same holding from a new purchase, so
+no row is restored. An open `/bought` position in the same name is taken over first.
