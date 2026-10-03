@@ -137,6 +137,16 @@ def display_name(pos: Position) -> str:
     return name_of(pos.ticker, pos.source, pos.t212_ticker)
 
 
+def find_holding(conn, name: str) -> Position | None:
+    """The open Trading 212 holding a user means by `name`: the one keyed by it, else the one
+    shown under it (a holding keyed by its ISIN is shown by its Trading 212 symbol). None when
+    the account has no such holding -- a /bought position is not one."""
+    name = name.strip().upper()
+    held = [p for p in open_positions(conn) if p.origin == T212]
+    return (next((p for p in held if p.ticker == name), None)
+            or next((p for p in held if display_name(p).upper() == name), None))
+
+
 def oslo_ticker(conn, isin: str) -> str | None:
     """The Oslo ticker of an ISIN, when norway's ISIN cache (oslo_isins) knows it: Oslo's insider
     rows name the company by that ticker, Trading 212 by the ISIN of its Frankfurt listing."""

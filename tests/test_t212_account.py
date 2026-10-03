@@ -1,5 +1,7 @@
-"""t212_account.py: the read-only Trading 212 client (spec 2026-10-01-trading212-account-tracking.md).
-Offline: every call goes to a stub session, and conftest keeps any real key out of the tests."""
+"""t212_account.py (spec 2026-10-01-trading212-account-tracking.md): the read-only Trading 212
+client, the mandatory safety tests, the sync, /portfolio's live view and the command line.
+Offline: every call goes to a stub session or a stub fetch, and conftest keeps any real key out
+of the tests."""
 from __future__ import annotations
 
 import ast
@@ -713,8 +715,11 @@ def test_the_stored_datas_time_names_the_day_when_it_is_not_today(conn, run, no_
     run(_holding())
     view = _view(conn, fetch=_fails(ta.T212Error("ReadTimeout", "network")), now=NOW + dt.timedelta(days=1))
     assert view.as_of == "01.10 14:05"
-    assert _view(sqlite_empty := db.connect(":memory:"), fetch=_fails(ta.T212Error("x", "network"))).as_of is None
-    sqlite_empty.close()
+
+
+def test_before_any_sync_the_stored_data_have_no_time(conn):
+    view = _view(conn, fetch=_fails(ta.T212Error("ReadTimeout", "network")))
+    assert (view.as_of, view.holdings, view.error) == (None, [], "ReadTimeout")
 
 
 @pytest.mark.parametrize("error, reason, hint", [

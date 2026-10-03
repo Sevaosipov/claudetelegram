@@ -1143,3 +1143,14 @@ def test_portfolio_rows_can_keep_to_the_manual_positions(conn, monkeypatch):
     _open(conn, "AAA", 100.0, stop=0.10)
     assert [p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY, origin="manual")] == ["AAA"]
     assert {p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY)} == {"AAA", "GME"}
+
+
+def test_find_holding_is_the_trading_212_holding_meant_by_a_name(conn):
+    sap = _t212(conn)                                              # keyed DE0007164600, shown as SAP
+    gme = _t212(conn, "GME", source=None, t212_ticker="GME_US_EQ", currency="USD")
+    _open(conn, "AAA")
+    assert positions.find_holding(conn, "sap").id == sap.id
+    assert positions.find_holding(conn, "DE0007164600").id == sap.id
+    assert positions.find_holding(conn, "GME").id == gme.id
+    assert positions.find_holding(conn, "AAA") is None             # a /bought position is not a holding
+    assert positions.find_holding(conn, "ZZZ") is None

@@ -837,6 +837,28 @@ def test_sold_a_trading_212_holding_says_to_sell_it_there_and_closes_nothing(con
     assert {p.ticker for p in positions.open_positions(conn)} == {"GME", "DE0007164600"}
 
 
+def test_a_holding_is_recognised_by_the_name_it_is_shown_under(conn, replies):
+    """A Frankfurt holding is keyed by its ISIN but shown as SAP: that is what its owner types."""
+    import positions
+    _t212_synced(conn, _t212_holding(t212_ticker="SAPd_EQ", isin="DE0007164600", currency="EUR"))
+    tb._handle_message(conn, "/sold sap")
+    tb._handle_message(conn, "/bought SAP 120")
+    assert replies == ["SAP отслеживается из Trading 212: продайте там — бот увидит продажу сам.",
+                       "SAP уже отслеживается из Trading 212."]
+    assert [(p.ticker, p.origin) for p in positions.open_positions(conn)] == [("DE0007164600", "t212")]
+
+
+def test_a_bought_position_of_the_same_name_comes_before_the_holding_shown_under_it(conn, replies):
+    """/bought SAP (the US listing) was recorded before the account was connected: /sold SAP is
+    about that one."""
+    import positions
+    tb._handle_message(conn, "/bought SAP 250")
+    _t212_synced(conn, _t212_holding(t212_ticker="SAPd_EQ", isin="DE0007164600", currency="EUR"))
+    tb._handle_message(conn, "/sold SAP")
+    assert "Позиция SAP закрыта." == replies[-1]
+    assert [(p.ticker, p.origin) for p in positions.open_positions(conn)] == [("DE0007164600", "t212")]
+
+
 def test_bought_and_sold_still_work_for_what_is_not_in_trading_212(conn, replies):
     import positions
     _t212_synced(conn, _t212_holding())
