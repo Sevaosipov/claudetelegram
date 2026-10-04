@@ -1,12 +1,13 @@
 """Collect newly disclosed stock purchases from public filings, log every one of
 them, journal the *signals* they form, and run the model portfolio (model.py) on them.
 The model scores and sells on every run but buys only on the week's first full run from
-Friday to Sunday, and the week's one Telegram message (what the model bought and sold, holds
-and watches, the groups that started selling) goes out once that pass has got through -- on
-Sunday regardless, with a warning if the model never did. Every other day Telegram gets only
-the close alerts on your positions (/bought and the Trading 212 account), as they fire, and the
-breakage warnings. A full run also syncs the Trading 212 account (t212_account.py, read only)
-right before the close alerts are checked.
+Friday to Sunday, and the week's Telegram messages -- one short message per signal (what the
+model bought and sold, the groups that started selling), then a short summary -- go out once
+that pass has got through, on Sunday regardless, with a warning in the summary if the model never
+did. Every other day Telegram gets only the close alerts on your positions (/bought and the
+Trading 212 account), one message each as they fire, the notices of what appeared in or left the
+account, and the breakage warnings. A full run also syncs the Trading 212 account
+(t212_account.py, read only) right before the close alerts are checked.
 
 Sources:
     SEC Form 4        US insider purchases and sales (sec_edgar.py)
@@ -85,13 +86,16 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 
 # The weekly run (spec 2026-10-01): the first full run of an ISO week on a Friday, Saturday or
 # Sunday -- Friday normally, the weekend only when the Mac missed it. Two independent kv_cache
-# keys mark the week: the model's buys, and the Telegram message (set only once it is sent).
-# The message waits for the week's model pass (the buys key) -- except on Sunday, when it goes
-# out regardless, with a warning line if the model never got through.
+# keys mark the week: the model's buys, and the Telegram messages (set only once the summary, the
+# last of them, is sent). The messages wait for the week's model pass (the buys key) -- except on
+# Sunday, when they go out regardless, with a warning line if the model never got through.
+# SENT_KEY (a JSON list, spec 2026-10-04) names the week's signals that went out already, so a run
+# that failed half-way sends only what is missing.
 WEEKLY_FROM_WEEKDAY = 4         # Friday; Monday is 0
 LAST_WEEKLY_WEEKDAY = 6         # Sunday
 BUYS_KEY = "model_buys_{week}"
 MESSAGE_KEY = "weekly_message_{week}"
+SENT_KEY = "weekly_sent_{week}"
 _WEEK_KEY_TTL = 30 * 86400
 
 
@@ -383,14 +387,38 @@ def _send_closes(conn, closes: list) -> bool:
     return True
 
 
+def _sent_signals(conn, today: dt.date) -> list[str]:
+    """The keys of the week's signals that went out already (SENT_KEY), in the order they went; an
+    unreadable list counts as none."""
+    saved = db.get_cached_json(conn, SENT_KEY.format(week=_week_id(today)))
+    return [k for k in saved if isinstance(k, str)] if isinstance(saved, list) else []
+
+
 def _send_weekly(conn, today: dt.date, report, *, model_failed: bool = False) -> bool:
-    """The weekly model message (paper_report.format_week) -- however quiet the week. The week's
-    message key is set only once it went through, so a failed Friday send is tried again on the
-    next run of the same Friday-to-Sunday window. `model_failed` adds the warning line (the
-    Sunday message with no model pass behind it). True when it was sent."""
-    text = paper_report.format_week(conn, today, report, model_failed=model_failed)
-    if not telegram_notify.send_text(text):
-        print("[telegram] weekly message not sent -- will retry on the next run this week",
+    """The weekly Telegram messages: each signal of the week (paper_report.week_signals) as its own
+    message, then the summary (paper_report.format_week_summary) -- however quiet the week.
+
+    A signal's key is added to the week's sent list only after its message went out, and a signal
+    already on it is skipped: a send that fails stops the sequence there (the summary is not sent, the
+    week is not marked) and the next run of the same Friday-to-Sunday window sends only what is
+    missing. The week's message key is set once the summary went through. A week already marked sends
+    nothing. `model_failed` adds the warning line to the summary (the Sunday message with no model
+    pass behind it). True when the week's messages are all out."""
+    if _week_marked(conn, today, MESSAGE_KEY):
+        return False
+    sent = _sent_signals(conn, today)
+    for key, text in paper_report.week_signals(conn, today, report):
+        if key in sent:
+            continue
+        if not telegram_notify.send_text(text):
+            print(f"[telegram] weekly message not sent (signal {key}) -- will retry the rest on the "
+                  f"next run this week", file=sys.stderr)
+            return False
+        sent.append(key)
+        db.save_cached_json(conn, SENT_KEY.format(week=_week_id(today)), sent)
+    summary = paper_report.format_week_summary(conn, today, report, model_failed=model_failed)
+    if not telegram_notify.send_text(summary):
+        print("[telegram] weekly message not sent (the summary) -- will retry on the next run this week",
               file=sys.stderr)
         return False
     _mark_week(conn, today, MESSAGE_KEY)
@@ -724,12 +752,12 @@ def main():
         if not args.no_telegram:
             _send_closes(conn, closes)
             if not filtered and _weekly_due(conn, today):
-                # The message waits for the week's model pass: with the model down it would show
-                # no buys, and the pass that buys next would not be in it. Sunday is the last
-                # day of the window, so it goes out then whatever happened.
+                # The messages wait for the week's model pass: with the model down they would show
+                # no buys, and the pass that buys next would not be in them. Sunday is the last
+                # day of the window, so they go out then whatever happened.
                 model_ok = _week_marked(conn, today, BUYS_KEY)
                 if model_ok or today.weekday() == LAST_WEEKLY_WEEKDAY:
-                    # The monthly report follows the weekly message: only once it was sent.
+                    # The monthly report follows the weekly messages: only once the summary, the last, was sent.
                     if _run_source("WEEKLY", _send_weekly, conn, today, report, model_failed=not model_ok):
                         _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, today)
                 else:

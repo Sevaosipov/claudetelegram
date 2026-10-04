@@ -1,9 +1,10 @@
 """What the model portfolio shows: its statistics against the 70/30 mix, the success line,
-the menu/CLI text, the weekly Telegram message (format_week) and the monthly report. Spec:
-docs/superpowers/specs/2026-09-30-model-portfolio-and-analyst-design.md, section 6, and for the
-weekly message docs/superpowers/specs/2026-10-01-weekly-model-message.md. The paper books of the
-2026-09-28 design stay in the database as an archive: format_book shows any of them, but the
-summary and the statistics are the model's."""
+the menu/CLI text, the weekly Telegram signals and summary (week_signals, format_week_summary)
+and the monthly report. Spec: docs/superpowers/specs/2026-09-30-model-portfolio-and-analyst-design.md,
+section 6; for the weekly messages docs/superpowers/specs/2026-10-01-weekly-model-message.md and,
+for their style (one short message per signal, a short summary), 2026-10-04-signal-message-style.md.
+The paper books of the 2026-09-28 design stay in the database as an archive: format_book shows
+any of them, but the summary and the statistics are the model's."""
 from __future__ import annotations
 
 import datetime as dt
@@ -13,11 +14,10 @@ import re
 import crypto
 import db
 import model
-import model_score
 import paper
 import t212_account
 import telegram_notify
-from telegram_notify import money_eur, share_pct, signed_pct
+from telegram_notify import DOT_GREEN, DOT_RED, money_eur, signed_pct
 
 _REPORT_KEY_TTL = 40 * 86400
 _SLEEVES = ((model.STOCK_BOOK, "Акции", "S&P 500"), (model.CRYPTO_BOOK, "Крипто", "BTC"))
@@ -212,20 +212,31 @@ def format_book(conn, code: str) -> str:
     return "\n".join(lines)
 
 
-# ----------------------------------------------------------- the weekly message
+# ------------------------------------------------------ the weekly signals and the weekly summary
 _WEEK_DAYS = 6              # the week is today - 6 days ... today
-_MAX_WATCH = 5
+_MAX_REASONS = 2            # a buy names this many of its reasons
 _MAX_SELLERS = 5
 MODEL_FAILED_WARNING = "⚠️ Модель на этой неделе не отработала — покупок не было."
 _SCORE_PREFIX = re.compile(r"^балл \d+:\s*")      # an order's reason opens with its score, shown apart
+_UNPRICED = " (по последней цене: нет котировок)"   # paper._close_at_last_value adds it to a reason
+_STOP_SIZE = re.compile(r"[−-]\s?\d+(?:[.,]\d+)?%")
+# (how a model sale's reason begins, the close-alert trigger whose wording it takes)
+_SALE_TRIGGERS = (("продаёт инсайдер", "insider_sell"), ("активист", "activist_cut"),
+                  ("стоит на месте", "dead_money"), ("год в позиции", "time"), ("новости", "news"),
+                  ("тренд вниз", "trend_down"), ("осторожно", "caution"))
+
+
+def _started(conn) -> bool:
+    """Both model books exist: the model has had its first run."""
+    return all(_book_row(conn, code) is not None for code in model.BOOKS)
 
 
 def _week_buys(conn, start: str, end: str) -> list[dict]:
     """The model's buy orders created from `start` to `end` that went ahead (still pending
-    or filled), from both books, in the order they were placed."""
+    or filled), from both books, the best score first (no score last; then as they were placed)."""
     rows = [o for code in model.BOOKS for o in paper.orders(conn, code)
             if o["side"] == "buy" and o["status"] in ("pending", "filled") and start <= o["created"] <= end]
-    return sorted(rows, key=lambda o: o["id"])
+    return sorted(rows, key=lambda o: (o["score"] is None, -(o["score"] or 0.0), o["id"]))
 
 
 def _fill_of(conn, order: dict) -> tuple[str, float, str] | None:
@@ -237,76 +248,142 @@ def _fill_of(conn, order: dict) -> tuple[str, float, str] | None:
         (order["book"], order["ticker"], order["created"])).fetchone()
 
 
-def _buy_lines(conn, order: dict, portfolio: float, esc) -> list[str]:
-    pieces = []
-    if order["amount_eur"] is not None:
-        share = f" ({share_pct(order['amount_eur'] / portfolio)} портфеля)" if portfolio else ""
-        pieces.append(f"{money_eur(order['amount_eur'])}{share}")
+def _t212_flags(conn, first: dt.date, today: dt.date, report) -> dict[str, bool]:
+    """ticker -> whether Trading 212 lists it, as the week's scores say (newest day first): today's
+    `report`, else the scores a daily run kept that day (model.cached_scores). A score that does not
+    say (t212 None: a coin, no key, no instrument list) leaves the ticker out."""
+    flags: dict[str, bool] = {}
+    day = today
+    while day >= first:
+        scored = report.scored if day == today and report is not None else model.cached_scores(conn, day)
+        for s in scored or ():
+            known = getattr(s, "t212", None)
+            if known is not None:
+                flags.setdefault(s.ticker, known)
+        day -= dt.timedelta(days=1)
+    return flags
+
+
+def _buy_text(conn, order: dict, t212: dict[str, bool]) -> str:
+    """«🟢 GME!: покупка — 2 инсайдера из руководства; CEO среди покупателей; балл 70, стоп −10%»: the
+    order's reason without its «балл N: » (its first two parts), its score and its stop; then «нет на
+    Trading 212» when the model's score says so and, for an order that has filled, «вход 07.10 по 23,10»."""
+    reasons = [r for r in _SCORE_PREFIX.sub("", order["reason"] or "").strip().split("; ") if r]
+    head = reasons[:_MAX_REASONS] + ([f"балл {order['score']:.0f}"] if order["score"] is not None else [])
+    tail = []
     if order["stop_pct"] is not None:
-        pieces.append(f"стоп −{order['stop_pct'] * 100:.0f}% от максимума")
-    if order["score"] is not None:
-        pieces.append(f"балл {order['score']:.0f}")
-    lines = [f"• {esc(crypto.symbol_of(order['ticker']))}" + (": " + esc(", ".join(pieces)) if pieces else "")]
-    reason = _SCORE_PREFIX.sub("", order["reason"] or "").strip()
-    if reason:
-        lines.append(f"   {esc(reason)}")
+        tail.append(f"стоп −{order['stop_pct'] * 100:.0f}%")
+    if t212.get(order["ticker"]) is False:
+        tail.append("нет на Trading 212")
     fill = _fill_of(conn, order) if order["status"] == "filled" else None
     if fill:
-        day, close, currency = fill
-        lines.append(esc(f"   исполнен {dt.date.fromisoformat(day):%d.%m} по закрытию {close:,.2f} {currency}"))
-    elif order["status"] == "pending":
-        lines.append("   исполнится по закрытию ближайшего торгового дня")
-    return lines
+        tail.append(f"вход {dt.date.fromisoformat(fill[0]):%d.%m} по {telegram_notify._price(fill[1])}")
+    details = ", ".join((["; ".join(head)] if head else []) + tail)
+    return telegram_notify.signal_line(DOT_GREEN, crypto.symbol_of(order["ticker"]), "покупка", details or None)
 
 
-def _sale_lines(conn, start: str, end: str, esc) -> list[str]:
-    """Positions closed from `start` to `end` with their result, then the sell orders still waiting."""
-    closed = sorted((p for code in model.BOOKS for p in paper.closed_positions(conn, code)
-                     if start <= p["closed_date"] <= end), key=lambda p: (p["closed_date"], p["id"]))
-    lines = []
-    for p in closed:
-        result = f" (результат {signed_pct(p['proceeds_eur'] / p['cost_eur'] - 1)})" \
-            if p["proceeds_eur"] is not None else ""
-        lines.append(f"• {esc(crypto.symbol_of(p['ticker']))} — {esc(p['close_reason'] or 'продажа')}{result}")
-    waiting = sorted((o for code in model.BOOKS for o in paper.pending_orders(conn, code)
-                      if o["side"] == "sell"), key=lambda o: o["id"])
-    for o in waiting:
-        row = conn.execute("SELECT cost_eur, last_value FROM paper_positions WHERE id = ?",
-                           (o["position_id"],)).fetchone()
-        now = f", сейчас {signed_pct(row[1] / row[0] - 1)}" if row and row[1] is not None else ""
-        lines.append(f"• {esc(crypto.symbol_of(o['ticker']))} — {esc(o['reason'])} (ждёт исполнения{now})")
-    return lines
+def _sale_event(reason: str | None) -> tuple[str, bool]:
+    """(what a model sale's reason says happened, worded as the close alerts word it; whether it was
+    sold at the last price for want of quotes). «стоп: −10% от максимума» is «сработал стоп −10%»;
+    a reason nobody worded is shown as it is, and none is «продажа»."""
+    text = (reason or "").strip()
+    unpriced = text.endswith(_UNPRICED)
+    text = text.removesuffix(_UNPRICED).strip()
+    if text.startswith("стоп"):
+        size = _STOP_SIZE.search(text)
+        return "сработал стоп" + (f" {size.group().replace('-', '−')}" if size else ""), unpriced
+    for prefix, trigger in _SALE_TRIGGERS:
+        if text.startswith(prefix):
+            return telegram_notify.CLOSE_EVENT[trigger], unpriced
+    return text or "продажа", unpriced
 
 
-def _watch_lines(conn, today: dt.date, report, esc) -> list[str]:
-    """The best few scores that sit on the watch list: today's report, or (with none) the scores
-    the daily run kept."""
-    scored = report.scored if report is not None else (model.cached_scores(conn, today) or [])
-    watched = sorted((s for s in scored if s.decision == model_score.WATCH),
-                     key=lambda s: s.total, reverse=True)[:_MAX_WATCH]
-    return [f"• {esc(crypto.symbol_of(s.ticker))} — балл {s.total:.0f}" + (f": {esc(s.reasons[0])}" if s.reasons else "")
-            for s in watched]
+def _dot(pct: float | None) -> str:
+    """Green for a result of zero or more as shown (to a tenth of a percent), red for a loss -- and
+    for a result nobody knows."""
+    return DOT_GREEN if pct is not None and round(pct * 100, 1) >= 0 else DOT_RED
 
 
-def _exit_lines(conn, start: str, end: str, esc) -> list[str]:
-    """The group exits journaled from `start` to `end`: one line a ticker (its latest), with who sold."""
-    latest: dict[str, tuple] = {}
-    for ticker, company, members in conn.execute(
-            "SELECT ticker, company, members FROM signal_journal WHERE kind = 'exit' "
+def _week_sales(conn, start: str, end: str) -> list[dict]:
+    """The positions closed from `start` to `end`, in the order they closed."""
+    return sorted((p for code in model.BOOKS for p in paper.closed_positions(conn, code)
+                   if start <= p["closed_date"] <= end), key=lambda p: (p["closed_date"], p["id"]))
+
+
+def _pending_sales(conn) -> list[dict]:
+    """The sell orders still waiting for their close."""
+    return sorted((o for code in model.BOOKS for o in paper.pending_orders(conn, code)
+                   if o["side"] == "sell"), key=lambda o: o["id"])
+
+
+def _sale_text(p: dict) -> str:
+    """«🔴 GME!: сработал стоп −10% — продано 07.10, итог −9,8%»: the sale of a closed position, its
+    result in percent only -- the model's money is virtual and is not shown."""
+    event, unpriced = _sale_event(p["close_reason"])
+    when = f"продано {dt.date.fromisoformat(p['closed_date']):%d.%m}" + (" по последней цене" if unpriced else "")
+    pct = None if p["proceeds_eur"] is None else p["proceeds_eur"] / p["cost_eur"] - 1
+    return telegram_notify.signal_line(_dot(pct), crypto.symbol_of(p["ticker"]), event, when,
+                                       result=None if pct is None else signed_pct(pct))
+
+
+def _pending_sale_text(conn, order: dict) -> str:
+    """«🔴 GME!: сработал стоп −10% — продажа по ближайшему закрытию, сейчас −9,8%»: a sell order still
+    waiting for its close, with how the position stands now (none: it has no value yet)."""
+    row = conn.execute("SELECT cost_eur, last_value FROM paper_positions WHERE id = ?",
+                       (order["position_id"],)).fetchone()
+    pct = row[1] / row[0] - 1 if row and row[1] is not None else None
+    event, _unpriced = _sale_event(order["reason"])
+    return telegram_notify.signal_line(_dot(pct), crypto.symbol_of(order["ticker"]), event,
+                                       "продажа по ближайшему закрытию", label="сейчас",
+                                       result=None if pct is None else signed_pct(pct))
+
+
+def _week_exits(conn, start: str, end: str) -> list[tuple[int, str, list[str]]]:
+    """The group exits journaled from `start` to `end`: one per ticker, its latest row, as (journal
+    id, ticker, who sold), by journal id."""
+    latest: dict[str, tuple[int, str | None]] = {}
+    for id_, ticker, members in conn.execute(
+            "SELECT id, ticker, members FROM signal_journal WHERE kind = 'exit' "
             "AND date(emitted_at, 'localtime') BETWEEN ? AND ? ORDER BY id", (start, end)):
-        latest[ticker] = (company, members)
-    lines = []
-    for ticker, (company, members) in latest.items():
+        latest[ticker] = (id_, members)
+    rows = []
+    for ticker, (id_, members) in latest.items():
         try:
-            names = [str(n) for n in json.loads(members or "[]")]
+            named = json.loads(members or "[]")
         except ValueError:
-            names = []
-        who = ", ".join(names[:_MAX_SELLERS])
-        if len(names) > _MAX_SELLERS:
-            who += f" и ещё {len(names) - _MAX_SELLERS}"
-        what = f"{ticker} — {company}" if company else ticker
-        lines.append(f"• {esc(what)}" + (f": {esc(who)}" if who else ""))
-    return lines
+            named = []
+        rows.append((id_, ticker, [str(n) for n in named] if isinstance(named, list) else []))
+    return sorted(rows)
+
+
+def _exit_text(ticker: str, names: list[str]) -> str:
+    """«🔴 XYZ!: продают те, кто покупал — Name A, Name B» (the first five, then «и ещё N»)."""
+    who = ", ".join(names[:_MAX_SELLERS])
+    if len(names) > _MAX_SELLERS:
+        who += f" и ещё {len(names) - _MAX_SELLERS}"
+    return telegram_notify.signal_line(DOT_RED, crypto.symbol_of(ticker), "продают те, кто покупал", who or None)
+
+
+def week_signals(conn, today: dt.date, report) -> list[tuple[str, str]]:
+    """The week's signals, one Telegram message each (spec 2026-10-04-signal-message-style.md),
+    as (key, html text) in the order they go out: the model's buys (best score first), its sales,
+    the sales still waiting, the group exits. The week is today-6 ... today. The key names the signal
+    for good -- `buy:<order id>`, `sell:<position id>`, `sellpending:<order id>`, `exit:<journal id>`
+    -- so that bot._send_weekly can tell which went out already. Nothing before the model's first
+    run, and nothing in a quiet week.
+
+    `report` is model.DayReport (None: the model did not run): its scores, and the ones the daily runs
+    kept on the days of the week, say which bought names Trading 212 does not list."""
+    if not _started(conn):
+        return []
+    first = today - dt.timedelta(days=_WEEK_DAYS)
+    start, end = first.isoformat(), today.isoformat()
+    t212 = _t212_flags(conn, first, today, report)
+    signals = [(f"buy:{o['id']}", _buy_text(conn, o, t212)) for o in _week_buys(conn, start, end)]
+    signals += [(f"sell:{p['id']}", _sale_text(p)) for p in _week_sales(conn, start, end)]
+    signals += [(f"sellpending:{o['id']}", _pending_sale_text(conn, o)) for o in _pending_sales(conn)]
+    signals += [(f"exit:{id_}", _exit_text(ticker, names)) for id_, ticker, names in _week_exits(conn, start, end)]
+    return signals
 
 
 def _week_return(conn, today: dt.date, value: float) -> float | None:
@@ -337,53 +414,56 @@ def _t212_line(conn, today: dt.date) -> str | None:
     return line
 
 
-def format_week(conn, today: dt.date, report, *, html: bool = True, model_failed: bool = False) -> str:
-    """The weekly Telegram message (spec 2026-10-01-weekly-model-message.md): what the model bought
-    and sold in the week today-6 ... today, what it holds, what it is watching, the groups that
-    started selling, the owner's Trading 212 account when the bot tracks it (_t212_line), and
-    where the portfolio stands. Always a message, however quiet the week.
-    `report` is model.DayReport (None: the model did not run -- its watch list is then the
-    scores the daily run kept). `model_failed`: the week's model pass never got through (the
-    Sunday message goes out regardless), which a warning line says. Blocks are joined by a blank line and none has one inside, so a
-    long message splits between blocks (telegram_notify._chunk)."""
+def format_week_summary(conn, today: dt.date, report, *, html: bool = True,
+                        model_failed: bool = False) -> str:
+    """The weekly summary, sent last: one short message, a line each (spec 2026-10-04-signal-message-style.md)
+
+        📊 Модель, неделя 26.09–02.10: €101 230 (+1,2% с начала, за неделю +0,4%); смесь 70/30 +0,8%
+        В портфеле (9): BBD +1,2%, TRMD −0,4%, …
+        Сигналов за неделю: покупок 2, продаж 1
+        Ваш счёт Trading 212: €186 (за неделю +0,3%)
+        ⚠️ Модель на этой неделе не отработала — покупок не было.
+
+    -- where the portfolio stands, what it holds (the best result first), how many signals the week
+    sent (week_signals; a sale waiting counts as a sale, group exits are counted apart; none: «Сигналов
+    за неделю не было.»), the owner's Trading 212 account when the bot tracks it (_t212_line), and
+    `model_failed` -- the week's model pass never got through (the Sunday message goes out regardless)
+    -- as the warning. A part that cannot be computed is left out: no week return before the model is
+    a week old, no mix without its benchmark. Always a message, however quiet the week.
+    `report` is model.DayReport (None: the model did not run)."""
     stats = model_stats(conn, today)
     if stats is None:
         return _NOT_STARTED
     esc = _esc_for(html)
     first = today - dt.timedelta(days=_WEEK_DAYS)
-    start, end = first.isoformat(), today.isoformat()
-
-    def block(title: str, rows: list[str]) -> str:
-        return "\n".join([telegram_notify._b(title, html)] + rows)
-
-    parts = [telegram_notify._b(f"📊 Модельный портфель — неделя {first:%d.%m}–{today:%d.%m}", html)]
-    buys = [line for o in _week_buys(conn, start, end) for line in _buy_lines(conn, o, stats["value"], esc)]
-    sales = _sale_lines(conn, start, end, esc)
-    if not (buys or sales):
-        parts.append(esc("Сделок за неделю нет."))
-    if buys:
-        parts.append(block("🟢 Покупки", buys))
-    if sales:
-        parts.append(block("🔴 Продажи", sales))
-    held = [_position_row(p, today) for code in model.BOOKS for p in paper.open_positions(conn, code)]
-    parts.append(block("📋 В портфеле", _table(held, html) if held else [esc("пусто — всё в деньгах")]))
-    if watch := _watch_lines(conn, today, report, esc):
-        parts.append(block("👀 Наблюдение", watch))
-    if exits := _exit_lines(conn, start, end, esc):
-        parts.append(block("🚨 Продают те, кто покупал", exits))
-
-    if model_failed:
-        parts.append(esc(MODEL_FAILED_WARNING))
-    if account := _t212_line(conn, today):
-        parts.append(esc(account))
-    line = f"Портфель: {money_eur(stats['value'])} ({signed_pct(stats['ret'])} с начала)"
+    since = [f"{signed_pct(stats['ret'])} с начала"]
     week = _week_return(conn, today, stats["value"])
     if week is not None:
-        line += f", за неделю {signed_pct(week)}"
+        since.append(f"за неделю {signed_pct(week)}")
+    title = telegram_notify._b(f"Модель, неделя {first:%d.%m}–{today:%d.%m}", html)
+    head = f"📊 {title}: {esc(money_eur(stats['value']))} ({esc(', '.join(since))})"
     if stats["bench_ret"] is not None:
-        line += f"; смесь 70/30: {signed_pct(stats['bench_ret'])} с начала"
-    parts.append(esc(line))
-    return "\n\n".join(parts)
+        head += esc(f"; смесь 70/30 {signed_pct(stats['bench_ret'])}")
+    lines = [head]
+
+    held = sorted(((crypto.symbol_of(p["ticker"]),
+                    (p["last_value"] if p["last_value"] is not None else p["net_eur"]) / p["cost_eur"] - 1)
+                   for code in model.BOOKS for p in paper.open_positions(conn, code)),
+                  key=lambda row: (-row[1], row[0]))
+    lines.append(esc(f"В портфеле ({len(held)}): " + ", ".join(f"{name} {signed_pct(result)}"
+                                                              for name, result in held))
+                 if held else esc("В портфеле: пусто — всё в деньгах"))
+
+    kinds = [key.split(":")[0] for key, _text in week_signals(conn, today, report)]
+    sales, exits = kinds.count("sell") + kinds.count("sellpending"), kinds.count("exit")
+    lines.append(esc(f"Сигналов за неделю: покупок {kinds.count('buy')}, продаж {sales}"
+                     + (f", групповых выходов {exits}" if exits else "") if kinds
+                     else "Сигналов за неделю не было."))
+    if account := _t212_line(conn, today):
+        lines.append(esc(account))
+    if model_failed:
+        lines.append(esc(MODEL_FAILED_WARNING))
+    return "\n".join(lines)
 
 
 def maybe_send_monthly_report(conn, today: dt.date, send=None) -> bool:

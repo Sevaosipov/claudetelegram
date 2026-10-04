@@ -1,8 +1,8 @@
 """bot.py's daily flow on the model portfolio (spec 2026-09-30, section 5, as the weekly-message
 spec 2026-10-01 changes it): the new signals are collected, the model runs, the journal takes the
 model's decisions, the close alerts on the /bought positions go out as they fire, and once a week
-(the first full run from Friday to Sunday) the model buys and the weekly message goes out. The
-network and the model itself are stubbed."""
+(the first full run from Friday to Sunday) the model buys and the weekly signals and summary go
+out. The network and the model itself are stubbed."""
 from __future__ import annotations
 
 import dataclasses
@@ -226,27 +226,151 @@ def test_send_closes_says_a_failed_send_on_stderr(conn, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------- _send_weekly
-def test_send_weekly_sends_the_weeks_message_and_marks_the_week(conn, monkeypatch):
+# (their days are the weekly-run constants below: FRI, SAT, SUN, NEXT_FRI)
+SENT_KEY = "weekly_sent_2026-W41"
+
+
+def _sent_keys(conn, key=SENT_KEY):
+    return db.get_cached_json(conn, key)
+
+
+@pytest.fixture
+def weekly(conn, monkeypatch):
+    """_send_weekly with the week's signals and the summary stubbed. `weekly.sent` is what went
+    out, `weekly.refuse` the messages Telegram refuses, `weekly.keys_when_sent` the signals marked
+    sent at the moment each message went out."""
+    run = types.SimpleNamespace(sent=[], refuse=set(), keys_when_sent=[], asked=[],
+                                signals=[("buy:1", "BUY1"), ("sell:2", "SELL2"), ("exit:3", "EXIT3")])
+
+    def send(msg):
+        run.sent.append(msg)
+        run.keys_when_sent.append(_sent_keys(conn))
+        return msg not in run.refuse
+
+    def week_signals(c, today, report):
+        run.asked.append(("signals", today, report))
+        return list(run.signals)
+
+    def week_summary(c, today, report, *, html=True, model_failed=False):
+        run.asked.append(("summary", today, report, model_failed))
+        return "SUMMARY" + (" (warning)" if model_failed else "")
+
+    monkeypatch.setattr("telegram_notify.send_text", send)
+    monkeypatch.setattr(paper_report, "week_signals", week_signals)
+    monkeypatch.setattr(paper_report, "format_week_summary", week_summary)
+    return run
+
+
+def test_send_weekly_sends_each_signal_as_its_own_message_in_order_and_the_summary_last(conn, weekly):
+    assert bot._send_weekly(conn, FRI, None) is True
+    assert weekly.sent == ["BUY1", "SELL2", "EXIT3", "SUMMARY"]
+    assert bot._weekly_due(conn, FRI) is False and bot._weekly_due(conn, SAT) is False
+    assert _sent_keys(conn) == ["buy:1", "sell:2", "exit:3"]
+
+
+def test_send_weekly_asks_for_the_signals_and_the_summary_with_the_day_and_the_report(conn, weekly):
+    report = _report()
+    bot._send_weekly(conn, FRI, report)
+    assert weekly.asked == [("signals", FRI, report), ("summary", FRI, report, False)]
+
+
+def test_a_quiet_week_sends_only_the_summary(conn, weekly):
+    weekly.signals = []
+    assert bot._send_weekly(conn, FRI, None) is True
+    assert weekly.sent == ["SUMMARY"] and bot._weekly_due(conn, FRI) is False
+
+
+def test_a_signal_is_marked_sent_only_after_its_message_went_out(conn, weekly):
+    bot._send_weekly(conn, FRI, None)
+    assert weekly.keys_when_sent == [None, ["buy:1"], ["buy:1", "sell:2"], ["buy:1", "sell:2", "exit:3"]]
+
+
+def test_a_signal_that_fails_stops_the_sequence_and_leaves_the_week_open(conn, weekly, capsys):
+    weekly.refuse = {"SELL2"}
+    assert bot._send_weekly(conn, FRI, None) is False
+    assert weekly.sent == ["BUY1", "SELL2"]                              # EXIT3 and the summary are not tried
+    assert _sent_keys(conn) == ["buy:1"]
+    assert bot._weekly_due(conn, FRI) is True and bot._weekly_due(conn, SAT) is True
+    assert "weekly message not sent" in capsys.readouterr().err
+
+
+def test_the_rerun_after_a_failed_signal_sends_only_what_is_missing(conn, weekly):
+    weekly.refuse = {"SELL2"}
+    bot._send_weekly(conn, FRI, None)
+    weekly.refuse.clear()
+    weekly.sent.clear()
+    assert bot._send_weekly(conn, SAT, None) is True
+    assert weekly.sent == ["SELL2", "EXIT3", "SUMMARY"]                  # not BUY1 again
+    assert _sent_keys(conn) == ["buy:1", "sell:2", "exit:3"] and bot._weekly_due(conn, SAT) is False
+
+
+def test_a_summary_that_fails_leaves_every_signal_marked_and_is_all_the_rerun_sends(conn, weekly, capsys):
+    weekly.refuse = {"SUMMARY"}
+    assert bot._send_weekly(conn, FRI, None) is False
+    assert weekly.sent == ["BUY1", "SELL2", "EXIT3", "SUMMARY"] and _sent_keys(conn) == ["buy:1", "sell:2", "exit:3"]
+    assert bot._weekly_due(conn, FRI) is True and "weekly message not sent" in capsys.readouterr().err
+    weekly.refuse.clear()
+    weekly.sent.clear()
+    assert bot._send_weekly(conn, SAT, None) is True
+    assert weekly.sent == ["SUMMARY"]
+
+
+def test_a_second_run_in_the_same_week_sends_nothing(conn, weekly):
+    assert bot._send_weekly(conn, FRI, None) is True
+    weekly.sent.clear()
+    assert bot._send_weekly(conn, SAT, None) is False and weekly.sent == []
+    assert bot._send_weekly(conn, FRI, None) is False and weekly.sent == []
+
+
+def test_a_new_week_starts_with_nothing_sent(conn, weekly):
+    bot._send_weekly(conn, FRI, None)
+    weekly.sent.clear()
+    assert bot._send_weekly(conn, NEXT_FRI, None) is True
+    assert weekly.sent == ["BUY1", "SELL2", "EXIT3", "SUMMARY"]
+    assert _sent_keys(conn, "weekly_sent_2026-W42") == ["buy:1", "sell:2", "exit:3"]
+
+
+def test_the_sent_signals_are_a_json_list_in_kv_named_by_the_iso_week(conn, weekly):
+    bot._send_weekly(conn, SAT, None)
+    assert bot.SENT_KEY.format(week=bot._week_id(SAT)) == "weekly_sent_2026-W41"
+    assert conn.execute("SELECT value FROM kv_cache WHERE key = ?", (SENT_KEY,)).fetchone() == (
+        '["buy:1", "sell:2", "exit:3"]',)
+
+
+def test_an_unreadable_sent_list_counts_as_nothing_sent(conn, weekly):
+    db.save_cached_json(conn, SENT_KEY, {"not": "a list"})
+    assert bot._send_weekly(conn, FRI, None) is True
+    assert weekly.sent == ["BUY1", "SELL2", "EXIT3", "SUMMARY"]
+
+
+def test_send_weekly_hands_model_failed_to_the_summary(conn, weekly):
+    assert bot._send_weekly(conn, SUN, None, model_failed=True) is True
+    assert weekly.sent[-1] == "SUMMARY (warning)" and weekly.asked[-1] == ("summary", SUN, None, True)
+
+
+def test_send_weekly_does_not_touch_the_buys_key(conn, weekly):
+    bot._send_weekly(conn, FRI, None)
+    assert bot._weekly_due(conn, FRI, bot.BUYS_KEY) is True
+
+
+def test_a_real_week_goes_out_as_one_message_a_signal_then_the_summary(conn, monkeypatch):
     model.create_books(conn, FRI - dt.timedelta(days=21))
+    conn.execute("INSERT INTO paper_orders (book, ticker, source, side, amount_eur, reason, created, status, "
+                 "insiders, stop_pct, score) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 (model.STOCK_BOOK, "AAA", "SEC", "buy", 5_000.0, "балл 70: 2 инсайдера из руководства; "
+                  "CEO среди покупателей", FRI.isoformat(), "pending", "[]", 0.10, 70.0))
+    db.journal_signal(conn, {"source": "SEC", "kind": "exit", "ticker": "ZZZ", "company": "Exit Corp",
+                             "members": '["Ann Lee", "Bo Chen"]'})
+    conn.execute("UPDATE signal_journal SET emitted_at = ?", (f"{FRI - dt.timedelta(days=1)} 12:00:00",))
+    conn.commit()
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     assert bot._send_weekly(conn, FRI, None) is True
-    assert sent == [paper_report.format_week(conn, FRI, None)] and "неделя 03.10–09.10" in sent[0]
-    assert bot._weekly_due(conn, FRI) is False and bot._weekly_due(conn, SAT) is False
-
-
-def test_send_weekly_leaves_the_week_open_when_the_send_fails(conn, monkeypatch, capsys):
-    model.create_books(conn, FRI - dt.timedelta(days=21))
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: False)
-    assert bot._send_weekly(conn, FRI, None) is False
-    assert "weekly message not sent" in capsys.readouterr().err
-    assert bot._weekly_due(conn, FRI) is True and bot._weekly_due(conn, SAT) is True
-
-
-def test_send_weekly_does_not_touch_the_buys_key(conn, monkeypatch):
-    monkeypatch.setattr("telegram_notify.send_text", lambda msg: True)
-    bot._send_weekly(conn, FRI, None)
-    assert bot._weekly_due(conn, FRI, bot.BUYS_KEY) is True
+    assert sent[:2] == ["🟢 <b>AAA!</b>: покупка — 2 инсайдера из руководства; CEO среди покупателей; "
+                        "балл 70, стоп −10%",
+                        "🔴 <b>ZZZ!</b>: продают те, кто покупал — Ann Lee, Bo Chen"]
+    assert len(sent) == 3 and sent[2].startswith("📊 <b>Модель, неделя 03.10–09.10</b>: €100 000")
+    assert "Сигналов за неделю: покупок 1, продаж 0, групповых выходов 1" in sent[2]
 
 
 # ------------------------------------------------------------------ _run_model
@@ -429,9 +553,10 @@ def test_collect_new_signals_skips_what_was_already_committed(conn, monkeypatch)
 @pytest.fixture
 def main_run(monkeypatch, tmp_path):
     """bot.main() with every pass stubbed, recording the order things happen in. The day is
-    `run.today` (a Friday: a weekly run) and the weekly message goes out through `send_text`,
-    which says yes unless `run.send_ok` is False; `run.model_crashes` makes the model return
-    nothing. The database is real (tmp_path), so the weekly keys carry from one run to the next."""
+    `run.today` (a Friday: a weekly run) and the weekly messages -- `run.signals`, then the summary
+    -- go out through `send_text`, which says yes unless `run.send_ok` is False or the text is in
+    `run.refuse`; `run.model_crashes` makes the model return nothing. The database is real
+    (tmp_path), so the weekly keys carry from one run to the next."""
     calls = []
     closes = ["close-alert"]
     report = _report({"AAA": "buy"}, buys=[object()], sells=[object()])
@@ -468,16 +593,20 @@ def main_run(monkeypatch, tmp_path):
         calls.append(("closes", cl))
         return True
 
-    def format_week(conn, today, rep, *, html=True, model_failed=False):
-        calls.append(("week", today, rep))
-        run.week_kwargs.append({"model_failed": model_failed})
+    def week_signals(conn, today, rep):
+        calls.append(("signals", today, rep))
         if run.week_fails:
             raise RuntimeError("format")
-        return "WEEK"
+        return list(run.signals)
+
+    def format_week_summary(conn, today, rep, *, html=True, model_failed=False):
+        calls.append(("summary", today, rep))
+        run.week_kwargs.append({"model_failed": model_failed})
+        return "SUMMARY"
 
     def send_text(msg):
         calls.append(("send", msg))
-        return run.send_ok
+        return run.send_ok and msg not in run.refuse
 
     def monthly(conn, today):
         calls.append(("monthly", today))
@@ -489,7 +618,8 @@ def main_run(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "_journal", journal)
     monkeypatch.setattr(bot.positions, "check_exits", check_exits)
     monkeypatch.setattr(bot, "_send_closes", send_closes)
-    monkeypatch.setattr(paper_report, "format_week", format_week)
+    monkeypatch.setattr(paper_report, "week_signals", week_signals)
+    monkeypatch.setattr(paper_report, "format_week_summary", format_week_summary)
     monkeypatch.setattr(paper_report, "maybe_send_monthly_report", monthly)
     monkeypatch.setattr(bot.telegram_notify, "send_text", send_text)
     monkeypatch.setattr(bot.telegram_notify, "format_close_alert", lambda a, html=False: str(a))
@@ -514,7 +644,8 @@ def main_run(monkeypatch, tmp_path):
     run.report, run.buy_sig, run.exit_sig, run.closes = report, buy_sig, exit_sig, closes
     run.caution_sig, run.cautions = caution_sig, False
     run.today, run.send_ok, run.model_crashes, run.week_fails = FRI, True, False, False
-    run.week_kwargs = []                                          # what format_week was asked for, per call
+    run.week_kwargs = []                                          # what the summary was asked for, per call
+    run.signals, run.refuse = [], set()                           # the week's signals; texts Telegram refuses
     run.complete = True                                           # False: a pass with a failed sleeve
     run.syncs, run.sync_silent, run.sync_crashes = [], [], False  # the Trading 212 sync (stubbed)
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
@@ -525,16 +656,46 @@ def _kinds(calls):
     return [c if isinstance(c, str) else c[0] for c in calls]
 
 
-def test_main_on_a_weekly_run_goes_collect_model_journal_closes_message_monthly(main_run, capsys):
+def test_main_on_a_weekly_run_goes_collect_model_journal_closes_signals_summary_monthly(main_run, capsys):
     calls = main_run()
     assert calls[0] == "collect" and calls[1] == ("model", True)
     assert calls[2] == ("journal", [main_run.buy_sig, main_run.exit_sig], main_run.report)
     assert calls[3] == "check_exits"
     assert calls[4] == ("closes", main_run.closes)
-    assert calls[5] == ("week", FRI, main_run.report)             # format_week(conn, today, report)
-    assert calls[6] == ("send", "WEEK")
-    assert calls[7] == ("monthly", FRI)
-    assert len(calls) == 8
+    assert calls[5] == ("signals", FRI, main_run.report)          # week_signals(conn, today, report)
+    assert calls[6] == ("summary", FRI, main_run.report)          # format_week_summary(conn, today, report)
+    assert calls[7] == ("send", "SUMMARY")
+    assert calls[8] == ("monthly", FRI)
+    assert len(calls) == 9
+
+
+def test_main_sends_the_weeks_signals_one_by_one_then_the_summary_then_the_monthly_report(main_run):
+    main_run.signals = [("buy:1", "BUY1"), ("sell:2", "SELL2"), ("exit:3", "EXIT3")]
+    calls = main_run()
+    assert calls[5:] == [("signals", FRI, main_run.report), ("send", "BUY1"), ("send", "SELL2"),
+                         ("send", "EXIT3"), ("summary", FRI, main_run.report), ("send", "SUMMARY"),
+                         ("monthly", FRI)]
+
+
+def test_a_signal_that_fails_mid_week_holds_back_the_summary_and_the_monthly_report_and_the_rerun_resumes(main_run):
+    main_run.signals = [("buy:1", "BUY1"), ("sell:2", "SELL2"), ("exit:3", "EXIT3")]
+    main_run.refuse = {"SELL2"}
+    calls = main_run()
+    assert [c for c in calls if c[0] == "send"] == [("send", "BUY1"), ("send", "SELL2")]
+    assert "summary" not in _kinds(calls) and "monthly" not in _kinds(calls)
+    conn = main_run.db()
+    assert db.get_cached_json(conn, "weekly_sent_2026-W41") == ["buy:1"]
+    assert _week_keys(main_run, "weekly_message_%") == 0
+    main_run.refuse, main_run.today = set(), SAT
+    calls.clear()
+    main_run()
+    assert [c for c in calls if c[0] == "send"] == [("send", "SELL2"), ("send", "EXIT3"), ("send", "SUMMARY")]
+    assert ("monthly", SAT) in calls and ("model", False) in calls    # the buys were Friday's
+    assert _week_keys(main_run, "weekly_message_%") == 1
+    calls.clear()
+    main_run.today = SUN
+    main_run()
+    assert "send" not in _kinds(calls)                                # sent: nothing more this week
 
 
 def test_main_journals_todays_cautions_before_the_model_and_the_rest_after(main_run):
@@ -582,21 +743,21 @@ def test_the_weekly_message_goes_once_a_week_and_the_monthly_report_with_it(main
     main_run()                                                    # Friday again
     main_run.today = SUN
     calls = main_run()
-    assert [c for c in calls if c[0] == "send"] == [("send", "WEEK")]
+    assert [c for c in calls if c[0] == "send"] == [("send", "SUMMARY")]
     assert [c for c in calls if c[0] == "monthly"] == [("monthly", FRI)]
 
 
 def test_a_failed_friday_send_is_retried_on_the_next_run_of_the_window(main_run):
     main_run.send_ok = False
     calls = main_run()
-    assert ("send", "WEEK") in calls
+    assert ("send", "SUMMARY") in calls
     assert main_run.db().execute("SELECT COUNT(*) FROM kv_cache WHERE key LIKE 'weekly_message_%'"
                                  ).fetchone() == (0,)                 # the key waits for a success
     main_run.send_ok = True
     main_run.today = SAT
     calls.clear()
     main_run()
-    assert ("send", "WEEK") in calls and ("model", False) in calls    # the buys were Friday's
+    assert ("send", "SUMMARY") in calls and ("model", False) in calls    # the buys were Friday's
     calls.clear()
     main_run.today = SUN
     main_run()
@@ -606,12 +767,12 @@ def test_a_failed_friday_send_is_retried_on_the_next_run_of_the_window(main_run)
 def test_the_monthly_report_follows_only_a_weekly_message_that_was_sent(main_run):
     main_run.send_ok = False
     calls = main_run()
-    assert ("send", "WEEK") in calls and "monthly" not in _kinds(calls)      # the send failed
+    assert ("send", "SUMMARY") in calls and "monthly" not in _kinds(calls)   # the send failed
     main_run.send_ok = True
     main_run.today = SAT
     calls.clear()
     main_run()
-    assert ("send", "WEEK") in calls and ("monthly", SAT) in calls            # sent: its monthly follows
+    assert ("send", "SUMMARY") in calls and ("monthly", SAT) in calls         # sent: its monthly follows
 
 
 def test_the_monthly_report_is_not_tried_when_the_weekly_message_could_not_be_made(main_run):
@@ -630,7 +791,7 @@ def test_an_incomplete_pass_does_not_use_up_the_weeks_buys_or_send_the_message(m
     main_run.today = SAT
     calls.clear()
     main_run()
-    assert ("model", True) in calls and ("send", "WEEK") in calls
+    assert ("model", True) in calls and ("send", "SUMMARY") in calls
     assert _week_keys(main_run, "model_buys_%") == 1
 
 
@@ -651,7 +812,7 @@ def test_sunday_with_a_pass_that_stayed_incomplete_sends_the_message_with_the_wa
 def test_a_missed_friday_is_made_up_on_the_weekend_buys_and_message(main_run):
     main_run.today = SAT
     calls = main_run()
-    assert ("model", True) in calls and ("send", "WEEK") in calls and ("monthly", SAT) in calls
+    assert ("model", True) in calls and ("send", "SUMMARY") in calls and ("monthly", SAT) in calls
 
 
 def _week_keys(main_run, like):
@@ -675,7 +836,7 @@ def test_a_friday_with_a_crashed_model_sends_no_weekly_message_and_keeps_the_wee
     main_run.model_crashes = True
     calls = main_run()
     kinds = _kinds(calls)
-    assert "week" not in kinds and "send" not in kinds and "monthly" not in kinds
+    assert "signals" not in kinds and "summary" not in kinds and "send" not in kinds and "monthly" not in kinds
     assert "closes" in kinds                                      # the close alerts do not wait
     assert _week_keys(main_run, "model_buys_%") == 0 and _week_keys(main_run, "weekly_message_%") == 0
     assert main_run.week_kwargs == []
@@ -687,7 +848,7 @@ def test_saturday_with_a_good_pass_buys_and_sends_the_message_after_a_crashed_fr
     main_run.model_crashes = False
     main_run.today = SAT
     calls = main_run()
-    assert ("model", True) in calls and ("send", "WEEK") in calls and ("monthly", SAT) in calls
+    assert ("model", True) in calls and ("send", "SUMMARY") in calls and ("monthly", SAT) in calls
     assert main_run.week_kwargs == [{"model_failed": False}]       # no warning: the model did run
     assert _week_keys(main_run, "model_buys_%") == 1 and _week_keys(main_run, "weekly_message_%") == 1
 
@@ -699,7 +860,7 @@ def test_sunday_with_the_model_still_crashing_sends_the_message_with_the_warning
         assert "send" not in _kinds(main_run())                   # nothing yet: no model pass this week
     main_run.today = SUN
     calls = main_run()
-    assert ("week", SUN, None) in calls and ("send", "WEEK") in calls
+    assert ("signals", SUN, None) in calls and ("summary", SUN, None) in calls and ("send", "SUMMARY") in calls
     assert main_run.week_kwargs == [{"model_failed": True}]
     assert _week_keys(main_run, "model_buys_%") == 0 and _week_keys(main_run, "weekly_message_%") == 1
     assert ("monthly", SUN) in calls                               # the message went: its monthly follows
@@ -716,7 +877,7 @@ def test_sunday_with_a_good_pass_sends_the_message_without_the_warning(main_run)
     main_run.model_crashes = False
     main_run.today = SUN
     calls = main_run()
-    assert ("model", True) in calls and ("send", "WEEK") in calls
+    assert ("model", True) in calls and ("send", "SUMMARY") in calls
     assert main_run.week_kwargs == [{"model_failed": False}]
 
 
@@ -739,12 +900,12 @@ def test_a_filtered_run_never_buys_and_sends_no_weekly_message(main_run):
     kinds = _kinds(calls)
     assert ("model", False) in calls
     assert "journal" in kinds and "closes" in kinds              # the rest of the day goes on
-    assert "week" not in kinds and "send" not in kinds and "monthly" not in kinds
+    assert "signals" not in kinds and "summary" not in kinds and "send" not in kinds and "monthly" not in kinds
     assert main_run.db().execute("SELECT COUNT(*) FROM kv_cache WHERE key LIKE 'model_buys_%' "
                                  "OR key LIKE 'weekly_message_%'").fetchone() == (0,)
     calls.clear()
     main_run()                                                    # the full run later that Friday
-    assert ("model", True) in calls and ("send", "WEEK") in calls
+    assert ("model", True) in calls and ("send", "SUMMARY") in calls
 
 
 def test_a_run_with_no_telegram_uses_the_weeks_buys_but_not_its_message(main_run):
@@ -753,7 +914,7 @@ def test_a_run_with_no_telegram_uses_the_weeks_buys_but_not_its_message(main_run
     assert ("model", True) in calls
     calls.clear()
     main_run()                                                    # later, with Telegram
-    assert ("model", False) in calls and ("send", "WEEK") in calls
+    assert ("model", False) in calls and ("send", "SUMMARY") in calls
 
 
 def test_the_monthly_report_comes_only_with_a_weekly_message(main_run):
@@ -796,7 +957,7 @@ def test_a_failing_weekly_message_does_not_escape_main_and_is_retried(main_run, 
     assert db.get_cached_value(conn, "weekly_message_2026-W41", float("inf")) is None
     main_run.week_fails = False
     main_run.today = SAT
-    assert ("send", "WEEK") in main_run()
+    assert ("send", "SUMMARY") in main_run()
 
 
 def test_the_caution_is_in_the_journal_when_the_model_runs(conn, monkeypatch):
@@ -944,7 +1105,7 @@ def test_a_sync_that_changed_nothing_adds_no_line_to_the_log(main_run, monkeypat
 def test_a_crashing_sync_is_reported_like_a_failed_source_and_the_run_goes_on(main_run, capsys):
     main_run.sync_crashes = True
     calls = main_run()
-    assert "check_exits" in calls and ("send", "WEEK") in calls
+    assert "check_exits" in calls and ("send", "SUMMARY") in calls
     assert "[T212] pass failed: RuntimeError" in capsys.readouterr().err
     assert db.get_cached_value(main_run.db(), "last_successful_run", float("inf")) is not None
 
@@ -954,7 +1115,8 @@ def test_the_real_sync_without_a_key_leaves_the_daily_run_as_it_was(main_run, mo
     exactly what they were."""
     monkeypatch.setattr(bot.t212_account, "sync", REAL_T212_SYNC)
     calls = main_run()
-    assert _kinds(calls) == ["collect", "model", "journal", "check_exits", "closes", "week", "send", "monthly"]
+    assert _kinds(calls) == ["collect", "model", "journal", "check_exits", "closes", "signals", "summary",
+                             "send", "monthly"]
     conn = main_run.db()
     for table in ("positions", "t212_prices", "t212_equity"):
         assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
