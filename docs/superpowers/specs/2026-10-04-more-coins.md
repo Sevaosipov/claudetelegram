@@ -316,3 +316,14 @@ two-letter `mn`, `bn`) or an abbreviation stuck to the number (`2.2m`, `1.5bn`):
 ETH parse exactly as before (the saved filings pass unchanged; a word that merely starts with m or b -- "more", "bitcoin", "BTC" --
 is not a multiplier, and neither is a lone "m" or "b" after a space). The price, total and every other safeguard are read as before.
 Tests: both rules, the three README-promised positives and negatives, plain numbers unchanged.
+
+### V6. EDGAR down: give up after three failed queries in a row
+
+`crypto_treasury.search` counts consecutive failed queries (each already after `_get`'s three attempts and pauses). At
+`MAX_CONSECUTIVE_FAILURES = 3` it stops, logs "3 queries in a row failed -- EDGAR looks down; giving up", and raises the last failure,
+so `bot._run_source` reports the source failed -- instead of spending every remaining coin's retries and pauses (3 coins x 3 attempts
+= 9 requests, not 39). A success resets the count; failures that are not consecutive never stop the search; and a search in which every
+query failed still raises (the earlier rule, which now matters only for fewer than three queries). What the earlier queries found is
+dropped with the failed source; the next run searches the window again (a document is marked seen only once read). This refines the
+earlier rule "failed only when every query failed". Tests: three failures in a row stop after nine requests; alternating failures go
+on to the end; two failures then an answer start the count again; the daily pass reports the source failed after three coins.

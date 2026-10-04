@@ -47,6 +47,9 @@ QUERIES = {
 }
 PAGE_SIZE = 100
 MAX_PAGES = 5
+# This many failed queries in a row (each after its own retries) mean EDGAR is down: search() stops and
+# reports the source failed instead of spending every remaining coin's retries and pauses on it.
+MAX_CONSECUTIVE_FAILURES = 3
 REQUEST_PAUSE_SECONDS = 0.15   # SEC fair access: <=10 req/s across its hosts
 # EFTS and the archive now and then answer one request with a 5xx (or drop the
 # connection) and the identical request succeeds seconds later. A year's backfill
@@ -284,22 +287,31 @@ def search(start: dt.date, end: dt.date, session: requests.Session) -> list[dict
     One coin's query failing does not lose the others. A query that still fails after _get's
     retries (HTTP error, dropped connection, an answer that is not JSON) is reported on stderr and
     skipped -- the hits its earlier pages gave are kept -- and the search goes on with the next coin.
-    It raises, with the first failure, only when EVERY query failed, so bot._run_source reports the
-    source as failed rather than as quiet. A document a failed query missed is found on a later
-    run: the trailing window is searched every day, and a document is marked seen only once read.
+    But EDGAR being down must not cost thirteen coins' retries: after MAX_CONSECUTIVE_FAILURES
+    failed queries in a row the search stops and raises, and so does a search in which EVERY query
+    failed, so bot._run_source reports the source as failed rather than as quiet (what the earlier
+    queries found is dropped with it). A document a failed query missed is found on a later run: the
+    trailing window is searched every day, and a document is marked seen only once read.
 
     (Before the alts were added the search ran bitcoin's query and then ether's, and the first
     failure -- after the same retries -- ended it: the other coin's hits were thrown away and the
     whole pass raised. With thirteen queries a single bad answer must not cost the day's filings.)"""
     hits: dict[str, dict] = {}
     failed: list[Exception] = []
+    streak = 0
     for coin, q in QUERIES.items():
         try:
             _search_one(q, start, end, session, hits)
+            streak = 0
         except (requests.RequestException, ValueError, KeyError, TypeError) as e:
             failed.append(e)
+            streak += 1
             print(f"[crypto_treasury] {coin} query failed: {type(e).__name__}: {str(e)[:120]}",
                   file=sys.stderr)
+            if streak >= MAX_CONSECUTIVE_FAILURES:
+                print(f"[crypto_treasury] {streak} queries in a row failed -- EDGAR looks down; "
+                      f"giving up on the search", file=sys.stderr)
+                raise
     if failed and len(failed) == len(QUERIES):
         raise failed[0]
     return list(hits.values())

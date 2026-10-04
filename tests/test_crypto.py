@@ -537,9 +537,9 @@ def test_a_missing_document_is_not_retried(sleeps, monkeypatch):
     (_resp(500), requests.HTTPError), (requests.ConnectionError("reset"), requests.ConnectionError),
 ])
 def test_a_persistent_failure_still_raises(failure, raised, sleeps):
-    """So bot._run_source reports the source as failed rather than as quiet: every coin's query
-    fails, each after its three attempts."""
-    n = len(ct.QUERIES)
+    """So bot._run_source reports the source as failed rather than as quiet: the queries fail, each after its three
+    attempts, and after MAX_CONSECUTIVE_FAILURES in a row the search gives up (EDGAR is down)."""
+    n = ct.MAX_CONSECUTIVE_FAILURES
     session = _Session(*[failure] * (3 * n))
     with pytest.raises(raised):
         ct.search(dt.date(2026, 9, 15), dt.date(2026, 9, 21), session)
@@ -603,14 +603,64 @@ def test_any_failure_of_one_query_is_skipped(failure, sleeps, capsys):
     assert "DOGE query failed" in capsys.readouterr().err
 
 
-def test_the_source_fails_only_when_every_query_failed(sleeps):
+def test_the_source_fails_when_every_query_failed(sleeps, two_queries):
+    """With only two coins to ask (fewer than the streak that means "down"), failing both is failing every query."""
     down = {q: _resp(500) for q in ct.QUERIES.values()}
     with pytest.raises(requests.HTTPError):
         ct.search(_START, _END, _Efts(down))
-    down.pop(ct.QUERIES["LINK"])                                            # one coin still answers
-    assert ct.search(_START, _END, _Efts(down)) == []
-    down[ct.QUERIES["LINK"]] = _hits(_HIT_SOL)
+    down[ct.QUERIES["ETH"]] = _hits(_HIT_SOL)                               # one coin still answers
     assert ct.search(_START, _END, _Efts(down)) == [_HIT_SOL]
+
+
+# ---- V6: EDGAR down -- after three failed queries in a row, stop
+def test_the_streak_that_means_edgar_is_down_is_three():
+    assert ct.MAX_CONSECUTIVE_FAILURES == 3
+
+
+def test_three_failed_queries_in_a_row_stop_the_search_and_fail_the_source(sleeps, capsys):
+    session = _Efts({q: _resp(500) for q in ct.QUERIES.values()})
+    with pytest.raises(requests.HTTPError):
+        ct.search(_START, _END, session)
+    first_three = [ct.QUERIES[c] for c in ("BTC", "ETH", "SOL")]
+    assert session.asked == [q for q in first_three for _ in range(3)]       # nine requests, not 39
+    assert sleeps == list(ct.RETRY_PAUSES_SECONDS) * 3                       # the retry pauses of three queries only
+    err = capsys.readouterr().err
+    assert "SOL query failed" in err and "3 queries in a row failed" in err and "EDGAR looks down" in err
+    assert "XRP" not in err                                                  # the fourth was never asked
+
+
+def test_the_streak_counts_failures_in_a_row_not_in_all(sleeps):
+    """Every other coin fails: ten failures in all, never three together -- the search goes on to the end."""
+    answers = {}
+    for i, q in enumerate(ct.QUERIES.values()):
+        answers[q] = _resp(503) if i % 2 == 0 else _hits({**_HIT_SOL, "_id": f"000{i}-26-9:ex99.htm"})
+    session = _Efts(answers)
+    hits = ct.search(_START, _END, session)
+    assert len(hits) == 6 and len(set(session.asked)) == 13                  # every coin was asked
+
+
+def test_two_failures_then_an_answer_start_the_streak_again(sleeps):
+    queries = list(ct.QUERIES.values())
+    answers = {queries[0]: _resp(500), queries[1]: _resp(500), queries[2]: _hits(_HIT_SOL),
+               queries[3]: _resp(500), queries[4]: _resp(500), queries[5]: _hits(_HIT)}
+    session = _Efts(answers)
+    assert ct.search(_START, _END, session) == [_HIT_SOL, _HIT]
+    assert len(set(session.asked)) == 13
+
+
+def test_what_the_first_queries_found_is_given_up_with_the_source_when_edgar_goes_down(sleeps):
+    """The source is reported failed, so the day's hits are not processed: the next run searches the window again."""
+    queries = list(ct.QUERIES.values())
+    answers = {queries[0]: _hits(_HIT), queries[1]: _resp(500), queries[2]: _resp(500), queries[3]: _resp(500)}
+    with pytest.raises(requests.HTTPError):
+        ct.search(_START, _END, _Efts(answers))
+
+
+def test_a_connection_that_refuses_gives_up_after_three_coins_too(sleeps):
+    session = _Efts({q: requests.ConnectionError("refused") for q in ct.QUERIES.values()})
+    with pytest.raises(requests.ConnectionError):
+        ct.search(_START, _END, session)
+    assert len(session.asked) == 9 and len(sleeps) == 6
 
 
 def test_a_failure_after_a_first_page_keeps_that_pages_hits(sleeps, monkeypatch):
@@ -740,13 +790,14 @@ def test_the_daily_pass_stores_the_alt_trades_of_the_queries_that_answered(conn,
     assert _HIT_SOL["_id"] in db.crypto_treasury_seen(conn)
 
 
-def test_the_daily_pass_is_reported_failed_only_when_every_query_failed(conn, sleeps, monkeypatch, capsys):
+def test_the_daily_pass_is_reported_failed_when_edgar_is_down_after_three_coins(conn, sleeps, monkeypatch, capsys):
     import passes
-    monkeypatch.setattr(ct, "new_session",
-                        lambda: _Efts({q: requests.ConnectionError("reset") for q in ct.QUERIES.values()}))
+    session = _Efts({q: requests.ConnectionError("reset") for q in ct.QUERIES.values()})
+    monkeypatch.setattr(ct, "new_session", lambda: session)
     monkeypatch.setattr("cik_map.CikMap", lambda: None)
     assert bot._run_source("CRYPTO_TREASURY", passes.run_crypto_treasury_pass, conn, _Args()) is None
     assert "[CRYPTO_TREASURY] pass failed: ConnectionError" in capsys.readouterr().err
+    assert len(session.asked) == 9                                          # three coins' attempts, not thirteen's
 
 
 # ------------------------------------------------------ treasury: signals

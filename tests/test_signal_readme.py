@@ -219,6 +219,13 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
+def test_the_readme_says_edgar_down_stops_the_search_after_three_failed_queries():
+    text = " ".join(_text().split())
+    for phrase in ("после трёх неудавшихся запросов подряд (`MAX_CONSECUTIVE_FAILURES`) поиск останавливается и источник "
+                   "считается упавшим", "не тратя повторы на остальные монеты"):
+        assert phrase in text, phrase
+
+
 def test_the_readme_says_what_the_parser_rejects_and_what_multipliers_it_reads():
     text = " ".join(_text().split())
     for phrase in ("Заглавный тикер альта, за которым идёт название компании или ценной бумаги",
