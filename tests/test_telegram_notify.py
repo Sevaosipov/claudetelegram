@@ -5,6 +5,8 @@ Telegram) and are intentionally left as plain text -- untested here since
 they render no markup."""
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import cluster
@@ -307,8 +309,8 @@ def test_condensed_stock_reply_names_fallback_sources():
 # --------------------------------------------------------- caution signals
 #
 # A bearish coin signal is journaled as `caution` and reads as an outflow when shown (the
-# menu's Сигналы); it is never in Telegram: the weekly message (paper_report.format_week) and
-# the daily close alerts (bot._send_closes) do not carry signals.
+# menu's Сигналы); it is never in Telegram: the weekly signals (weekly.week_signals) and
+# the daily close alerts (bot._send_closes) do not carry it.
 
 def _caution_signal():
     return cluster.CryptoSignal("CRYPTO_ETF", "etf_flow", "CRYPTO:BTC", "спот-ETF США, фондов: 12",
@@ -321,23 +323,256 @@ def test_a_bearish_coin_signal_reads_as_an_outflow():
     assert "ОТТОК ИЗ СПОТ-ETF" in text and "3 дн. подряд оттока" in text
 
 
-@pytest.mark.parametrize("trigger, reason", [
-    ("insider_sell", "инсайдеры продают"), ("caution", "сигнал осторожности"),
-    ("trailing_stop", "стоп от максимума"), ("dead_money", "стоит на месте"),
-    ("time", "год в позиции"), ("trend_down", "тренд вниз"), ("news", "плохие новости")])
-def test_every_close_trigger_has_its_own_reason(trigger, reason):
-    pos = positions.Position(1, "AAA", "SEC", "2026-09-01", 100.0, [], None, None, None, None)
-    text = telegram_notify.format_close_alert(positions.CloseAlert(pos, trigger, "detail", 90.0), html=False)
-    assert text.startswith(f"🚪 AAA — {reason}\n")
+# ------------------------------------------------------------------ the signal line
+_TAGS = re.compile(r"</?[a-zA-Z][^>]*>")
 
 
-def test_caution_close_alert_reads_as_such():
-    pos = positions.Position(1, "CRYPTO:BTC", "CRYPTO", "2026-09-20", 84_500.0, [], None,
-                             None, None, None)
-    alert = positions.CloseAlert(pos, "caution", "отток из спот-ETF (€900,000,000); цена "
+def test_the_signal_line_is_a_dot_a_bold_name_with_a_bang_the_event_and_the_details():
+    assert tn.signal_line("🟢", "GME", "покупка", "балл 70, стоп −10%") == \
+        "🟢 <b>GME!</b>: покупка — балл 70, стоп −10%"
+    assert tn.signal_line("🟢", "GME", "покупка") == "🟢 <b>GME!</b>: покупка"           # no details, no dash
+    assert tn.signal_line("🟢", "GME", "покупка", "") == "🟢 <b>GME!</b>: покупка"
+
+
+@pytest.mark.parametrize("dot", ["🟢", "🔴", "⚪"])
+def test_the_signal_line_takes_its_dot_as_given(dot):
+    assert tn.signal_line(dot, "X", "e", "d").startswith(f"{dot} <b>X!</b>: e — d")
+
+
+def test_the_dots_are_green_for_a_buy_or_a_gain_red_for_a_loss_and_white_for_a_neutral_event():
+    assert (tn.DOT_GREEN, tn.DOT_RED, tn.DOT_NEUTRAL) == ("🟢", "🔴", "⚪")
+
+
+def test_a_result_is_bold_after_the_details_and_the_extra_follows_it():
+    assert tn.signal_line("🔴", "GME", "сработал стоп", "пора продавать", result="−€24,10", extra=" (−10,4%)") == \
+        "🔴 <b>GME!</b>: сработал стоп — пора продавать, итог <b>−€24,10</b> (−10,4%)"
+    assert tn.signal_line("🔴", "GME", "e", "d", result="−9,8%") == "🔴 <b>GME!</b>: e — d, итог <b>−9,8%</b>"
+    assert tn.signal_line("🔴", "GME", "e", result="−9,8%") == "🔴 <b>GME!</b>: e, итог <b>−9,8%</b>"
+    assert tn.signal_line("🔴", "GME", "e", "d", extra=" (x)") == "🔴 <b>GME!</b>: e — d"      # no result: no extra
+
+
+def test_the_result_can_carry_another_label():
+    assert tn.signal_line("⚪", "GME", "продано", "слежение закрыто", result="+4,1%", label="итог ≈") == \
+        "⚪ <b>GME!</b>: продано — слежение закрыто, итог ≈ <b>+4,1%</b>"
+    assert tn.signal_line("🔴", "GME", "e", "продажа по ближайшему закрытию", result="−9,8%", label="сейчас") == \
+        "🔴 <b>GME!</b>: e — продажа по ближайшему закрытию, сейчас <b>−9,8%</b>"
+
+
+def test_every_dynamic_part_of_the_line_is_escaped():
+    text = tn.signal_line("🔴", "A&B<i>", "ev<b>&", "d&<x>", result="1<2", extra=" (&)", label="ит<ог")
+    assert text == ("🔴 <b>A&amp;B&lt;i&gt;!</b>: ev&lt;b&gt;&amp; — d&amp;&lt;x&gt;, "
+                    "ит&lt;ог <b>1&lt;2</b> (&amp;)")
+    assert set(_TAGS.findall(text)) == {"<b>", "</b>"}
+
+
+def test_without_html_the_line_has_no_tags_and_nothing_is_escaped():
+    text = tn.signal_line("🔴", "A&B", "e<", "d>", result="1<2", extra=" (&)", html=False)
+    assert text == "🔴 A&B!: e< — d>, итог 1<2 (&)"
+    assert not _TAGS.search(tn.signal_line("🟢", "GME", "покупка", "балл 70", html=False))
+
+
+@pytest.mark.parametrize("x, currency, text", [
+    (8.3, "EUR", "+€8,30"), (-24.1, "EUR", "−€24,10"), (-26.4, "USD", "−$26,40"), (9.5, "GBP", "+£9,50"),
+    (8.3, None, "+€8,30"), (-8.3, "CHF", "−8,30 CHF"), (8.3, "SEK", "+8,30 SEK"),
+    (1234.5, "EUR", "+€1 234,50"), (0.004, "EUR", "+€0,00"), (-0.004, "EUR", "+€0,00")])
+def test_a_profit_or_loss_to_the_cent_has_its_sign_before_the_currency(x, currency, text):
+    assert tn.money_cents(x, currency) == text
+
+
+def test_a_position_result_is_the_money_first_when_the_quantity_is_known():
+    assert tn.position_result(23.10, 20.70, 10.0, "USD") == ("−$24,00", " (−10,4%)", False)
+    assert tn.position_result(23.10, 24.05, 10.0, "EUR") == ("+€9,50", " (+4,1%)", True)
+    assert tn.position_result(23.10, 20.70, None, "USD") == ("−10,4%", None, False)    # no quantity: the percent
+    assert tn.position_result(23.10, 23.10, None) == ("+0,0%", None, True)             # break-even is not a loss
+    assert tn.position_result(23.10, 23.099, 10.0, "EUR")[::2] == ("−€0,01", False)    # a cent lost is a loss
+    assert tn.position_result(23.10, 23.0999, 10.0, "EUR")[::2] == ("+€0,00", True)    # less than a cent is none
+    assert tn.position_result(23.10, 23.0999, None)[::2] == ("+0,0%", True)            # «+0,0%» is not a loss
+
+
+# -------------------------------------------------------------------- close alerts
+def _pos(**overrides):
+    base = dict(id=1, ticker="AAA", source="SEC", opened_at="2026-09-01", entry_price=100.0, insiders=[],
+                signal_id=None, closed_at=None, close_reason=None, close_alerted_at=None)
+    base.update(overrides)
+    return positions.Position(**base)
+
+
+def _holding_pos(**overrides):
+    """A Trading 212 holding: GME, 10 shares in USD, bought at 23,10."""
+    base = dict(ticker="GME", source=None, entry_price=23.10, origin="t212", quantity=10.0,
+                t212_ticker="GME_US_EQ", currency="USD", stop_pct=0.10)
+    base.update(overrides)
+    return _pos(**base)
+
+
+@pytest.mark.parametrize("trigger, event", [
+    ("trailing_stop", "сработал стоп"), ("insider_sell", "продаёт инсайдер"), ("caution", "отток по монете"),
+    ("trend_down", "тренд развернулся вниз"), ("dead_money", "стоит на месте"), ("time", "год в позиции"),
+    ("news", "плохие новости"), ("activist_cut", "активист сократил долю")])
+def test_every_close_trigger_has_its_own_event(trigger, event):
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), trigger, "detail", 90.0), html=False)
+    assert text.splitlines()[0] == f"🔴 AAA!: {event} — пора продавать: вход 100,00 → сейчас 90,00, итог −10,0%"
+
+
+# The second line is the alert's own detail, and only three triggers have one worth the room: who sold
+# and when, what the outflow was, which headline. For the rest the main line says it all.
+_STOP_TEXT = "−10% от максимума 25.80"
+
+
+@pytest.mark.parametrize("trigger", ["trailing_stop", "time", "dead_money", "trend_down", "activist_cut"])
+def test_a_trigger_whose_main_line_says_it_all_is_one_line_whatever_detail_the_alert_has(trigger):
+    detail = f"{_STOP_TEXT}; 365 дн. в позиции; доля 9,0% → 6,0%"
+    for html in (True, False):
+        text = tn.format_close_alert(positions.CloseAlert(_pos(), trigger, detail, 90.0), html=html)
+        assert "\n" not in text
+        assert not any(gone in text for gone in ("максимума", "25", "365", "доля", "9,0"))
+
+
+@pytest.mark.parametrize("trigger, detail, shown", [
+    ("insider_sell", "Ryan Cohen — Form 4, 2026-10-01", "Ryan Cohen — Form 4, 01.10"),
+    ("caution", "отток из спот-ETF (€900 млн); цена подтверждает: -6.2% за 7 дн., ниже 20-дн. средней",
+     "отток из спот-ETF (€900 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней"),
+    ("news", "новости: SEC investigation into the CFO", "новости: SEC investigation into the CFO")])
+def test_an_insider_sale_a_caution_and_bad_news_carry_one_detail_line_indented_by_three_spaces(
+        trigger, detail, shown):
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), trigger, detail, 90.0), html=False)
+    first, second = text.split("\n")                                       # two lines, no more
+    assert first.startswith("🔴 AAA!: ") and second == f"   {shown}"
+
+
+@pytest.mark.parametrize("trigger", ["insider_sell", "caution", "news"])
+def test_a_detail_that_is_empty_is_no_second_line(trigger):
+    for detail in ("", None):
+        assert "\n" not in tn.format_close_alert(positions.CloseAlert(_pos(), trigger, detail, 90.0))
+
+
+@pytest.mark.parametrize("label", ["Form 4", "Form 144", "Oslo", "FI", "BaFin"])
+def test_an_insider_sale_says_who_and_when_with_the_date_as_dd_mm(label):
+    detail = f"Ann Lee — {label}, 2026-09-30"
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), "insider_sell", detail, 90.0), html=False)
+    assert text.splitlines()[1] == f"   Ann Lee — {label}, 30.09"
+
+
+@pytest.mark.parametrize("odd", ["Ann Lee — Form 144, 09/30/2026", "Ann Lee — Oslo, 30.09.2026",
+                                 "Ann Lee — Form 4, 2026-13-45", "Ann Lee — Form 4, 2026-9-3",
+                                 "Ann Lee — Form 4, 12026-09-301"])
+def test_a_date_that_is_not_an_iso_date_is_left_as_it_is(odd):
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), "insider_sell", odd, 90.0), html=False)
+    assert text.splitlines()[1] == f"   {odd}"
+
+
+@pytest.mark.parametrize("text, russian", [
+    ("-6.2% за 7 дн.", "−6,2% за 7 дн."), ("+3.4%", "+3,4%"), ("(−6.2%)", "(−6,2%)"),
+    ("стоп 25.80", "стоп 25,80"), ("0.5", "0,5"), ("12", "12"),
+    ("(€1,050 млн)", "(€1 050 млн)"), ("€900,000,000", "€900 000 000"), ("1,050.5", "1 050,5"),
+    ("(€900 млн)", "(€900 млн)"), ("9,0% → 6,0%", "9,0% → 6,0%"), ("9,05", "9,05"),     # Russian already
+    ("ниже 20-дн. средней", "ниже 20-дн. средней"), ("Form 144", "Form 144"), ("1.2.3", "1.2.3"),
+    ("x-6.2", "x-6,2"),                                                              # a hyphen is not a minus
+    ("Ryan Cohen — Form 4, 2026-10-01", "Ryan Cohen — Form 4, 01.10"),              # a date is not a decimal
+    ("с 2026-10-01 по 2026-10-05: -6.2%", "с 01.10 по 05.10: −6,2%")])
+def test_the_detail_line_is_in_the_russian_format(text, russian):
+    assert tn.ru_text(text) == russian
+
+
+def test_the_numbers_of_a_caution_are_russian_at_the_message_level_only():
+    detail = "монеты заводят на биржи (€1,050 млн); цена подтверждает: -6.2% за 7 дн., ниже 20-дн. средней"
+    alert = positions.CloseAlert(_pos(ticker="CRYPTO:BTC", source="CRYPTO"), "caution", detail, 90.0)
+    assert tn.format_close_alert(alert, html=False).splitlines()[1] == (
+        "   монеты заводят на биржи (€1 050 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней")
+    assert alert.detail == detail                                           # the alert itself is untouched
+
+
+def test_a_news_headline_is_quoted_as_it_is():
+    """A headline is somebody else's text: its numbers and dates are not ours to reformat."""
+    headline = "новости: Probe of $2.5 million, 1,050 filings and 2026-10-01 hearing"
+    alert = positions.CloseAlert(_pos(), "news", headline, 90.0)
+    assert tn.format_close_alert(alert, html=False).splitlines()[1] == f"   {headline}"
+
+
+def test_the_insider_alert_is_one_line_with_who_and_when_indented_under_it():
+    alert = positions.CloseAlert(_pos(), "insider_sell", "Ann Lee — Form 4, 2026-09-30", 90.0)
+    text = tn.format_close_alert(alert)
+    assert text == ("🔴 <b>AAA!</b>: продаёт инсайдер — пора продавать: вход 100,00 → сейчас 90,00, "
+                    "итог <b>−10,0%</b>\n   Ann Lee — Form 4, 30.09")
+    assert "🚪" not in text and "Ваши позиции" not in text                  # the old layout is gone
+    assert tn.format_close_alert(positions.CloseAlert(_pos(), "time", "", 90.0)).count("\n") == 0
+
+
+def test_a_holding_with_a_quantity_gets_the_money_result_first_in_its_own_currency():
+    text = tn.format_close_alert(positions.CloseAlert(_holding_pos(), "trailing_stop",
+                                                      "−10% от максимума 25.80", 20.70))
+    assert text == ("🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, "
+                    "итог <b>−$24,00</b> (−10,4%)")                         # the stop level is not repeated
+    eur = _holding_pos(ticker="DE0007164600", source="T212", t212_ticker="SAPd_EQ", currency="EUR",
+                       entry_price=120.0, quantity=5.0)
+    assert tn.format_close_alert(positions.CloseAlert(eur, "time", "d", 108.0), html=False).splitlines()[0] == (
+        "🔴 SAP!: год в позиции — пора продавать: вход 120,00 → сейчас 108,00, итог −€60,00 (−10,0%)")
+
+
+def test_a_position_without_a_quantity_gets_the_percent_alone():
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), "trailing_stop", "d", 84.0), html=False)
+    assert text.splitlines()[0].endswith("итог −16,0%")
+
+
+def test_a_gain_is_a_green_dot_and_a_loss_a_red_one():
+    gain = tn.format_close_alert(positions.CloseAlert(_pos(), "time", "d", 104.1), html=False)
+    assert gain.splitlines()[0] == "🟢 AAA!: год в позиции — пора продавать: вход 100,00 → сейчас 104,10, итог +4,1%"
+    even = tn.format_close_alert(positions.CloseAlert(_pos(), "time", "d", 100.0), html=False)
+    assert even.startswith("🟢") and even.splitlines()[0].endswith("итог +0,0%")
+    held = tn.format_close_alert(positions.CloseAlert(_holding_pos(), "time", "d", 24.05), html=False)
+    assert held.splitlines()[0].startswith("🟢 GME!") and held.splitlines()[0].endswith("итог +$9,50 (+4,1%)")
+
+
+def test_an_alert_without_a_price_gives_the_entry_alone_and_a_red_dot():
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), "time", "400 дн. в позиции", None))
+    assert text == "🔴 <b>AAA!</b>: год в позиции — пора продавать: вход 100,00"
+    news = tn.format_close_alert(positions.CloseAlert(_pos(), "news", "новости: fraud", None), html=False)
+    assert news == "🔴 AAA!: плохие новости — пора продавать: вход 100,00\n   новости: fraud"
+    assert "итог" not in tn.format_close_alert(positions.CloseAlert(_holding_pos(), "time", "d", None))
+
+
+def test_a_holding_in_a_currency_with_no_sign_of_its_own_is_shown_with_its_code():
+    chf = _holding_pos(ticker="NESN", currency="CHF", t212_ticker="NESNz_EQ")
+    text = tn.format_close_alert(positions.CloseAlert(chf, "time", "d", 20.70), html=False)
+    assert "итог −24,00 CHF (−10,4%)" in text
+
+
+def test_caution_close_alert_reads_as_such_and_names_the_coin_by_its_symbol():
+    pos = _pos(ticker="CRYPTO:BTC", source="CRYPTO", opened_at="2026-09-20", entry_price=84_500.0)
+    alert = positions.CloseAlert(pos, "caution", "отток из спот-ETF (€900 млн); цена "
                                  "подтверждает: -6.2% за 7 дн., ниже 20-дн. средней", 79_900.0)
-    text = telegram_notify.format_close_alert(alert, html=False)
-    assert "CRYPTO:BTC — сигнал осторожности" in text and "отток из спот-ETF" in text
+    first, second = tn.format_close_alert(alert, html=False).splitlines()
+    assert first == "🔴 BTC!: отток по монете — пора продавать: вход 84 500,00 → сейчас 79 900,00, итог −5,4%"
+    assert second == "   отток из спот-ETF (€900 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней"
+
+
+def test_a_close_alert_names_a_trading_212_holding_by_its_symbol_not_its_isin():
+    sap = _holding_pos(ticker="DE0007164600", source="T212", t212_ticker="SAPd_EQ", currency="EUR",
+                       entry_price=100.0, quantity=5.0)
+    text = tn.format_close_alert(positions.CloseAlert(sap, "trailing_stop", "detail", 90.0))
+    assert text.startswith("🔴 <b>SAP!</b>: сработал стоп") and "DE0007164600" not in text
+    us = _holding_pos(source=None, currency="USD", entry_price=100.0, quantity=5.0)
+    assert tn.format_close_alert(positions.CloseAlert(us, "time", "d", None), html=False) \
+        .startswith("🔴 GME!: год в позиции")
+
+
+def test_a_close_alert_escapes_what_it_shows_and_uses_only_bold():
+    pos = _pos(ticker="A&B<i>")
+    text = tn.format_close_alert(positions.CloseAlert(pos, "news", "новости: <b>fraud</b> & co", 90.0))
+    assert text.startswith("🔴 <b>A&amp;B&lt;i&gt;!</b>: плохие новости")
+    assert text.endswith("\n   новости: &lt;b&gt;fraud&lt;/b&gt; &amp; co")
+    assert set(_TAGS.findall(text)) == {"<b>", "</b>"}
+    plain = tn.format_close_alert(positions.CloseAlert(pos, "news", "x & y", 90.0), html=False)
+    assert plain == ("🔴 A&B<i>!: плохие новости — пора продавать: вход 100,00 → сейчас 90,00, итог −10,0%\n"
+                     "   x & y")                                               # nothing escaped, no tags added
+    sale = tn.format_close_alert(positions.CloseAlert(pos, "insider_sell", "A<i> & Co — Form 4, 2026-10-01", 90.0))
+    assert sale.endswith("\n   A&lt;i&gt; &amp; Co — Form 4, 01.10")
+    assert set(_TAGS.findall(sale)) == {"<b>", "</b>"}
+
+
+def test_a_trigger_nobody_named_is_shown_as_it_is():
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), "новый", "d", 90.0), html=False)
+    assert text.startswith("🔴 AAA!: новый — пора продавать")
 
 
 # ---------------------------------------------------------------- send_text never shows the token
@@ -416,64 +651,61 @@ def _status(last=24.05, *, entry=23.10, days=3, peak=24.05, stop_pct=0.10, stop_
             "to_stop": None if last is None else to_stop}
 
 
-_SELL_LINE = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть, /model — модельный портфель."
+_SELL_LINE = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть."
 
 
 def test_my_portfolio_shows_a_position_in_full():
-    rows = [(_held(insiders=["Ryan Cohen", "Alice Smith"]), _status(), True)]
+    rows = [(_held(insiders=["Ryan Cohen", "Alice Smith"]), _status())]
     assert tn.format_my_portfolio(rows) == "\n\n".join([
         "<b>💼 Ваш портфель — 1 позиция</b>",
         "\n".join(["• GME: вход 23,10 (01.10), сейчас 24,05 (+4,1%), 3 дн.",
                    "   стоп 21,65 (−10% от максимума 24,05), до стопа 10,0%",
-                   "   слежу за продажами: Ryan Cohen, Alice Smith",
-                   "   модель тоже держит"]),
+                   "   слежу за продажами: Ryan Cohen, Alice Smith"]),
         "Средний результат: +4,1% по 1 позиции\n" + _SELL_LINE])
 
 
 @pytest.mark.parametrize("n, word", [(1, "позиция"), (2, "позиции"), (4, "позиции"), (5, "позиций"),
                                      (11, "позиций"), (21, "позиция"), (22, "позиции")])
 def test_my_portfolio_header_counts_the_positions_in_russian(n, word):
-    rows = [(_held(f"T{i}", pid=i), _status(), False) for i in range(n)]
+    rows = [(_held(f"T{i}", pid=i), _status()) for i in range(n)]
     assert tn.format_my_portfolio(rows).startswith(f"<b>💼 Ваш портфель — {n} {word}</b>\n\n")
 
 
 @pytest.mark.parametrize("n, word", [(1, "позиции"), (2, "позициям"), (5, "позициям"),
                                      (11, "позициям"), (21, "позиции")])
 def test_the_average_line_counts_the_positions_in_russian(n, word):
-    rows = [(_held(f"T{i}", pid=i), _status(), False) for i in range(n)]
+    rows = [(_held(f"T{i}", pid=i), _status()) for i in range(n)]
     assert f"Средний результат: +4,1% по {n} {word}\n" + _SELL_LINE in tn.format_my_portfolio(rows)
 
 
 def test_the_insiders_line_is_only_there_when_there_are_insiders():
-    with_ = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(), False)])
-    without = tn.format_my_portfolio([(_held(), _status(), False)])
+    with_ = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status())])
+    without = tn.format_my_portfolio([(_held(), _status())])
     assert "\n   слежу за продажами: Ryan Cohen" in with_
     assert "слежу" not in without
 
 
-def test_the_model_line_is_only_there_when_the_model_holds_it_too():
-    text = tn.format_my_portfolio([(_held("GME"), _status(), True),
-                                   (_held("BBB", pid=2, opened="2026-10-02"), _status(), False)])
-    assert text.count("модель тоже держит") == 1
-    gme, bbb = text.split("\n\n")[1:3]
-    assert gme.endswith("\n   модель тоже держит") and "модель" not in bbb
+def test_there_is_no_model_line_under_any_position():
+    """The bot holds no portfolio of its own: there is nothing to say a «model» holds too."""
+    text = tn.format_my_portfolio([(_held("GME", insiders=["Ryan Cohen"]), _status()),
+                                   (_held("BBB", pid=2, opened="2026-10-02"), _status())])
+    assert "модел" not in text.lower() and "/model" not in text
 
 
-def test_a_coin_is_shown_by_its_symbol_with_thousands_and_the_model_line():
+def test_a_coin_is_shown_by_its_symbol_with_thousands():
     coin = _held("CRYPTO:BTC", entry=60_000.0, opened="2026-09-28", stop_pct=0.15, source="CRYPTO")
     st = _status(61_200.0, entry=60_000.0, peak=61_200.0, stop_pct=0.15, stop_level=52_020.0,
                  to_stop=0.176)
-    text = tn.format_my_portfolio([(coin, st, True)])
+    text = tn.format_my_portfolio([(coin, st)])
     assert ("• BTC: вход 60 000,00 (28.09), сейчас 61 200,00 (+2,0%), 3 дн.\n"
-            "   стоп 52 020,00 (−15% от максимума 61 200,00), до стопа 17,6%\n"
-            "   модель тоже держит") in text
+            "   стоп 52 020,00 (−15% от максимума 61 200,00), до стопа 17,6%") in text
     assert "CRYPTO" not in text
 
 
 def test_a_position_with_no_price_says_so_and_has_no_stop_line():
-    text = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(None), True)])
+    text = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(None))])
     assert ("• GME: вход 23,10 (01.10), сейчас — цена недоступна, 3 дн.\n"
-            "   слежу за продажами: Ryan Cohen\n   модель тоже держит") in text
+            "   слежу за продажами: Ryan Cohen") in text
     assert "стоп" not in text and "Средний результат" not in text      # nothing to average either
     assert text.endswith(_SELL_LINE)
 
@@ -482,45 +714,44 @@ def test_a_price_below_the_stop_is_said_so():
     """to_stop is how far the price can still fall (a share of the price now): below the stop it is
     negative, and «ниже стопа на» shows the same quantity without its sign."""
     st = _status(90.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=1 - 117.0 / 90.0)
-    text = tn.format_my_portfolio([(_held(entry=100.0), st, False)])
+    text = tn.format_my_portfolio([(_held(entry=100.0), st)])
     assert "   стоп 117,00 (−10% от максимума 130,00), ниже стопа на 30,0%" in text
     assert "до стопа" not in text
 
 
 def test_at_the_stop_level_there_is_nothing_left_to_fall():
     st = _status(117.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=0.0)
-    assert "), до стопа 0,0%" in tn.format_my_portfolio([(_held(entry=100.0), st, False)])
+    assert "), до стопа 0,0%" in tn.format_my_portfolio([(_held(entry=100.0), st)])
 
 
 def test_the_average_is_the_equal_weighted_mean_of_the_known_results():
-    rows = [(_held("AAA", pid=1, entry=100.0), _status(110.0, entry=100.0), False),      # +10%
-            (_held("BBB", pid=2, entry=100.0), _status(95.0, entry=100.0), False),       # -5%
-            (_held("CCC", pid=3, entry=100.0), _status(None, entry=100.0), False)]       # no price: left out
+    rows = [(_held("AAA", pid=1, entry=100.0), _status(110.0, entry=100.0)),      # +10%
+            (_held("BBB", pid=2, entry=100.0), _status(95.0, entry=100.0)),       # -5%
+            (_held("CCC", pid=3, entry=100.0), _status(None, entry=100.0))]       # no price: left out
     text = tn.format_my_portfolio(rows)
     assert "Средний результат: +2,5% по 2 позициям\n" + _SELL_LINE in text
     assert text.startswith("<b>💼 Ваш портфель — 3 позиции</b>")                          # all three are held
 
 
 def test_a_loss_has_a_real_minus_sign():
-    text = tn.format_my_portfolio([(_held(entry=100.0), _status(95.0, entry=100.0), False)])
+    text = tn.format_my_portfolio([(_held(entry=100.0), _status(95.0, entry=100.0))])
     assert "сейчас 95,00 (−5,0%)" in text and "Средний результат: −5,0% по 1 позиции" in text
 
 
 def test_the_oldest_position_comes_first():
-    rows = [(_held("NEW", opened="2026-10-01", pid=2), _status(), False),
-            (_held("OLD", opened="2026-09-20", pid=1), _status(), False)]
+    rows = [(_held("NEW", opened="2026-10-01", pid=2), _status()),
+            (_held("OLD", opened="2026-09-20", pid=1), _status())]
     text = tn.format_my_portfolio(rows)
     assert text.index("• OLD") < text.index("• NEW")
 
 
 def test_no_positions_say_how_to_add_one():
     assert tn.format_my_portfolio([]) == (
-        "Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
-        "Модельный портфель: /model.")
+        "Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10.")
 
 
 def test_my_portfolio_escapes_every_dynamic_string():
-    rows = [(_held("A&B<C>", insiders=["X & <Y>", "Q>R"]), _status(), False)]
+    rows = [(_held("A&B<C>", insiders=["X & <Y>", "Q>R"]), _status())]
     text = tn.format_my_portfolio(rows)
     assert "• A&amp;B&lt;C&gt;:" in text and "слежу за продажами: X &amp; &lt;Y&gt;, Q&gt;R" in text
     assert "<" not in text.replace("<b>", "").replace("</b>", "")      # only the header's bold is markup
@@ -528,7 +759,7 @@ def test_my_portfolio_escapes_every_dynamic_string():
 
 
 def test_my_portfolio_in_plain_text_has_no_markup_and_no_escaping():
-    rows = [(_held("A&B", insiders=["X & <Y>"]), _status(), False)]
+    rows = [(_held("A&B", insiders=["X & <Y>"]), _status())]
     text = tn.format_my_portfolio(rows, html=False)
     assert text.startswith("💼 Ваш портфель — 1 позиция\n\n• A&B:")
     assert "<b>" not in text and "&amp;" not in text and "слежу за продажами: X & <Y>" in text
@@ -537,8 +768,8 @@ def test_my_portfolio_in_plain_text_has_no_markup_and_no_escaping():
 
 def test_my_position_blocks_are_the_positions_alone():
     """The analyst prints these under its own heading: no header, no average, no hint."""
-    rows = [(_held("GME", insiders=["Ryan Cohen"]), _status(), True),
-            (_held("BBB", pid=2, opened="2026-10-02"), _status(None), False)]
+    rows = [(_held("GME", insiders=["Ryan Cohen"]), _status()),
+            (_held("BBB", pid=2, opened="2026-10-02"), _status(None))]
     blocks = tn.my_position_blocks(rows, html=False)
     assert len(blocks) == 2 and blocks[0].startswith("• GME: вход 23,10 (01.10)")
     assert blocks[1] == "• BBB: вход 23,10 (02.10), сейчас — цена недоступна, 3 дн."
@@ -553,7 +784,7 @@ def test_a_quantity_is_shown_the_russian_way_without_needless_decimals(x, text):
 
 
 def _t212_holding(name="GME", *, qty=10.0, avg=23.10, price=24.05, currency="USD", pnl=8.30,
-                  pnl_currency="EUR", tracked=True, insiders=(), held=False, opened="2026-10-01", days=None,
+                  pnl_currency="EUR", tracked=True, insiders=(), opened="2026-10-01", days=None,
                   price_date=None, **status):
     """A line of «💼 Trading 212» as t212_account builds it; `tracked`: it has a position (and so a
     status); `days`: since it was bought in Trading 212, when that is known; `price_date`: the day
@@ -561,7 +792,7 @@ def _t212_holding(name="GME", *, qty=10.0, avg=23.10, price=24.05, currency="USD
     pos = _held(name, entry=avg or 1.0, opened=opened, insiders=insiders) if tracked else None
     st = _status(None if price_date else price, entry=avg or 1.0, **status) if tracked else None
     return ta.Holding(name=name, quantity=qty, avg_price=avg, price=price, currency=currency, pnl=pnl,
-                      pnl_currency=pnl_currency, position=pos, status=st, model_holds=held, opened=opened,
+                      pnl_currency=pnl_currency, position=pos, status=st, opened=opened,
                       days=days, price_date=price_date)
 
 
@@ -574,14 +805,13 @@ def _view(*holdings, summary=_LIVE, **kw):
 
 
 def test_the_portfolio_opens_with_trading_212_then_what_is_outside_it():
-    manual = [(_held("AAA", entry=100.0), _status(110.0, entry=100.0, peak=110.0, stop_level=99.0), False)]
-    view = _view(_t212_holding(insiders=["Ryan Cohen"], held=True))
+    manual = [(_held("AAA", entry=100.0), _status(110.0, entry=100.0, peak=110.0, stop_level=99.0))]
+    view = _view(_t212_holding(insiders=["Ryan Cohen"]))
     assert tn.format_my_portfolio(manual, t212=view) == "\n\n".join([
         "<b>💼 Trading 212</b>\n" + _ACCOUNT_LINE,
         "\n".join(["• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30",
                    "   стоп 21,65 (−10% от максимума 24,05), до стопа 10,0%",
-                   "   слежу за продажами: Ryan Cohen",
-                   "   модель тоже держит"]),
+                   "   слежу за продажами: Ryan Cohen"]),
         "<b>✍️ Вне Trading 212</b>",
         "\n".join(["• AAA: вход 100,00 (01.10), сейчас 110,00 (+10,0%), 3 дн.",
                    "   стоп 99,00 (−10% от максимума 110,00), до стопа 10,0%"]),
@@ -653,9 +883,9 @@ def test_a_missing_or_powerless_key_shows_the_reason_and_the_hint():
     no_key = tn.format_my_portfolio([], t212=_view(error="ключ Trading 212 не задан", hint=_HINT))
     assert no_key == "\n\n".join(["<b>💼 Trading 212</b>\n⚠️ Ключ Trading 212 не задан\n" + _HINT,
                                   "Ваших позиций нет. Купили? /bought TICKER [цена] — например "
-                                  "/bought GME 23.10. Модельный портфель: /model."])
+                                  "/bought GME 23.10."])
     forbidden = tn.format_my_portfolio(
-        [(_held("AAA"), _status(), False)],
+        [(_held("AAA"), _status())],
         t212=_view(_t212_holding(), error="ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта",
                    hint=_HINT, as_of="30.09 14:05"))
     assert forbidden.split("\n\n")[0] == (
@@ -679,7 +909,7 @@ def test_the_trading_212_section_escapes_every_dynamic_string_and_uses_only_bold
 
 
 def test_the_trading_212_section_in_plain_text_has_no_markup():
-    text = tn.format_my_portfolio([(_held("A&B"), _status(), False)], html=False,
+    text = tn.format_my_portfolio([(_held("A&B"), _status())], html=False,
                                   t212=_view(_t212_holding("C&D")))
     assert text.startswith("💼 Trading 212\nСчёт: €12 346") and "\n\n✍️ Вне Trading 212\n\n• A&B: вход" in text
     assert "<b>" not in text and "&amp;" not in text and "• C&D — 10 шт." in text
@@ -701,18 +931,6 @@ def test_the_account_line_alone():
                                                (1234.0, "USD", "$1 234"), (-5.0, "SEK", "−5 SEK")])
 def test_money_in_a_currency(x, currency, text):
     assert tn.money(x, currency) == text
-    assert tn.money_eur(9800.4) == "€9 800" and tn.money_eur(-9800.4) == "−€9 800"
-
-
-def test_a_close_alert_names_a_trading_212_holding_by_its_symbol_not_its_isin():
-    pos = positions.Position(1, "DE0007164600", "T212", "2026-09-01", 100.0, [], None, None, None, None,
-                             0.10, "t212", 5.0, "SAPd_EQ", "EUR")
-    text = telegram_notify.format_close_alert(positions.CloseAlert(pos, "trailing_stop", "detail", 90.0))
-    assert text.startswith("<b>🚪 SAP — стоп от максимума</b>\n") and "DE0007164600" not in text
-    us = positions.Position(2, "GME", None, "2026-09-01", 100.0, [], None, None, None, None,
-                            0.10, "t212", 5.0, "GME_US_EQ", "USD")
-    assert telegram_notify.format_close_alert(positions.CloseAlert(us, "time", "d", None), html=False) \
-        .startswith("🚪 GME — год в позиции\n")
 
 
 def test_a_trading_212_holding_shows_the_days_since_it_was_bought_there():

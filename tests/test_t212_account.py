@@ -489,8 +489,8 @@ def test_a_new_holding_is_announced_and_opened_with_its_fields(conn, run):
     _synced_before(conn)
     _journal(conn, "GME", ["Ryan Cohen"])
     result = run(_holding())
-    assert run.sent == ["📥 Вижу в Trading 212: GME — 10 шт. по 23,10 USD. "
-                        "Слежу: стоп, продажи инсайдеров, новости."]
+    assert run.sent == ["⚪ <b>GME!</b>: куплено в Trading 212 — 10 шт. по 23,10 USD, "
+                        "слежу: стоп, продажи инсайдеров, новости"]
     ticker, source, opened, entry, insiders, signal_id, stop, origin, qty, t212, cur, closed, _ = _row(conn, "GME")
     assert (ticker, source, opened, entry, json.loads(insiders), origin, qty, t212, cur, closed) == \
         ("GME", None, "2026-09-28", 23.10, ["Ryan Cohen"], "t212", 10.0, "GME_US_EQ", "USD", None)
@@ -509,7 +509,7 @@ def test_a_holding_with_no_yahoo_listing_is_keyed_by_isin_and_sized_on_its_own_p
     run(_holding(**SAP))
     ticker, source, *_ = _row(conn, "DE0007164600")
     assert (ticker, source) == ("DE0007164600", "T212") and run.histories == []     # never Yahoo
-    assert run.sent == ["📥 Вижу в Trading 212: SAP — 10 шт. по 120,00 EUR. Слежу: стоп и срок."]
+    assert run.sent == ["⚪ <b>SAP!</b>: куплено в Trading 212 — 10 шт. по 120,00 EUR, слежу: стоп и срок"]
     assert _row(conn, "DE0007164600")[6] is None                   # one day of prices sizes no stop
 
 
@@ -539,9 +539,87 @@ def test_a_sold_holding_is_closed_with_a_message(conn, run):
     run(_holding(), _holding(**SAP))
     run.sent.clear()
     result = run(_holding(**SAP))
-    assert result.closed == ["GME"] and run.sent == ["📤 GME больше нет в Trading 212 — слежение закрыто."]
+    assert result.closed == ["GME"] and run.sent == ["⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+$9,50</b> (+4,1%)"]
     assert _row(conn, "GME")[-2:] == (NOW.date().isoformat(), "продано в Trading 212")
     assert [p.ticker for p in positions.open_positions(conn)] == ["DE0007164600"]
+
+
+def _sold_message(conn, run, *, bought, later=(), now=None, **kw):
+    """The message of GME's sale: a sync that lists `bought` (and SAP, which stays), then one without GME."""
+    _synced_before(conn)
+    run(bought, _holding(**SAP), **kw)
+    run.sent.clear()
+    run(_holding(**SAP), *later, **({"now": now} if now else {}))
+    [text] = run.sent
+    return text
+
+
+def test_a_sold_message_gives_the_result_on_the_last_price_known_money_first_with_a_quantity(conn, run):
+    text = _sold_message(conn, run, bought=_holding())
+    assert text == "⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+$9,50</b> (+4,1%)"
+
+
+def test_a_sold_message_for_a_loss_in_euros_and_the_dot_stays_white(conn, run):
+    text = _sold_message(conn, run, bought=_holding(avg=120.0, price=108.0, currency="EUR"))
+    assert text == "⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>−€120,00</b> (−10,0%)"
+    assert text.startswith("⚪")
+
+
+def test_a_sold_message_for_a_holding_without_a_quantity_gives_the_percent_alone(conn, run):
+    text = _sold_message(conn, run, bought=_holding(qty=None))
+    assert text == "⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+4,1%</b>"
+
+
+def test_a_sold_message_has_no_result_without_a_last_price(conn, run):
+    text = _sold_message(conn, run, bought=_holding(price=None))
+    assert text == "⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто"
+
+
+def test_a_sold_message_has_no_result_when_the_last_price_is_stale(conn, run):
+    """The sync had not got through for days: a price that old is no price (positions.t212_price)."""
+    text = _sold_message(conn, run, bought=_holding(), now=NOW + dt.timedelta(days=5))
+    assert text == "⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто"
+
+
+def test_a_sold_message_takes_the_quantity_the_account_last_had(conn, run):
+    _synced_before(conn)
+    run(_holding(), _holding(**SAP))
+    run(_holding(qty=4.0, price=25.0), _holding(**SAP), now=NOW + dt.timedelta(hours=1))   # trimmed, repriced
+    run.sent.clear()
+    run(_holding(**SAP), now=NOW + dt.timedelta(hours=2))
+    assert run.sent == ["⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+$7,60</b> (+8,2%)"]
+
+
+def test_the_new_message_names_what_it_knows_of_the_lot_and_what_it_watches():
+    h = ta.T212Position("GME_US_EQ", None, None, "USD", 10.0, 23.10, 24.05, None, None, None, None, None)
+    assert ta._new_text("GME", h, "стоп, срок и новости") == (
+        "⚪ <b>GME!</b>: куплено в Trading 212 — 10 шт. по 23,10 USD, слежу: стоп, срок и новости")
+    no_currency = dataclasses.replace(h, currency=None)
+    assert ta._new_text("GME", no_currency, "стоп") == "⚪ <b>GME!</b>: куплено в Trading 212 — 10 шт. по 23,10, слежу: стоп"
+    only_quantity = dataclasses.replace(h, avg_price=None, current_price=None)
+    assert ta._new_text("GME", only_quantity, "стоп") == "⚪ <b>GME!</b>: куплено в Trading 212 — 10 шт., слежу: стоп"
+    only_price = dataclasses.replace(h, quantity=None)
+    assert ta._new_text("GME", only_price, "стоп") == "⚪ <b>GME!</b>: куплено в Trading 212 — по 23,10 USD, слежу: стоп"
+    nothing = dataclasses.replace(h, quantity=None, avg_price=None, current_price=None)
+    assert ta._new_text("GME", nothing, "стоп") == "⚪ <b>GME!</b>: куплено в Trading 212 — слежу: стоп"
+
+
+def test_the_notices_escape_the_name_and_the_currency_and_use_only_bold():
+    h = ta.T212Position("X_US_EQ", None, None, "U<S>D", 1.0, 2.0, 2.0, None, None, None, None, None)
+    new = ta._new_text("A&B<i>", h, "стоп")
+    assert new == "⚪ <b>A&amp;B&lt;i&gt;!</b>: куплено в Trading 212 — 1 шт. по 2,00 U&lt;S&gt;D, слежу: стоп"
+    sold = ta._sold_text("A&B<i>")
+    assert sold == "⚪ <b>A&amp;B&lt;i&gt;!</b>: продано в Trading 212 — слежение закрыто"
+
+
+def test_the_first_sync_message_and_the_warnings_keep_their_text():
+    assert ta._first_text(["GME", "SAP"], None, "2026-10-01") == "📥 Слежу за вашими позициями в Trading 212 (2): GME, SAP"
+    assert ta._first_text(["GME"], "2026-10-01", "2026-10-01") == (
+        "📥 Слежу за вашими позициями в Trading 212 (1): GME\n"
+        "Для уже купленных бумаг правила выхода считаются с сегодняшнего дня.")
+    assert ta.LIST_GAP_WARNING == ("⚠️ Trading 212: список позиций не сходится со счётом уже сутки — "
+                                   "продажи не отмечаю.")
+    assert ta.KEY_REMOVED.startswith("Ключ Trading 212 убран — слежение за счётом остановлено.")
 
 
 @pytest.mark.parametrize("failure", [ta.T212Error("HTTP 502", "status"), ValueError("unexpected positions payload: dict"),
@@ -700,10 +778,12 @@ def test_a_missing_average_enters_at_the_price_now_and_never_overwrites_an_entry
 
 def test_the_messages_show_fractional_shares_and_escape_what_trading_212_names(conn, run):
     _synced_before(conn)
-    run(_holding("A&Bd_EQ", "DE000A1EWWW0", qty=0.52347, avg=1234.5, currency="EUR"))
-    assert run.sent == ["📥 Вижу в Trading 212: A&amp;B — 0,5235 шт. по 1 234,50 EUR. Слежу: стоп и срок."]
+    run(_holding("A&Bd_EQ", "DE000A1EWWW0", qty=0.52347, avg=1234.5, price=1250.0, currency="EUR"))
+    assert run.sent == ["⚪ <b>A&amp;B!</b>: куплено в Trading 212 — 0,5235 шт. по 1 234,50 EUR, "
+                        "слежу: стоп и срок"]
     run()
-    assert run.sent[-1] == "📤 A&amp;B больше нет в Trading 212 — слежение закрыто."
+    assert run.sent[-1] == ("⚪ <b>A&amp;B!</b>: продано в Trading 212 — слежение закрыто, "
+                            "итог ≈ <b>+€8,11</b> (+1,3%)")
 
 
 def test_the_same_isin_held_on_two_exchanges_is_one_position(conn, run):
@@ -720,7 +800,7 @@ def test_a_sync_opens_no_position_twice_and_reopens_one_bought_back(conn, run):
     run()                                                           # sold
     run.sent.clear()
     result = run(_holding(created="2026-10-01T09:00:00Z"))          # bought back
-    assert result.opened == ["GME"] and len(run.sent) == 1 and run.sent[0].startswith("📥 Вижу")
+    assert result.opened == ["GME"] and len(run.sent) == 1 and run.sent[0].startswith("⚪ <b>GME!</b>: куплено")
     rows = conn.execute("SELECT closed_at FROM positions WHERE ticker = 'GME' ORDER BY id").fetchall()
     assert rows == [(NOW.date().isoformat(),), (None,)]
 
@@ -752,8 +832,8 @@ def test_a_genuinely_empty_account_closes_what_was_held(conn, run):
     run.sent.clear()
     result = run(summary=_invested(0.0))                            # nothing invested, nothing listed
     assert sorted(result.closed) == ["DE0007164600", "GME"] and result.error is None
-    assert sorted(run.sent) == ["📤 GME больше нет в Trading 212 — слежение закрыто.",
-                                "📤 SAP больше нет в Trading 212 — слежение закрыто."]
+    assert sorted(run.sent) == ["⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+$9,50</b> (+4,1%)",
+                                "⚪ <b>SAP!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+€50,00</b> (+4,2%)"]
 
 
 @pytest.mark.parametrize("invested, closes", [(0.0, True), (0.004, True), (5.0, True), (5.01, False), (200.0, False)])
@@ -786,7 +866,7 @@ def test_a_partial_list_closes_nothing_but_still_opens_and_updates(conn, run, ca
     assert result.note == "список позиций не сходится со сводкой счёта"
     assert result.updated == ["DE0007164600"] and result.opened == ["NVDA"]
     assert positions.find_open(conn, "GME") is not None and positions.find_open(conn, "DE0007164600").quantity == 7.0
-    assert [text[:2] for text in run.sent] == ["📥 "]               # NVDA, and no «📤»
+    assert [text.split(": ")[1].split(" — ")[0] for text in run.sent] == ["куплено в Trading 212"]   # NVDA, no sale
     err = capsys.readouterr().err
     assert err.count("disagree") == 1 and "33%" in err              # one line, and no amount in it
     assert "300" not in err and "200" not in err
@@ -817,7 +897,7 @@ def test_without_a_summary_value_a_sale_needs_two_syncs_in_a_row(conn, run):
     assert first.note == ta.SALE_UNCONFIRMED == "список нельзя сверить со сводкой: продажу подтвердит следующая синхронизация"
     second = run(_holding(**SAP), summary=_invested(None), now=_minutes(30))
     assert second.closed == ["GME"] and second.held == []
-    assert run.sent == ["📤 GME больше нет в Trading 212 — слежение закрыто."]
+    assert run.sent == ["⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+$9,50</b> (+4,1%)"]
 
 
 def test_a_holding_that_is_back_in_between_starts_the_count_again(conn, run):
@@ -886,7 +966,7 @@ def test_the_second_miss_needs_to_be_ten_minutes_after_the_first(conn, run):
     assert positions.find_open(conn, "GME") is not None and run.sent == []
     later = run(_holding(**SAP), summary=unknown, now=_minutes(75))
     assert later.closed == ["GME"] and later.held == []
-    assert run.sent == ["📤 GME больше нет в Trading 212 — слежение закрыто."]
+    assert run.sent == ["⚪ <b>GME!</b>: продано в Trading 212 — слежение закрыто, итог ≈ <b>+$9,50</b> (+4,1%)"]
 
 
 @pytest.mark.parametrize("seconds, closes", [(2, False), (599, False), (600, True), (901, True)])
@@ -1004,7 +1084,7 @@ def test_a_holding_bought_back_on_another_day_is_a_new_position(conn, run):
     run()
     run.sent.clear()
     result = run(_holding(created="2026-10-01T09:00:00Z"))
-    assert result.opened == ["GME"] and run.sent[0].startswith("📥 Вижу")
+    assert result.opened == ["GME"] and run.sent[0].startswith("⚪ <b>GME!</b>: куплено")
     assert conn.execute("SELECT COUNT(*) FROM positions WHERE ticker = 'GME'").fetchone() == (2,)
 
 
@@ -1069,7 +1149,7 @@ def test_a_holding_under_an_old_code_is_opened_and_priced_under_its_market_symbo
     pos = positions.find_open(conn, "META")
     assert result.opened == ["META"] and (pos.t212_ticker, pos.source) == ("FB_US_EQ", None)
     assert run.histories == [("META", None)]                        # Yahoo is asked for META, not FB
-    assert run.sent[0].startswith("📥 Вижу в Trading 212: META — ")
+    assert run.sent[0].startswith("⚪ <b>META!</b>: куплено в Trading 212 — ")
     assert conn.execute("SELECT ticker FROM t212_prices").fetchall() == [("META",)]
 
 
@@ -1096,8 +1176,8 @@ def test_a_us_holding_is_keyed_by_its_isin_only_when_yahoos_series_is_another_in
         assert result.opened == ["US36467W1099"]
         assert (pos.ticker, pos.source, pos.t212_ticker) == ("US36467W1099", "T212", "GME_US_EQ")
         assert conn.execute("SELECT ticker, price FROM t212_prices").fetchall() == [("US36467W1099", 24.05)]
-        assert run.sent[-1].startswith("📥 Вижу в Trading 212: GME — ")       # still named by its code
-        assert run.sent[-1].endswith("Слежу: стоп и срок.")         # and watched as what it now is
+        assert run.sent[-1].startswith("⚪ <b>GME!</b>: куплено в Trading 212 — ")    # still named by its code
+        assert run.sent[-1].endswith("слежу: стоп и срок")          # and watched as what it now is
     else:
         assert result.opened == ["GME"] and (pos.ticker, pos.source) == ("GME", None)
 
@@ -1117,8 +1197,8 @@ def test_a_us_holding_with_no_isin_to_fall_back_on_keeps_its_symbol(conn, run):
 @pytest.fixture
 def yahoo_has_nothing(monkeypatch):
     """Yahoo is down, or does not know the symbol: no history and no last close for anything."""
-    import paper
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    import prices
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
 
 
@@ -1132,7 +1212,7 @@ def test_a_us_holding_yahoo_has_nothing_for_keeps_its_symbol_and_is_priced_from_
     run(_holding(avg=100.0, price=100.0))
     pos = positions.find_open(conn, "GME")
     assert (pos.source, pos.t212_ticker, pos.insiders) == (None, "GME_US_EQ", ["Ryan Cohen"])
-    assert run.sent[-1].endswith("Слежу: стоп, продажи инсайдеров, новости.")
+    assert run.sent[-1].endswith("слежу: стоп, продажи инсайдеров, новости")
     run(_holding(avg=100.0, price=130.0), now=NOW + dt.timedelta(days=1))
     run(_holding(avg=100.0, price=110.0), now=NOW + dt.timedelta(days=2))
     day = NOW.date() + dt.timedelta(days=2)
@@ -1153,7 +1233,7 @@ def test_a_us_holding_with_no_yahoo_history_sizes_its_stop_from_the_day_prices_i
 
 def test_a_tracked_position_is_found_by_its_stored_trading_212_id_not_by_the_key(conn, run):
     """Tracked as FB before the instrument list had the rename. The list now says META: it is the
-    same holding -- no second position, no «📥», no «📤»."""
+    same holding -- no second position, no «куплено», no «продано»."""
     _synced_before(conn)
     run(_holding(**FB))
     _instrument(conn, "FB_US_EQ", "META")
@@ -1784,7 +1864,7 @@ def test_a_us_instrument_does_not_take_over_a_position_bought_on_oslo(conn, run)
         (oslo.id, "manual", "NORWAY", 270.0)
     assert (by["US29446M1027"].origin, by["US29446M1027"].source, by["US29446M1027"].t212_ticker) == \
         ("t212", "T212", "EQNR_US_EQ")
-    assert run.sent[0].startswith("📥 Вижу в Trading 212: EQNR — ") and run.histories == []
+    assert run.sent[0].startswith("⚪ <b>EQNR!</b>: куплено в Trading 212 — ") and run.histories == []
 
 
 @pytest.mark.parametrize("source", ["NORWAY", "SWEDEN"])
@@ -1874,10 +1954,10 @@ def test_the_year_counts_from_the_tracking_start_for_a_legacy_holding(conn, run)
 
 def test_dead_money_counts_its_days_from_the_tracking_start_and_its_result_from_the_average(conn, run):
     import model
-    import paper
+    import prices
     run(_holding(created=OLD, avg=100.0, price=101.0))             # +1% on the average price paid
     day = NOW.date()
-    while paper.business_days_between(NOW.date().isoformat(), day) < model.DEAD_MONEY_BDAYS:
+    while prices.business_days_between(NOW.date().isoformat(), day) < model.DEAD_MONEY_BDAYS:
         day += dt.timedelta(days=1)
     assert _exits(conn, day - dt.timedelta(days=1), 101.0) == []
     [alert] = _exits(conn, day, 101.0)
@@ -1899,8 +1979,8 @@ def test_legacy_keys_on_whether_a_holding_was_ever_stored_not_on_the_message_fla
     run(_holding(created=OLD, price=20.0))
     pos = positions.find_open(conn, "GME")
     assert (pos.opened_at, pos.stop_base) == (NOW.date().isoformat(), 20.0)
-    assert run.sent == ["📥 Вижу в Trading 212: GME — 10 шт. по 23,10 USD. "
-                        "Слежу: стоп, срок и новости."]             # the flag decides the message only
+    assert run.sent == ["⚪ <b>GME!</b>: куплено в Trading 212 — 10 шт. по 23,10 USD, "
+                        "слежу: стоп, срок и новости"]              # the flag decides the message only
 
 
 def test_a_sold_holding_still_counts_as_stored_before(conn, run):
@@ -1938,32 +2018,32 @@ _OSLO = dict(t212_ticker="EQNRd_EQ", isin="NO0010096985", avg=25.0, price=26.0, 
 
 def _watched(run, **holding):
     run(_holding(**holding))
-    return run.sent[-1].split(". Слежу: ")[1]
+    return run.sent[-1].split(", слежу: ")[1]
 
 
 def test_a_us_holding_with_insiders_is_watched_for_its_stop_their_sales_and_its_news(conn, run):
     _synced_before(conn)
     _journal(conn, "GME", ["Ryan Cohen"])
-    assert _watched(run) == "стоп, продажи инсайдеров, новости."
+    assert _watched(run) == "стоп, продажи инсайдеров, новости"
 
 
 def test_a_us_holding_with_no_matched_insiders_is_not_said_to_be_watched_for_their_sales(conn, run):
     _synced_before(conn)
     _journal(conn, "AAPL", ["Tim Cook"])                            # another stock's insiders
-    assert _watched(run) == "стоп, срок и новости."
+    assert _watched(run) == "стоп, срок и новости"
 
 
 def test_a_holding_with_no_news_feed_and_no_matched_insiders_is_watched_for_its_stop_and_its_time(conn, run):
     _synced_before(conn)
     _journal(conn, "SAP", ["US Boss"], source="SEC")               # the US SAP: not this listing's insiders
-    assert _watched(run, **SAP) == "стоп и срок."
+    assert _watched(run, **SAP) == "стоп и срок"
 
 
 @pytest.mark.parametrize("source", ["BAFIN", "SWEDEN"])
 def test_insiders_the_journal_matches_by_isin_are_named(conn, run, source):
     _synced_before(conn)
     _journal(conn, "DE0007164600", ["Vorstand"], source=source)
-    assert _watched(run, **SAP) == "стоп и срок, а также продажи инсайдеров."
+    assert _watched(run, **SAP) == "стоп и срок, а также продажи инсайдеров"
     assert positions.find_open(conn, "DE0007164600").insiders == ["Vorstand"]
 
 
@@ -1972,20 +2052,20 @@ def test_an_oslo_company_is_watched_for_its_oslo_insiders_and_its_oslo_news(conn
     conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
                  "'2026-09-01T00:00:00')")
     _journal(conn, "EQNR", ["Oslo Boss"], source="NORWAY")
-    assert _watched(run, **_OSLO) == "стоп и срок, а также продажи инсайдеров и новости."
+    assert _watched(run, **_OSLO) == "стоп и срок, а также продажи инсайдеров и новости"
 
 
 def test_an_oslo_company_with_no_signal_is_watched_for_its_news_but_not_for_insiders(conn, run):
     _synced_before(conn)
     conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
                  "'2026-09-01T00:00:00')")
-    assert _watched(run, **_OSLO) == "стоп и срок, а также новости."
+    assert _watched(run, **_OSLO) == "стоп и срок, а также новости"
 
 
 def test_a_signal_with_no_names_matches_no_insiders(conn, run):
     _synced_before(conn)
     _journal(conn, "DE0007164600", [], source="BAFIN")
-    assert _watched(run, **SAP) == "стоп и срок."
+    assert _watched(run, **SAP) == "стоп и срок"
 
 
 # ---------------------------------------------- R3: a silent sync leaves the first message
@@ -2028,7 +2108,7 @@ def test_a_notifying_sync_whose_send_fails_has_still_used_the_first_message(conn
     run(_holding(), notify=broken)
     assert _flag(conn) is not None                                  # it tried, with notifications on
     run(_holding(), _holding(**SAP))
-    assert run.sent == ["📥 Вижу в Trading 212: SAP — 10 шт. по 120,00 EUR. Слежу: стоп и срок."]
+    assert run.sent == ["⚪ <b>SAP!</b>: куплено в Trading 212 — 10 шт. по 120,00 EUR, слежу: стоп и срок"]
 
 
 def test_a_silent_sync_after_the_first_message_says_nothing_either(conn, run):
@@ -2052,8 +2132,8 @@ TODAY = NOW.date()
 def no_yahoo(monkeypatch):
     """A US holding's stop line reads Yahoo's closes: none here, and no Yahoo price is asked for
     (Trading 212's own price is what /portfolio shows)."""
-    import paper
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    import prices
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
 
     def refuse(symbol):
         raise AssertionError("the price of a Trading 212 holding is Trading 212's")
@@ -2081,7 +2161,7 @@ def test_the_live_view_is_what_the_account_holds_now_with_each_tracked_holdings_
         ("GME", 12.0, 23.50, 25.00, "USD", 15.5, "EUR", "2026-09-28")     # the account's own figures, now
     assert h.position.ticker == "GME" and h.position.insiders == ["Ryan Cohen"]
     assert h.status["last"] == 25.00 and h.status["stop_pct"] == 0.10     # the stop the sync fixed
-    assert h.model_holds is False and h.days == 3                   # bought 28.09, today is 01.10
+    assert h.days == 3                                              # bought 28.09, today is 01.10
 
 
 def test_a_legacy_holding_is_shown_with_its_real_result_and_its_days_since_the_purchase(conn, run, no_yahoo):
@@ -2230,31 +2310,41 @@ def test_a_key_problem_carries_the_hint_and_a_bad_answer_a_fixed_reason(conn, er
     assert (view.error, view.hint, view.holdings) == (reason, hint, [])
 
 
+def test_the_portfolio_text_is_the_account_then_what_was_bought_by_hand(conn, monkeypatch):
+    """What /portfolio says (and the menu's «Мой портфель»): the live account view, then the /bought positions."""
+    import telegram_notify
+    seen = []
+    view = ta.PortfolioView([], error="ключ Trading 212 не задан", hint=ta.KEY_HINT)
+    monkeypatch.setattr(ta, "portfolio_view", lambda c, today, **k: seen.append(("view", today)) or view)
+    monkeypatch.setattr(ta.positions, "portfolio_rows",
+                        lambda c, today, **k: seen.append(("rows", today, k)) or [])
+    html = ta.portfolio_text(conn, TODAY)
+    assert html == telegram_notify.format_my_portfolio([], t212=view) and html.startswith("<b>💼 Trading 212</b>")
+    plain = ta.portfolio_text(conn, TODAY, html=False)
+    assert plain == telegram_notify.format_my_portfolio([], html=False, t212=view) and "<b>" not in plain
+    assert seen[:2] == [("view", TODAY), ("rows", TODAY, {"origin": "manual"})]
+
+
 def test_with_no_key_the_view_asks_nothing_and_says_so(conn):
     view = ta.portfolio_view(conn, TODAY, now=NOW)                  # the real client: no key in the tests
     assert (view.error, view.hint) == (ta.NO_KEY, ta.KEY_HINT)
 
 
-def _model_holds(conn, ticker, source="SEC"):
+def test_a_holding_has_no_model_flag_and_the_old_virtual_books_change_nothing_in_the_view(conn, run, no_yahoo):
+    """The paper_* rows of the removed portfolio stay in the database as an archive; the view does not read them."""
+    _synced_before(conn)
     conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', ?, ?, ?, 'USD', '2026-09-25', 1000, 998, 40, 1.16)",
-        (ticker, source, ticker))
+        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', 'GME', 'SEC', 'GME', 'USD', '2026-09-25', 1000, 998, "
+        "40, 1.16)")
     conn.commit()
-
-
-def test_the_view_says_when_the_model_holds_the_same_name(conn, run, no_yahoo):
-    _synced_before(conn)
-    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
-                 "'2026-09-01T00:00:00')")
-    _model_holds(conn, "GME")
-    _model_holds(conn, "EQNR", source="NORWAY")                     # the model holds Equinor in Oslo
-    held = [_holding(), _holding(**SAP), _holding("EQNRd_EQ", "NO0010096985", currency="EUR")]
+    held = [_holding(), _holding(**SAP)]
     run(*held)
-    assert {h.name: h.model_holds for h in _view(conn, *held).holdings} == \
-        {"GME": True, "SAP": False, "EQNR": True}
-    stored = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status")))
-    assert {h.name: h.model_holds for h in stored.holdings} == {"GME": True, "SAP": False, "EQNR": True}
+    live = _view(conn, *held).holdings
+    stored = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status"))).holdings
+    assert {h.name for h in live} == {h.name for h in stored} == {"GME", "SAP"}
+    assert not any(hasattr(h, "model_holds") for h in live + stored)
+    assert not hasattr(ta, "_model_holds") and not hasattr(ta.positions, "_model_names")
 
 
 def test_the_view_shows_a_holding_it_cannot_key_by_whatever_names_it(conn, no_yahoo):
@@ -2405,7 +2495,8 @@ def test_the_readme_says_what_is_read_how_often_and_that_nothing_is_traded():
     section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
     for phrase in ("`/equity/positions`", "`/equity/account/summary`", "только чтение",     # what is read
                    "Каждые 15 минут", "ежедневном прогоне",                                # how often
-                   "📥 Слежу за вашими позициями", "📥 Вижу в Trading 212", "📤",            # the notifications
+                   "📥 Слежу за вашими позициями", "⚪ GME!: куплено в Trading 212",       # the notifications
+                   "⚪ GME!: продано в Trading 212 — слежение закрыто", "итог ≈",
                    "`/portfolio` — живой", "💼 Trading 212", "✍️ Вне Trading 212",
                    "python t212_account.py --check",
                    "никогда не размещает"):                                                # no orders, ever
@@ -2421,7 +2512,7 @@ def test_the_readme_says_how_a_holding_that_pre_dates_tracking_is_treated():
     for phrase in ("Для уже купленных бумаг правила выхода считаются с сегодняшнего дня.",   # the first message
                    "от цены на день первой синхронизации",                              # the stop's floor
                    "от средней цены покупки",                                           # the result stays real
-                   "Слежу: стоп и срок",                                                # R2: only what is watched
+                   "слежу: стоп и срок",                                                # R2: only what is watched
                    "не расходует"):                                                     # R3: --sync, --no-telegram
         assert phrase in section, phrase
     assert "может прийти сразу после первой синхронизации" not in section   # no burst of alerts any more

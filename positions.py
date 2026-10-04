@@ -9,8 +9,9 @@ looked starts its clock when tracking starts, and its stop is measured from its 
 (stop_base), not from the average price it was bought at: see _stop_and_peak. A Trading 212 holding with a US listing is keyed and
 priced like a /bought one -- from Yahoo, and from the day prices the sync stores (t212_prices)
 where Yahoo has nothing or another instrument's series: _pricing; any other is keyed by its ISIN
-with source T212_SOURCE and priced from those day prices. Every position leaves on the model's own
-exits (model.py), and a close alert fires once per position, on the first of:
+with source T212_SOURCE and priced from those day prices. Every position leaves on the exit rules
+below -- their constants (the stop fallback, dead money, the year) and the news seam are model.py's --
+and a close alert fires once per position, on the first of:
 
   insider_sell   one of the insiders behind the signal it came from sells
                  after the open date -- Form 4 (not a 10b5-1 planned sale), a Form 144
@@ -22,9 +23,9 @@ exits (model.py), and a close alert fires once per position, on the first of:
   trailing_stop  the price is `stop_pct` or more below the highest close since the open
                  (the entry price counts as one). The stop is fixed when the position is
                  recorded, from the price history then; a position without one takes it
-                 from the closes before its open date, else the model's fallback;
+                 from the closes before its open date, else model.FALLBACK_STOP;
   activist_cut   (a position bought on a 13D/G stake) one of its filers has since reported
-                 a smaller stake -- model._activist_cut, the model's own rule;
+                 a smaller stake -- model._activist_cut;
   trend_down     (coins) below the 100-day average and down over 20 days;
   dead_money     (stocks) 60 business days held and a return under 5%;
   time           a year held;
@@ -50,8 +51,8 @@ import crypto
 import marketcap
 import model_score
 
-# model.py and paper.py import this module, so they are imported inside the functions
-# that need them (model for the exit constants and its news seam, paper for the prices).
+# model.py and prices.py import this module, so they are imported inside the functions
+# that need them (model for the exit constants and its news seam, prices for the closes).
 
 CAUTION_LOOKBACK_DAYS = 7
 MANUAL, T212 = "manual", "t212"         # a position's origin: /bought, or the Trading 212 account
@@ -346,16 +347,16 @@ def last_close(ticker: str, source: str | None = None, conn=None, today: dt.date
 
 def daily_closes(ticker: str, source: str | None = None, conn=None) -> list[tuple[str, float]]:
     """The adjusted daily closes, oldest first, of the listing `source` trades the ticker
-    on (paper._closes on its Yahoo symbol); [] when it has no reliable symbol or the fetch
+    on (prices._closes on its Yahoo symbol); [] when it has no reliable symbol or the fetch
     fails. A Trading 212 holding with no Yahoo listing (source T212_SOURCE) has the day
-    prices the sync stored instead (t212_closes), given `conn`. Imported here: paper imports
+    prices the sync stored instead (t212_closes), given `conn`. Imported here: prices imports
     this module."""
-    import paper
+    import prices
     symbol = yahoo_symbol(ticker, source)
     if not symbol:
         return t212_closes(conn, ticker) if source == T212_SOURCE and conn is not None else []
     try:
-        return list(paper._closes(symbol, paper.PRICE_DAYS) or [])
+        return list(prices._closes(symbol, prices.PRICE_DAYS) or [])
     except Exception as e:
         print(f"[positions] no price history for {ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return []
@@ -366,8 +367,7 @@ def _insider_sale(conn, pos: Position) -> str | None:
     if not keys:
         return None
     # Oslo's rows name a company by its Oslo ticker; a Trading 212 holding of it, by the ISIN.
-    # (model.py hands in a namespace of a book's position, which has no source.)
-    oslo = oslo_ticker(conn, pos.ticker) if getattr(pos, "source", None) == T212_SOURCE else None
+    oslo = oslo_ticker(conn, pos.ticker) if pos.source == T212_SOURCE else None
     for label, sql in _SALE_QUERIES:
         key = oslo if label == "Oslo" and oslo else pos.ticker
         for person, date in conn.execute(sql, (key, pos.opened_at)):
@@ -407,7 +407,7 @@ def _crypto_caution(conn, pos: Position, today: dt.date, trend_fn) -> str | None
 
 
 def _completed_bars(bars: list[tuple[str, float]], today: dt.date) -> list[tuple[str, float]]:
-    """The closes before `today`, as the model's paper.Prices(today) keeps them: a bar for today
+    """The closes before `today`, as prices.Prices(today) keeps them: a bar for today
     is still in progress (a coin's always is) and must not set a peak or trip a stop or a trend."""
     return [b for b in bars if b[0] < today.isoformat()]
 
@@ -538,28 +538,18 @@ _VENUE_SOURCES = ("NORWAY", "SWEDEN")
 
 
 def _asset_key(ticker: str, source: str | None = None) -> tuple[str, str, str]:
-    """A name as the model's books and the user's positions share it: a coin by its symbol, a
-    stock by its ticker (the stock BTC and the coin BTC stay two assets), and an Oslo or
-    Stockholm listing with its venue (Oslo's NRC is not the US NRC)."""
+    """A name as a signal's score and the user's positions share it: a coin by its symbol, a stock by
+    its ticker (the stock BTC and the coin BTC stay two assets), and an Oslo or Stockholm listing
+    with its venue (Oslo's NRC is not the US NRC)."""
     if crypto.is_crypto(ticker):
         return "coin", crypto.symbol_of(ticker).upper(), ""
     return "stock", ticker.upper(), source if source in _VENUE_SOURCES else ""
 
 
-def _model_names(conn) -> set[tuple[str, str, str]]:
-    """What MODEL-S and MODEL-C hold now (_asset_key)."""
-    import model
-    import paper
-    return {_asset_key(p["ticker"], p["source"])
-            for code in model.BOOKS for p in paper.open_positions(conn, code)}
-
-
-def portfolio_rows(conn, today: dt.date, *, origin: str | None = None) -> list[tuple[Position, dict, bool]]:
-    """What /portfolio shows: (position, position_status, model_holds) for each open position
-    (of `origin` only, when given), oldest first. `model_holds`: MODEL-S or MODEL-C has an open
-    position in the same name."""
-    held = _model_names(conn)
-    return [(pos, position_status(pos, today, conn=conn), _asset_key(pos.ticker, pos.source) in held)
+def portfolio_rows(conn, today: dt.date, *, origin: str | None = None) -> list[tuple[Position, dict]]:
+    """What /portfolio shows: (position, position_status) for each open position (of `origin` only,
+    when given), oldest first."""
+    return [(pos, position_status(pos, today, conn=conn))
             for pos in open_positions(conn) if origin is None or pos.origin == origin]
 
 
@@ -569,12 +559,12 @@ def _pct(x: float) -> str:
 
 def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes_of,
                 news_fn) -> tuple[str, str] | None:
-    """The model's exits (model.py) for a position that no insider or caution rule closed:
-    (trigger, detail) for the first that holds, else None -- in the model's order, with the
-    model's constants. The headlines are fetched only when every rule before them has
+    """The remaining exit rules for a position that no insider or caution rule closed:
+    (trigger, detail) for the first that holds, else None -- stop, trend, dead money, a year held,
+    news, with the constants kept in model.py. The headlines are fetched only when every rule before them has
     passed."""
     import model
-    import paper
+    import prices
     coin = crypto.is_crypto(pos.ticker)
     bars = _completed_bars(closes_of(pos), today)
     if price is None:
@@ -592,7 +582,7 @@ def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes
         if trend and trend["down"]:
             return "trend_down", "ниже 100-дн. средней, 20 дн. в минусе"
     elif (price is not None
-            and paper.business_days_between(pos.opened_at, today) >= model.DEAD_MONEY_BDAYS
+            and prices.business_days_between(pos.opened_at, today) >= model.DEAD_MONEY_BDAYS
             and price / pos.entry_price - 1 < model.DEAD_MONEY_MIN_RETURN):
         return "dead_money", f"{model.DEAD_MONEY_BDAYS} торговых дней без роста"
     held = (today - dt.date.fromisoformat(pos.opened_at)).days

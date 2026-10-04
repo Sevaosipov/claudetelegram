@@ -9,7 +9,7 @@ import pytest
 import db
 import model
 import model_score
-import paper
+import prices
 import positions
 from conftest import add_bafin_txn, add_form_144, add_sec_sale, add_stake, add_sweden_txn
 
@@ -21,7 +21,7 @@ def _no_network_seams(monkeypatch):
     """The two seams a position's exits reach the network through: with no history and no
     headlines the exit rules that need them simply don't fire. Tests that care hand their own
     closes_fn / news_fn, or override these."""
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
     monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
 
 
@@ -69,6 +69,18 @@ def test_insider_sale_after_opening_closes(conn):
     add_sec_sale(conn, "AAA", "PERSON BOSS", 500_000, date=(TODAY - dt.timedelta(days=1)).isoformat())
     [alert] = positions.check_exits(conn, today=TODAY, price_fn=_no_price)
     assert alert.trigger == "insider_sell" and "PERSON BOSS" in alert.detail
+
+
+def test_an_insider_sale_alert_is_shown_with_its_date_as_dd_mm_and_stores_the_iso_one(conn):
+    import telegram_notify
+    _strong_journal(conn, "AAA", ["Boss Person"])
+    _open(conn)
+    add_sec_sale(conn, "AAA", "PERSON BOSS", 500_000, date=(TODAY - dt.timedelta(days=1)).isoformat())
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 90.0)
+    assert alert.detail == "PERSON BOSS — Form 4, 2026-09-22"              # the alert's own text is untouched
+    first, second = telegram_notify.format_close_alert(alert, html=False).splitlines()
+    assert first == "🔴 AAA!: продаёт инсайдер — пора продавать: вход 100,00 → сейчас 90,00, итог −10,0%"
+    assert second == "   PERSON BOSS — Form 4, 22.09"
 
 
 def test_sale_before_opening_does_not_count(conn):
@@ -223,6 +235,17 @@ def test_bafin_sale_after_opening_closes(conn):
     assert alert.trigger == "insider_sell" and "BaFin" in alert.detail
 
 
+def test_a_bafin_sale_is_shown_with_its_date_as_dd_mm(conn):
+    import telegram_notify
+    _strong_journal(conn, "DE0007164600", ["Boss Person"], source="BAFIN")
+    _open(conn, ticker="DE0007164600")
+    add_bafin_txn(conn, "DE0007164600", "Boss Person", 500_000,
+                  date=(TODAY - dt.timedelta(days=1)).strftime("%d.%m.%Y"), txn_type="S")
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=_no_price)
+    assert alert.detail.endswith("BaFin, 2026-09-22")
+    assert telegram_notify.format_close_alert(alert, html=False).splitlines()[-1].endswith("— BaFin, 22.09")
+
+
 def test_bafin_sale_before_opening_does_not_count(conn):
     _strong_journal(conn, "DE0007164600", ["Boss Person"], source="BAFIN")
     add_bafin_txn(conn, "DE0007164600", "Boss Person", 500_000,
@@ -256,6 +279,18 @@ def test_a_caution_confirmed_by_the_price_closes_a_coin(conn):
     assert alert.trigger == "caution" and alert.last_price == 79_900.0
     assert "отток из спот-ETF" in alert.detail and "-6.2% за 7 дн." in alert.detail
     assert "(€900 млн)" in alert.detail
+
+
+def test_a_caution_alert_is_shown_in_russian_numbers_and_stores_the_english_ones(conn):
+    import telegram_notify
+    _open(conn, "CRYPTO:BTC", 84_500.0, days_ago=5)
+    _caution_journal(conn, days_ago=1, value=1.05e9)
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 79_900.0,
+                                    trend_fn=_trend(_FALLING))
+    assert "(€1,050 млн)" in alert.detail and "-6.2% за 7 дн." in alert.detail     # untouched
+    first, second = telegram_notify.format_close_alert(alert, html=False).splitlines()
+    assert first == "🔴 BTC!: отток по монете — пора продавать: вход 84 500,00 → сейчас 79 900,00, итог −5,4%"
+    assert second == "   отток из спот-ETF (€1 050 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней"
 
 
 def test_an_unconfirmed_caution_does_not_close(conn):
@@ -333,7 +368,7 @@ def _check(conn, price=None, bars=(), *, news=(), trend=None):
 def _days_ago_for_bdays(n):
     """How many calendar days ago a position was opened to have been held `n` business days."""
     days = 0
-    while paper.business_days_between((TODAY - dt.timedelta(days=days)).isoformat(), TODAY) < n:
+    while prices.business_days_between((TODAY - dt.timedelta(days=days)).isoformat(), TODAY) < n:
         days += 1
     return days
 
@@ -375,19 +410,19 @@ def test_no_price_history_stores_no_stop(conn):
 def test_the_default_history_is_the_yahoo_series_of_the_listing_the_position_is_on(conn, monkeypatch):
     seen = []
     flat = _days(TODAY - dt.timedelta(days=60), [100.0] * 40)
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: seen.append((symbol, days)) or flat)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: seen.append((symbol, days)) or flat)
     pos = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY")
-    assert seen == [("NRC.OL", paper.PRICE_DAYS)] and pos.stop_pct == 0.10
+    assert seen == [("NRC.OL", prices.PRICE_DAYS)] and pos.stop_pct == 0.10
 
 
 def test_the_default_history_is_empty_without_a_symbol_or_when_the_fetch_fails(monkeypatch):
     calls = []
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: calls.append(symbol) or [("2026-09-01", 1.0)])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: calls.append(symbol) or [("2026-09-01", 1.0)])
     assert positions.daily_closes("DE0007164600", "BAFIN") == [] and calls == []      # an ISIN has none
 
     def boom(symbol, days):
         raise RuntimeError("offline")
-    monkeypatch.setattr(paper, "_closes", boom)
+    monkeypatch.setattr(prices, "_closes", boom)
     assert positions.daily_closes("AAA", None) == []
 
 
@@ -598,6 +633,16 @@ def test_an_insider_sale_comes_before_the_trailing_stop(conn):
     assert alert.trigger == "insider_sell"
 
 
+def test_a_trailing_stop_alert_is_one_line_in_the_message(conn):
+    """Its own text («−10% от максимума 100,00») is still on the alert; the message does not repeat it."""
+    import telegram_notify
+    _open(conn, price=100.0, days_ago=10, stop=0.10)
+    [alert] = _check(conn, price=89.0, bars=_held_bars([], [100.0], days_ago=10))
+    assert alert.trigger == "trailing_stop" and "от максимума" in alert.detail
+    text = telegram_notify.format_close_alert(alert, html=False)
+    assert text == "🔴 AAA!: сработал стоп — пора продавать: вход 100,00 → сейчас 89,00, итог −11,0%"
+
+
 def test_a_confirmed_caution_comes_before_the_stop_and_the_trend(conn):
     _open(conn, "CRYPTO:BTC", 100.0, stop=0.15)
     _caution_journal(conn, days_ago=1)
@@ -677,8 +722,8 @@ def test_the_stop_comes_before_the_activist_cut_and_the_cut_before_dead_money(co
     assert [a.trigger for a in _check(conn, price=102.0, bars=bars)] == ["activist_cut"]
 
 
-def test_the_model_and_the_positions_read_the_same_cut(conn):
-    """One rule, model._activist_cut, for a paper position and a /bought one."""
+def test_the_cut_rule_is_model_activist_cut_and_the_positions_read_it(conn):
+    """One rule, model._activist_cut: the /bought and Trading 212 positions' activist_cut alert reads it."""
     add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(30))
     add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
     assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(10)) == (9.0, 6.0)
@@ -686,29 +731,33 @@ def test_the_model_and_the_positions_read_the_same_cut(conn):
     assert model._activist_cut(conn, "AAA", [], _day(10)) is None
 
 
+@pytest.mark.parametrize("before,after,expected", [
+    (9.0, 6.0, (9.0, 6.0)),
+    (9.0, 11.0, None),                # raised
+    (9.0, 9.0, None),                 # unchanged
+    (9.0, None, None),                # nothing filed since
+])
+def test_an_activist_cutting_the_stake_is_found_by_its_filers_only(conn, before, after, expected):
+    add_stake(conn, "AAA", "Fund LP", before, event_date=_day(30))
+    if after is not None:
+        add_stake(conn, "AAA", "Fund LP", after, event_date=_day(3))
+    add_stake(conn, "AAA", "Someone Else", 1.0, event_date=_day(2))     # another holder: ignored
+    assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(10)) == expected
+
+
 # ------------------------------------------------------ one set of exit constants, the model's
-def _paper_pos(days_ago, *, value=10_000.0):
-    return {"ticker": "AAA", "source": "SEC", "fill_date": _day(days_ago), "stop_pct": None,
-            "insiders": "[]", "last_value": value, "net_eur": 10_000.0}
-
-
-def test_the_position_exits_and_the_models_share_their_constants(conn, monkeypatch):
-    """Both read model's stop fallback, dead-money and year constants when they run: change
-    one and both move together."""
+def test_the_position_exits_read_the_models_constants_when_they_run(conn, monkeypatch):
+    """The stop fallback, dead-money and year constants live in model.py and are read when an exit runs:
+    change one and the exits move with it."""
     for name in ("FALLBACK_STOP", "DEAD_MONEY_BDAYS", "DEAD_MONEY_MIN_RETURN", "MAX_HOLD_DAYS"):
         assert not hasattr(positions, name), name
-    flat = [(d, 100.0) for d, _c in _days(TODAY - dt.timedelta(days=40), [100.0] * 40)]
 
     # the stop fallback: -20% with no stop and no history before the buy
     _open(conn, "AAA", 100.0, days_ago=5)
     fall = _held_bars([], [100.0, 80.0], days_ago=5)
     assert [a.trigger for a in _check(conn, price=80.0, bars=fall)] == ["trailing_stop"]
-    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
-                                   TODAY, []) is not None
     monkeypatch.setattr(model, "FALLBACK_STOP", {"stock": 0.40, "crypto": 0.50})
     assert _check(conn, price=80.0, bars=fall) == []
-    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
-                                   TODAY, []) is None
     positions.close_position(conn, "AAA")
 
     # dead money and the year, moved to a few days
@@ -716,14 +765,12 @@ def test_the_position_exits_and_the_models_share_their_constants(conn, monkeypat
     _open(conn, "BBB", 100.0, days_ago=7, stop=0.10)
     [alert] = _check(conn, price=101.0, bars=_held_bars([], [100.0, 101.0], days_ago=7))
     assert alert.trigger == "dead_money"
-    assert model.stock_exit_reason(conn, _paper_pos(7, value=10_100.0), flat, TODAY, []) == "стоит на месте"
     positions.close_position(conn, "BBB")
     monkeypatch.setattr(model, "DEAD_MONEY_BDAYS", 10_000)
     monkeypatch.setattr(model, "MAX_HOLD_DAYS", 7)
     _open(conn, "CCC", 100.0, days_ago=7, stop=0.10)
     [alert] = _check(conn, price=130.0, bars=_held_bars([], [100.0, 130.0], days_ago=7))
     assert alert.trigger == "time"
-    assert model.stock_exit_reason(conn, _paper_pos(7, value=13_000.0), flat, TODAY, []) == "год в позиции"
 
 
 def test_an_older_positions_table_gains_the_stop_column(tmp_path):
@@ -884,14 +931,6 @@ def test_position_status_reads_the_price_and_the_history_the_way_check_exits_doe
 
 
 # ------------------------------------------------------------------ portfolio_rows
-def _model_position(conn, book, ticker, closed=None, source="SEC"):
-    conn.execute(
-        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-        "net_eur, entry_close, entry_fx, closed_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (book, ticker, source, ticker, "USD", "2026-09-20", 1_000.0, 998.0, 10.0, 1.16, closed))
-    conn.commit()
-
-
 @pytest.fixture
 def priced(monkeypatch):
     """Every position is priced at 110 and has no price history: the seams portfolio_rows reads
@@ -910,7 +949,7 @@ def test_portfolio_rows_are_the_open_positions_oldest_first_with_their_status(co
     closed = _open(conn, "CCC", 10.0, days_ago=20, stop=0.10)
     positions.close_position(conn, closed.ticker, today=TODAY)
     rows = _rows(conn)
-    assert [(p.ticker, st["days"], holds) for p, st, holds in rows] == [("AAA", 9, False), ("BBB", 2, False)]
+    assert [(p.ticker, st["days"]) for p, st in rows] == [("AAA", 9), ("BBB", 2)]
     assert rows[0][1]["last"] == 110.0 and rows[0][1]["result"] == pytest.approx(0.10)
 
 
@@ -918,39 +957,27 @@ def test_portfolio_rows_of_no_positions_is_empty(conn, priced):
     assert _rows(conn) == []
 
 
-def test_portfolio_rows_say_when_the_model_holds_the_same_name(conn, priced):
-    _model_position(conn, model.STOCK_BOOK, "AAA")
-    _model_position(conn, model.CRYPTO_BOOK, "CRYPTO:BTC")
-    _model_position(conn, model.STOCK_BOOK, "OLD", closed="2026-09-25")      # sold: not held
-    _model_position(conn, "R1-E1", "ZZZ")                                    # an archived book is not the model
-    for ticker in ("AAA", "CRYPTO:BTC", "BBB", "OLD", "ZZZ"):
-        _open(conn, ticker, 100.0, stop=0.10)
-    holds = {p.ticker: held for p, _st, held in _rows(conn)}
-    assert holds == {"AAA": True, "CRYPTO:BTC": True, "BBB": False, "OLD": False, "ZZZ": False}
+def test_a_row_is_a_position_and_its_status_and_nothing_about_a_model(conn, priced):
+    """The old virtual books' rows stay in the database as an archive; no row says anything about them."""
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', 'AAA', 'SEC', 'AAA', 'USD', '2026-09-20', "
+        "1000, 998, 10, 1.16)")
+    conn.commit()
+    _open(conn, "AAA", 100.0, stop=0.10)
+    [row] = _rows(conn)
+    assert len(row) == 2 and row[0].ticker == "AAA"
+    assert not hasattr(positions, "_model_names")
 
 
-def test_a_stock_named_like_a_coin_is_not_the_coin_the_model_holds(conn, priced):
-    """The stock BTC (Grayscale's ETF) and the coin CRYPTO:BTC are two assets."""
-    _model_position(conn, model.CRYPTO_BOOK, "CRYPTO:BTC")
-    _open(conn, "BTC", 100.0, stop=0.10)
-    assert [held for _p, _st, held in _rows(conn)] == [False]
-
-
-def test_an_oslo_listing_is_not_the_us_stock_of_the_same_name_the_model_holds(conn, priced):
-    """Oslo's NRC and the US NRC are two companies: only a match on the venue too counts."""
-    _model_position(conn, model.STOCK_BOOK, "NRC")                       # the US NRC
-    oslo = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY",
-                                   closes_fn=lambda t, s=None: [])
-    us = positions.open_position(conn, "AAA", 100.0, today=TODAY, closes_fn=lambda t, s=None: [])
-    _model_position(conn, model.STOCK_BOOK, "AAA")
-    holds = {p.ticker: held for p, _st, held in _rows(conn)}
-    assert holds == {"NRC": False, "AAA": True} and oslo.source == "NORWAY" and us.source is None
-
-
-def test_an_oslo_listing_the_model_holds_on_oslo_too_counts(conn, priced):
-    _model_position(conn, model.STOCK_BOOK, "NRC", source="NORWAY")
-    positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY", closes_fn=lambda t, s=None: [])
-    assert [held for _p, _st, held in _rows(conn)] == [True]
+def test_asset_key_tells_a_coin_a_stock_and_a_venue_listing_apart():
+    """The one key a score and a position are compared by (signals_weekly.held_names)."""
+    key = positions._asset_key
+    assert key("CRYPTO:BTC", "CRYPTO") == ("coin", "BTC", "")
+    assert key("BTC", "SEC") == ("stock", "BTC", "") != key("CRYPTO:BTC", "CRYPTO")    # the ETF is not the coin
+    assert key("NRC", "NORWAY") == ("stock", "NRC", "NORWAY") != key("NRC", "SEC")      # Oslo's NRC is not the US NRC
+    assert key("VOLV-B", "SWEDEN") == ("stock", "VOLV-B", "SWEDEN")
+    assert key("aaa") == key("AAA", "HOUSE") == ("stock", "AAA", "")
 
 
 # ------------------------------------------------------- Trading 212 holdings (t212_account.py)
@@ -978,7 +1005,7 @@ def _no_yahoo(monkeypatch):
     def refuse(*a, **k):
         raise AssertionError("a Trading 212 holding with no Yahoo listing must not reach Yahoo")
     monkeypatch.setattr(positions, "_yahoo_close", refuse)
-    monkeypatch.setattr(paper, "_closes", refuse)
+    monkeypatch.setattr(prices, "_closes", refuse)
 
 
 def test_a_position_built_the_old_way_is_a_manual_one():
@@ -1060,7 +1087,7 @@ def test_above_its_stop_a_trading_212_holding_stays(conn, monkeypatch):
 def test_a_us_trading_212_holding_is_priced_from_yahoo_like_a_bought_one(conn, monkeypatch):
     seen = []
     bars = _held_bars([], [100.0, 130.0, 125.0])
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: seen.append(symbol) or bars)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: seen.append(symbol) or bars)
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: seen.append(symbol) or 116.0)
     _t212(conn, "GME", source=None, entry=100.0, stop=0.10, t212_ticker="GME_US_EQ", currency="USD")
     _snapshots(conn, "GME", [(0, 129.0)])                       # the snapshot is not what the exits read
@@ -1142,8 +1169,8 @@ def test_portfolio_rows_can_keep_to_the_manual_positions(conn, monkeypatch):
     monkeypatch.setattr(positions, "daily_closes", lambda t, s=None: [])
     _t212(conn, "GME", source=None, t212_ticker="GME_US_EQ")
     _open(conn, "AAA", 100.0, stop=0.10)
-    assert [p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY, origin="manual")] == ["AAA"]
-    assert {p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY)} == {"AAA", "GME"}
+    assert [p.ticker for p, _st in positions.portfolio_rows(conn, TODAY, origin="manual")] == ["AAA"]
+    assert {p.ticker for p, _st in positions.portfolio_rows(conn, TODAY)} == {"AAA", "GME"}
 
 
 def test_find_holding_is_the_trading_212_holding_meant_by_its_ticker_or_its_us_code(conn):
@@ -1269,7 +1296,7 @@ def test_a_us_keyed_holding_yahoo_has_nothing_for_is_priced_from_its_day_prices(
 def test_the_price_and_the_history_fall_back_each_on_its_own(conn, monkeypatch):
     """Yahoo has the history but no last close just now: the history is Yahoo's, the price the sync's."""
     _yahoo_has_nothing(monkeypatch)
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: _held_bars([], [100.0, 130.0, 125.0]))
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: _held_bars([], [100.0, 130.0, 125.0]))
     _us_holding(conn)
     _snapshots(conn, "GME", [(3, 999.0), (0, 116.0)])              # the stored history is not read: Yahoo has one
     [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
@@ -1330,7 +1357,7 @@ def _yahoo_answers(monkeypatch, closes, last=None):
     def history(symbol, days):
         asked.append(symbol)
         return list(closes)
-    monkeypatch.setattr(paper, "_closes", history)
+    monkeypatch.setattr(prices, "_closes", history)
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: closes[-1][1] if last is None else last)
     return asked
 

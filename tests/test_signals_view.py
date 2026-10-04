@@ -190,7 +190,7 @@ def test_view_lists_open_positions(conn, keyed, scored, capsys, monkeypatch):
     import positions
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 110.0)
-    monkeypatch.setattr("paper._closes", lambda symbol, days: [])        # no history, no headlines
+    monkeypatch.setattr("prices._closes", lambda symbol, days: [])        # no history, no headlines
     monkeypatch.setattr("model.default_news", lambda ticker, source: [])
     positions.open_position(conn, "AAPL", 100.0)
     menu.show_signals(conn)
@@ -202,9 +202,10 @@ def test_view_shows_pending_close_alerts(conn, keyed, scored, capsys, monkeypatc
     import positions
     monkeypatch.setattr(trading212, "fetch_instruments", lambda session=None: INSTRUMENTS)
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 84.0)
-    monkeypatch.setattr("paper._closes", lambda symbol, days: [])        # no history: the default stop
+    monkeypatch.setattr("prices._closes", lambda symbol, days: [])        # no history: the default stop
     positions.open_position(conn, "AAPL", 100.0)
     conn.execute("UPDATE positions SET opened_at = ?", ((TODAY - dt.timedelta(days=5)).isoformat(),))
     menu.show_signals(conn)
     out = _shown(capsys)
-    assert "🚪 AAPL — стоп от максимума" in out
+    assert "🔴 AAPL!: сработал стоп — пора продавать: вход 100,00 → сейчас 84,00, итог −16,0%\n" in out
+    assert "🚪" not in out and "от максимума" not in out           # a stop is the one line: no level under it

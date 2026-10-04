@@ -1,12 +1,15 @@
 """Collect newly disclosed stock purchases from public filings, log every one of
-them, journal the *signals* they form, and run the model portfolio (model.py) on them.
-The model scores and sells on every run but buys only on the week's first full run from
-Friday to Sunday, and the week's one Telegram message (what the model bought and sold, holds
-and watches, the groups that started selling) goes out once that pass has got through -- on
-Sunday regardless, with a warning if the model never did. Every other day Telegram gets only
-the close alerts on your positions (/bought and the Trading 212 account), as they fire, and the
-breakage warnings. A full run also syncs the Trading 212 account (t212_account.py, read only)
-right before the close alerts are checked.
+them, journal the *signals* they form, and score them (model.py).
+The bot holds no portfolio: your Trading 212 account is the only one it tracks. It scores every
+fresh signal on every full run, and on the week's first full run from Friday to Sunday it picks the
+buy signals worth sending (signals_weekly.py: at most five, not already held, not repeated within a
+month). The week's Telegram messages -- one short message per signal (each picked buy, the groups that
+started selling), then a short summary of your account (weekly.py) -- go out once that pass has got
+through, on Sunday regardless, with a warning in the summary if the scoring never did. Every other day
+Telegram gets only the close alerts on your positions (/bought and the Trading 212 account), one
+message each as they fire, the notices of what appeared in or left the account, and the breakage
+warnings. A full run also syncs the Trading 212 account (t212_account.py, read only) right before the
+close alerts are checked.
 
 Sources:
     SEC Form 4        US insider purchases and sales (sec_edgar.py)
@@ -54,13 +57,14 @@ import cluster
 import db
 import insider_score
 import model
-import paper_report
 import positions
 import sec_edgar
+import signals_weekly
 import strategy
 import t212_account
 import universe
 import telegram_notify
+import weekly
 from passes import (
     CSV_PATH,
     _sec_forms,
@@ -85,13 +89,19 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 
 # The weekly run (spec 2026-10-01): the first full run of an ISO week on a Friday, Saturday or
 # Sunday -- Friday normally, the weekend only when the Mac missed it. Two independent kv_cache
-# keys mark the week: the model's buys, and the Telegram message (set only once it is sent).
-# The message waits for the week's model pass (the buys key) -- except on Sunday, when it goes
-# out regardless, with a warning line if the model never got through.
+# keys mark the week: its buy signals picked (set once the picks are kept), and the Telegram messages
+# (set only once the summary, the last of them, is sent). The messages wait for the week's pick (the buys
+# key), which waits for a complete scoring pass -- except on Sunday, when they go out regardless, with a
+# warning line if the scoring never got through. PICKS_KEY keeps the picks themselves (a JSON list of what
+# each message needs, spec 2026-10-04-remove-model-portfolio.md): a retry sends the same ones without
+# scoring again. SENT_KEY (a JSON list, spec 2026-10-04) names the week's signals that went out already,
+# so a run that failed half-way sends only what is missing.
 WEEKLY_FROM_WEEKDAY = 4         # Friday; Monday is 0
 LAST_WEEKLY_WEEKDAY = 6         # Sunday
 BUYS_KEY = "model_buys_{week}"
+PICKS_KEY = "weekly_buys_{week}"
 MESSAGE_KEY = "weekly_message_{week}"
+SENT_KEY = "weekly_sent_{week}"
 _WEEK_KEY_TTL = 30 * 86400
 
 
@@ -271,8 +281,8 @@ _FILTER_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_
 
 def _filtered_run(args) -> bool:
     """True when a flag limits this run to some sources or scores, so it sees only part of
-    the day's signals. The model then neither trades nor starts its clock, and the weekly
-    message and the monthly report wait for a full run -- new signals are still journaled."""
+    the day's signals. The day is then not scored, no buy signal is picked and the weekly
+    message waits for a full run -- new signals are still journaled."""
     return any(getattr(args, name, False) for name in _FILTER_FLAGS)
 
 
@@ -292,7 +302,7 @@ def _week_marked(conn, today: dt.date, key: str) -> bool:
 
 def _weekly_due(conn, today: dt.date, key: str = MESSAGE_KEY) -> bool:
     """True on a Friday, Saturday or Sunday whose week has not yet set `key` (BUYS_KEY: the
-    model's buys; MESSAGE_KEY, the default: the Telegram message). The caller adds the full-run
+    week's picks; MESSAGE_KEY, the default: the Telegram message). The caller adds the full-run
     condition, and sets the key (_mark_week) when what it stands for is done."""
     return today.weekday() >= WEEKLY_FROM_WEEKDAY and not _week_marked(conn, today, key)
 
@@ -301,27 +311,42 @@ def _mark_week(conn, today: dt.date, key: str) -> None:
     db.save_cached_value(conn, key.format(week=_week_id(today)), 1.0)
 
 
-def _run_model(conn, args, *, buy: bool) -> "model.DayReport | None":
-    """The model portfolio's daily pass (model.py) -- after the new signals are collected,
-    whether or not Telegram is on. It trades virtual books only, and places buys only when
-    `buy` (the week's one buying run); it sells and scores every time. A crash is reported
-    like a failed source rather than taking the run down. None on a filtered run (which sees
-    only part of the day's signals, so must not trade or start the books' clock, buy or not)
-    and after a crash."""
+def _score_signals(conn, args) -> "model.ScoreReport | None":
+    """The day's scoring (model.score_day) -- after the new signals are collected, whether or not Telegram is
+    on. It trades nothing: the bot holds no portfolio. A crash is reported like a failed source rather than
+    taking the run down. None on a filtered run (which sees only part of the day's signals, so must not score
+    them or pick the week's buys) and after a crash."""
     if _filtered_run(args):
         print("[model] skipped: filtered run")
         return None
-    report = _run_source("MODEL", model.run, conn, buy=buy)
+    report = _run_source("SCORING", model.score_day, conn)
     if report is None and not args.no_telegram:
-        telegram_notify.send_text("⚠️ disclosure-bot: модельный портфель упал в этом прогоне. "
+        telegram_notify.send_text("⚠️ disclosure-bot: оценка сигналов упала в этом прогоне. "
                                   "Логи: data/launchd.err.log")
     return report
 
 
+def _pick_week(conn, today: dt.date, report) -> bool:
+    """Pick the week's buy signals once, from the day's complete scores (signals_weekly.pick_buys), keep them
+    in kv as the records their messages need (PICKS_KEY) and only then set the week's buys key: a crash in
+    between leaves the week open, and the next run picks again before anything was sent. A retry of a failed
+    send reads these picks back (_week_picks) -- it never scores or picks again. True when done."""
+    picks = [signals_weekly.pick_record(s) for s in signals_weekly.pick_buys(conn, today, report.scored)]
+    db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)
+    _mark_week(conn, today, BUYS_KEY)
+    return True
+
+
+def _week_picks(conn, today: dt.date) -> list[dict]:
+    """The records _pick_week kept for the week; an unreadable list counts as none."""
+    saved = db.get_cached_json(conn, PICKS_KEY.format(week=_week_id(today)))
+    return [p for p in saved if isinstance(p, dict) and "ticker" in p] if isinstance(saved, list) else []
+
+
 def _journal_cautions(conn, signals: list) -> list:
-    """Journal today's bearish coin signals (tier `caution`) now, before the model runs, so a
-    caution found today can close a MODEL-C coin today (model reads it back through
-    positions._crypto_caution). Returns the other signals, for _journal after the model."""
+    """Journal today's bearish coin signals (tier `caution`) now, before the day is scored, so a
+    caution found today counts today (positions._crypto_caution reads it back for a coin you hold).
+    Returns the other signals, for _journal after the scoring."""
     cautions = [s for s in signals if strategy.is_caution(s)]
     if cautions:
         _journal(conn, cautions, None)
@@ -354,7 +379,7 @@ def _journal(conn, signals: list, report) -> None:
 def _sync_t212(conn, args) -> None:
     """Bring the positions in step with the Trading 212 account (t212_account.sync: read only)
     before the exits are checked, so a holding bought or sold there today counts today. Only on a
-    full run -- a filtered one leaves the positions alone, as it leaves the model. Without a key
+    full run -- a filtered one leaves the positions alone, as it leaves the scoring. Without a key
     it does nothing; a crash is reported like a failed source. A --no-telegram run syncs silently:
     it sends nothing and leaves the one-time first message for a run that can send it. What a
     sync changed goes to the log."""
@@ -367,30 +392,61 @@ def _sync_t212(conn, args) -> None:
 
 
 def _send_closes(conn, closes: list) -> bool:
-    """The daily Telegram message: «🚪 Ваши позиции» and a close alert for each /bought position
-    that fired, as soon as it fires (it is real money, so it does not wait for the week). They
-    are marked alerted only if the send went through, so a failed send retries them next run.
-    Nothing fired -> nothing sent, returns False."""
+    """The daily Telegram signals: one message per close alert on a /bought or Trading 212 position
+    that fired, as soon as it fires (it is real money, so it does not wait for the week). Each alert
+    is marked alerted right after its own send went through; a failed send stops there and leaves
+    that alert and the ones after it for the next run. Nothing fired -> nothing sent, returns False;
+    True only when every alert went out."""
     if not closes:
         return False
-    text = "\n".join([telegram_notify._b("🚪 Ваши позиции", True)]
-                     + [telegram_notify.format_close_alert(a) for a in closes])
-    if not telegram_notify.send_text(text):
-        print(f"[telegram] send failed -- leaving {len(closes)} close alert(s) for the next run",
-              file=sys.stderr)
-        return False
-    positions.mark_alerted(conn, closes)
+    for i, alert in enumerate(closes):
+        if not telegram_notify.send_text(telegram_notify.format_close_alert(alert)):
+            print(f"[telegram] send failed -- leaving {len(closes) - i} close alert(s) for the next run",
+                  file=sys.stderr)
+            return False
+        positions.mark_alerted(conn, [alert])
     return True
 
 
-def _send_weekly(conn, today: dt.date, report, *, model_failed: bool = False) -> bool:
-    """The weekly model message (paper_report.format_week) -- however quiet the week. The week's
-    message key is set only once it went through, so a failed Friday send is tried again on the
-    next run of the same Friday-to-Sunday window. `model_failed` adds the warning line (the
-    Sunday message with no model pass behind it). True when it was sent."""
-    text = paper_report.format_week(conn, today, report, model_failed=model_failed)
-    if not telegram_notify.send_text(text):
-        print("[telegram] weekly message not sent -- will retry on the next run this week",
+def _sent_signals(conn, today: dt.date) -> list[str]:
+    """The keys of the week's signals that went out already (SENT_KEY), in the order they went; an
+    unreadable list counts as none."""
+    saved = db.get_cached_json(conn, SENT_KEY.format(week=_week_id(today)))
+    return [k for k in saved if isinstance(k, str)] if isinstance(saved, list) else []
+
+
+def _send_weekly(conn, today: dt.date, *, scoring_failed: bool = False) -> bool:
+    """The weekly Telegram messages: each signal of the week (weekly.week_signals: the picks _pick_week kept,
+    then the group exits) as its own message, then the summary (weekly.format_summary) -- however quiet
+    the week.
+
+    A signal's key is added to the week's sent list only after its message went out, and a buy's
+    buy_signals row is written in the same commit (signals_weekly.record_signal): a message that did not go
+    out leaves neither. A signal already on the list is skipped: a send that fails stops the sequence there
+    (the summary is not sent, the week is not marked) and the next run of the same Friday-to-Sunday window
+    sends only what is missing, of the same picks. The week's message key is set once the summary went
+    through. A week already marked sends nothing. `scoring_failed` -- the week's scoring never got through,
+    so there are no picks -- adds the warning line to the summary (the Sunday message). True when the
+    week's messages are all out."""
+    if _week_marked(conn, today, MESSAGE_KEY):
+        return False
+    sent = _sent_signals(conn, today)
+    picks = [] if scoring_failed else _week_picks(conn, today)
+    bought = {f"buy:{p['ticker']}": p for p in picks}
+    for key, text in weekly.week_signals(conn, today, picks):
+        if key in sent:
+            continue
+        if not telegram_notify.send_text(text):
+            print(f"[telegram] weekly message not sent (signal {key}) -- will retry the rest on the "
+                  f"next run this week", file=sys.stderr)
+            return False
+        sent.append(key)
+        if key in bought:
+            signals_weekly.record_signal(conn, bought[key], today, commit=False)
+        db.save_cached_json(conn, SENT_KEY.format(week=_week_id(today)), sent)     # commits the row with it
+    summary = weekly.format_summary(conn, today, scoring_failed=scoring_failed)
+    if not telegram_notify.send_text(summary):
+        print("[telegram] weekly message not sent (the summary) -- will retry on the next run this week",
               file=sys.stderr)
         return False
     _mark_week(conn, today, MESSAGE_KEY)
@@ -499,8 +555,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "insider thinks now. Form 4 always carried this flag; it was never read")
     ap.add_argument("--min-score", type=float, default=0,
                      help="marks a manual, filtered run (as do the --*-only flags): new signals are "
-                          "still collected and journaled, but the model portfolio does not trade and "
-                          "the weekly message and the monthly report wait for a full run. Default 0 "
+                          "still collected and journaled, but the day is not scored, no buy signal is "
+                          "picked and the weekly messages wait for a full run. Default 0 "
                           "(a full run)")
     ap.add_argument("--min-liquidity", type=float, default=0,
                      help="marks a manual, filtered run, like --min-score. Default 0 (a full run)")
@@ -709,31 +765,30 @@ def main():
         filtered = _filtered_run(args)
         buys, exits = collect_new_signals(conn, args)
         rest = _journal_cautions(conn, buys)          # a caution found today counts today
-        # The model buys only on the week's first full run from Friday to Sunday; its key is
-        # set once that pass got through completely (no crash, scoring done, no sleeve failed),
-        # so any other pass buys again on the next run of the window.
-        buy = not filtered and _weekly_due(conn, today, BUYS_KEY)
-        report = _run_model(conn, args, buy=buy)
-        if buy and report is not None and report.complete:
-            _mark_week(conn, today, BUYS_KEY)
-        _journal(conn, rest + exits, report)
+        report = _score_signals(conn, args)
+        # The week's buy signals are picked once, on the first full run from Friday to Sunday whose scoring
+        # got all the way through; the week's buys key is set when the picks are kept (_pick_week), so any
+        # other pass picks again on the next run of the window. A failed pick is reported like a failed source.
+        # The account is read before the pick: a name bought since the last sync is held, not signalled.
         _sync_t212(conn, args)
+        if (not filtered and report is not None and report.complete
+                and _weekly_due(conn, today, BUYS_KEY)):
+            _run_source("PICKS", _pick_week, conn, today, report)
+        _journal(conn, rest + exits, report)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))
         if not args.no_telegram:
             _send_closes(conn, closes)
             if not filtered and _weekly_due(conn, today):
-                # The message waits for the week's model pass: with the model down it would show
-                # no buys, and the pass that buys next would not be in it. Sunday is the last
-                # day of the window, so it goes out then whatever happened.
-                model_ok = _week_marked(conn, today, BUYS_KEY)
-                if model_ok or today.weekday() == LAST_WEEKLY_WEEKDAY:
-                    # The monthly report follows the weekly message: only once it was sent.
-                    if _run_source("WEEKLY", _send_weekly, conn, today, report, model_failed=not model_ok):
-                        _run_source("PAPER_REPORT", paper_report.maybe_send_monthly_report, conn, today)
+                # The messages wait for the week's pick: with the scoring down they would show no buys,
+                # and the pass that picks next would not be in them. Sunday is the last day of the window,
+                # so they go out then whatever happened.
+                scored_ok = _week_marked(conn, today, BUYS_KEY)
+                if scored_ok or today.weekday() == LAST_WEEKLY_WEEKDAY:
+                    _run_source("WEEKLY", _send_weekly, conn, today, scoring_failed=not scored_ok)
                 else:
-                    print("[telegram] weekly message waits for the week's model pass")
+                    print("[telegram] weekly message waits for the week's scoring pass")
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from
@@ -741,8 +796,7 @@ def main():
         db.save_cached_value(conn, "last_successful_run", time.time())
 
         print(f"--- poll finished, {total_new} new purchase(s), {len(buys) + len(exits)} new signal(s), "
-              f"{len(report.buys) if report else 0} model buy(s), "
-              f"{len(report.sells) if report else 0} model sale(s), {len(closes)} close alert(s), "
+              f"{len(report.scored) if report else 0} scored, {len(closes)} close alert(s), "
               f"took {time.time()-started:.1f}s ---")
 
         if args.once:

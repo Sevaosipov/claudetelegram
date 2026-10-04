@@ -3,10 +3,10 @@
 buy_side_signals and exit_signals are the one definition of which finders run: SEC, House,
 Senate, BaFin, Norway and Sweden clusters, 13D/G stakes, crypto treasury and ETF flows, and
 the groups that bought together and later sell together. Their callers are bot.collect_new_signals
-(the daily run) and model.candidate_signals (the model portfolio).
+(the daily run) and model.candidate_signals (the scoring).
 
 A finder only detects. Nothing here decides what is worth acting on: scoring lives in
-model_score.py (pure functions) and model.py (the portfolio) -- spec
+model_score.py (pure functions) and model.py (the daily scoring pass) -- spec
 docs/superpowers/specs/2026-09-30-model-portfolio-and-analyst-design.md. The tiers, size floors,
 recency window and Trading 212 filter that once sat here are gone.
 """
@@ -37,8 +37,8 @@ def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | 
                       sweden_kwargs: dict | None = None, stake_kwargs: dict | None = None,
                       cluster_kwargs: dict | None = None) -> list:
     """One definition of the buy-side finder list, shared by its two callers:
-    bot.collect_new_signals (the daily run) and model.candidate_signals (the model
-    portfolio) -- separate copies had drifted out of sync (stake max_age_days, on-chain
+    bot.collect_new_signals (the daily run) and model.candidate_signals (the scoring)
+    -- separate copies had drifted out of sync (stake max_age_days, on-chain
     on or off, Senate missing).
 
     Runs every buy-side finder -- SEC/House/Senate/BaFin/Norway/Sweden clusters,

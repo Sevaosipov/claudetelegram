@@ -1,10 +1,9 @@
-"""model.py: the model portfolio on the paper books. Offline -- every seam (prices, news, the
-coin trend, sectors, Trading 212, the signals) is a stub, and the dates are fixed so weekday
-arithmetic is deterministic."""
+"""model.py: the daily scoring pass. Offline -- every seam (prices, news, the coin trend, Trading 212, the
+signals) is a stub, and the dates are fixed so weekday arithmetic is deterministic. (The virtual portfolio that
+once traded on these scores is gone: spec 2026-10-04-remove-model-portfolio.md.)"""
 from __future__ import annotations
 
 import datetime as dt
-import json
 import sqlite3
 import types
 
@@ -13,13 +12,11 @@ import pytest
 import db
 import model
 import model_score
-import paper
 from cluster.roles import Buyer
-from conftest import add_sec_purchase, add_sec_sale, add_stake
+from conftest import add_sec_purchase, add_stake
 
 TODAY = dt.date(2026, 10, 5)          # a Monday
 YESTERDAY = TODAY - dt.timedelta(days=1)
-S, C = model.STOCK_BOOK, model.CRYPTO_BOOK
 T212 = types.SimpleNamespace(can_buy=lambda ticker, source: True)
 FALLING = {"ret_7d": -6.0, "above_ma20": False}
 RISING = {"ret_7d": 3.0, "above_ma20": True}
@@ -94,78 +91,23 @@ def _flow(coin="BTC", *, bullish=True, company="спот-ETF США", days_ago=1
 
 # ------------------------------------------------------------------- runners
 def _seams(**over):
-    return {"news_fn": lambda t, s: [], "trend_fn": lambda c, s: None,
-            "sector_fn": lambda t, s: None, "t212": T212, **over}
-
-
-def _run(conn, signals=(), series=None, today=TODAY, **seams):
-    return model.run(conn, today, fetch=Fetch(series or {}), signals=list(signals), **_seams(**seams))
+    return {"news_fn": lambda t, s: [], "trend_fn": lambda c, s: None, "t212": T212, **over}
 
 
 def _score(conn, signals=(), series=None, **seams):
-    seams = _seams(**seams)
-    del seams["sector_fn"]
-    return model.score_today(conn, TODAY, fetch=Fetch(series or {}), signals=list(signals), **seams)
+    return model.score_today(conn, TODAY, fetch=Fetch(series or {}), signals=list(signals), **_seams(**seams))
 
 
-def _books(conn):
-    model.create_books(conn, TODAY - dt.timedelta(days=30))
-
-
-def _position(conn, ticker="AAA", *, book=S, source="SEC", fill_days_ago=10, net=8_000.0,
-              value=None, insiders=("Jane Doe",), stop_pct=0.10, score=64.0, closed_days_ago=None):
-    """A position written straight into the book (its cost comes out of the book's cash)."""
-    _books(conn)
-    closed = _day(closed_days_ago) if closed_days_ago is not None else None
-    symbol = paper.listing(ticker, source)[0]
-    cur = conn.execute(
-        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-        "net_eur, entry_close, entry_fx, insiders, reason, last_value, stop_pct, score, closed_date, "
-        "close_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (book, ticker, source, symbol, "USD", _day(fill_days_ago), net, net, 100.0, 1.16,
-         json.dumps(list(insiders)), "балл 64: тест", value if value is not None else net, stop_pct,
-         score, closed, "стоп" if closed else None))
-    if closed is None:
-        conn.execute("UPDATE paper_books SET cash_eur = cash_eur - ? WHERE code = ?", (net, book))
-    conn.commit()
-    return paper._rows(conn, "SELECT * FROM paper_positions WHERE id = ?", (cur.lastrowid,))[0]
-
-
-def _coin_position(conn, **kw):
-    kw = {"net": 10_000.0, "fill_days_ago": 5, "stop_pct": None, "insiders": (), **kw}
-    return _position(conn, "CRYPTO:BTC", book=C, source="CRYPTO", **kw)
-
-
-def _by_status(conn, book, status):
-    return [o for o in paper.orders(conn, book) if o["status"] == status]
-
-
-# ------------------------------------------------------------------- books
-def test_books_are_created_once_with_their_money(conn):
-    model.create_books(conn, TODAY)
-    model.create_books(conn, TODAY + dt.timedelta(days=1))
-    rows = conn.execute("SELECT code, sleeve, start_date, start_eur, cash_eur, bench_symbol "
-                        "FROM paper_books ORDER BY code").fetchall()
-    assert rows == [("MODEL-C", "crypto", TODAY.isoformat(), 30_000.0, 30_000.0, "BTC-USD"),
-                    ("MODEL-S", "stock", TODAY.isoformat(), 70_000.0, 70_000.0, "SPY")]
-    assert model.BOOKS == ("MODEL-S", "MODEL-C")
-
-
+# ------------------------------------------------------- the archived paper tables
 def test_the_stop_and_score_columns_reach_a_database_made_before_them():
+    """The paper_* tables are an archive nothing reads or writes any more; an old database still gets
+    the columns they were given later, so it matches the schema."""
     old = sqlite3.connect(":memory:")
     for table in ("paper_orders", "paper_positions"):
         old.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, book TEXT)")
     db._migrate(old)
     for table in ("paper_orders", "paper_positions"):
         assert {"stop_pct", "score"} <= {r[1] for r in old.execute(f"PRAGMA table_info({table})")}
-
-
-def test_the_model_value_is_both_books_and_zero_before_they_exist(conn):
-    assert model.model_value(conn) == 0.0
-    _books(conn)
-    assert model.model_value(conn) == 100_000.0
-    _position(conn, value=9_000.0, net=8_000.0)      # up 1 000 on 8 000 that left the cash
-    assert model.model_value(conn) == pytest.approx(101_000.0)
 
 
 # ------------------------------------------------------- the news default
@@ -259,503 +201,80 @@ def test_candidates_come_out_of_the_real_finders(conn, monkeypatch):
     assert [(s.source, s.ticker) for s in found] == [("SEC", "AAA")]
 
 
-# --------------------------------------------------------------- the buys
-def test_a_buying_stock_places_one_pending_order_sized_by_its_stop(conn):
-    closes = _zigzag(100, 100.0, 105.0)
-    stop = model_score.stop_distance(closes, "stock")
-    assert 0.10 < stop < 0.25                          # neither clamp: the size follows the stop
-    report = _run(conn, [_sig("AAA")], {"AAA": _bars(closes, YESTERDAY)})
-    [o] = paper.orders(conn, S)
-    assert (o["ticker"], o["source"], o["side"], o["status"]) == ("AAA", "SEC", "buy", "pending")
-    assert o["amount_eur"] == pytest.approx(1_000 / stop) and o["amount_eur"] < 10_000
-    assert o["stop_pct"] == pytest.approx(stop) and o["score"] == 60.0
-    assert o["reason"] == "балл 60: 3 инсайдера из руководства; CEO среди покупателей; 0,25% компании"
-    assert json.loads(o["insiders"]) == ["P0", "P1", "P2"] and o["created"] == TODAY.isoformat()
-    [t] = report.buys
-    assert (t.side, t.ticker, t.company, t.score, t.result, t.t212) == ("buy", "AAA", "AAA Corp", 60.0, None, True)
-    assert t.amount_eur == pytest.approx(o["amount_eur"]) and t.stop_pct == pytest.approx(stop)
-    assert t.reasons == ["3 инсайдера из руководства", "CEO среди покупателей", "0,25% компании"]
-    assert report.sells == [] and paper.orders(conn, C) == []
-
-
-def test_the_order_fills_at_the_next_close_and_the_position_carries_its_stop_and_score(conn):
-    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
-    later = dt.date(2026, 10, 7)
-    _run(conn, [], {"AAA": _stock_bars(tail=(110.0, 130.0))}, today=later)     # closes of 10/05, 10/06
-    [p] = paper.open_positions(conn, S)
-    assert (p["fill_date"], p["entry_close"], p["cost_eur"]) == ("2026-10-06", 130.0, 4_000.0)
-    assert (p["stop_pct"], p["score"]) == (0.25, 60.0)
-    assert [o["status"] for o in paper.orders(conn, S)] == ["filled"]
-    assert paper.cash(conn, S) == pytest.approx(66_000.0)
-
-
-def test_two_buys_are_placed_highest_score_first(conn):
-    report = _run(conn, [_sig("AAA"), _sig("BBB", corroborated=("BAFIN",))],
-                  {"AAA": _stock_bars(), "BBB": _stock_bars()})
-    assert [(o["ticker"], o["score"]) for o in paper.orders(conn, S)] == [("BBB", 65.0), ("AAA", 60.0)]
-    assert [t.ticker for t in report.buys] == ["BBB", "AAA"]
-
-
-def test_a_thirteenth_buy_finds_no_place(conn):
-    tickers = [f"T{i:02d}" for i in range(13)]
-    report = _run(conn, [_sig(t) for t in tickers], {t: _stock_bars() for t in tickers})
-    placed = _by_status(conn, S, "pending")
-    assert [o["ticker"] for o in placed] == tickers[:12]
-    assert {o["amount_eur"] for o in placed} == {4_000.0}         # 1% of 100k / a 25% stop
-    [skipped] = _by_status(conn, S, "skipped")
-    assert (skipped["ticker"], skipped["note"]) == ("T12", "мест нет")
-    assert skipped["score"] == 60.0 and skipped["stop_pct"] == 0.25
-    assert len(report.buys) == 12
-
-
-def test_the_same_skip_on_consecutive_days_is_recorded_once(conn):
-    tickers = [f"T{i:02d}" for i in range(13)]
-    series = {t: _stock_bars() for t in tickers}
-    _run(conn, [_sig(t) for t in tickers], series)
-    _run(conn, [_sig(t) for t in tickers], series, today=TODAY + dt.timedelta(days=1))
-    [skipped] = _by_status(conn, S, "skipped")
-    assert (skipped["ticker"], skipped["note"], skipped["created"]) == ("T12", "мест нет", TODAY.isoformat())
-    assert len(_by_status(conn, S, "pending")) == 12
-
-
-def test_a_fourth_buy_in_one_sector_is_skipped_and_an_unknown_sector_is_free(conn):
-    sectors = {"AAA": "Tech", "BBB": "Tech", "CCC": "Tech", "DDD": "Tech", "EEE": "Energy"}
-    tickers = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]                 # FFF: no sector known
-    report = _run(conn, [_sig(t) for t in tickers], {t: _stock_bars() for t in tickers},
-                  sector_fn=lambda t, s: sectors.get(t))
-    assert [o["ticker"] for o in _by_status(conn, S, "pending")] == ["AAA", "BBB", "CCC", "EEE", "FFF"]
-    [skipped] = _by_status(conn, S, "skipped")
-    assert (skipped["ticker"], skipped["note"]) == ("DDD", "сектор заполнен")
-    assert [t.ticker for t in report.buys] == ["AAA", "BBB", "CCC", "EEE", "FFF"]
-
-
-def test_held_positions_count_toward_the_sector_cap(conn):
-    for t in ("HH1", "HH2", "HH3"):
-        _position(conn, t)
-    sectors = {"HH1": "Tech", "HH2": "Tech", "HH3": "Tech", "AAA": "Tech"}
-    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}, sector_fn=lambda t, s: sectors.get(t))
-    [o] = paper.orders(conn, S)
-    assert (o["ticker"], o["status"], o["note"]) == ("AAA", "skipped", "сектор заполнен")
-
-
-def _fake_yfinance(monkeypatch, info=None, error=None):
-    """Stands in for yfinance.Ticker(symbol).info; returns the list of symbols asked."""
-    import yfinance
-    asked = []
-
-    class FakeTicker:
-        def __init__(self, symbol):
-            asked.append(symbol)
-
-        @property
-        def info(self):
-            if error:
-                raise error
-            return info
-    monkeypatch.setattr(yfinance, "Ticker", FakeTicker)
-    return asked
-
-
-def test_the_default_sector_comes_from_yfinance_info(conn, monkeypatch):
-    asked = _fake_yfinance(monkeypatch, {"sector": "Tech"})
-    tickers = ["AAA", "BBB", "CCC", "DDD"]
-    _run(conn, [_sig(t) for t in tickers], {t: _stock_bars() for t in tickers}, sector_fn=None)
-    assert [o["note"] for o in paper.orders(conn, S)] == [None, None, None, "сектор заполнен"]
-    assert asked.count("AAA") == 1                            # looked up once for the whole run
-
-
-def test_the_default_sector_is_asked_on_the_listings_own_symbol(monkeypatch):
-    asked = _fake_yfinance(monkeypatch, {"sector": "Energy"})
-    assert model._default_sector("EQNR", "NORWAY") == "Energy"
-    assert model._default_sector("BRK.B", "SEC") == "Energy"
-    assert asked == ["EQNR.OL", "BRK-B"]                      # not EQNR-OL
-
-
-def test_the_default_sector_is_none_when_unknown_or_failing(monkeypatch, capsys):
-    asked = _fake_yfinance(monkeypatch, {"longName": "Acme"})
-    assert model._default_sector("AAA", "SEC") is None        # no sector in the info
-    asked.clear()
-    assert model._default_sector("DE0007164600", "BAFIN") is None and asked == []   # no listing
-    _fake_yfinance(monkeypatch, None)
-    assert model._default_sector("AAA", "SEC") is None        # info is None
-    _fake_yfinance(monkeypatch, error=OSError("down"))
-    assert model._default_sector("AAA", "SEC") is None
-    assert "no sector for AAA" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("closed_days_ago,placed", [(10, False), (30, False), (31, True)])
-def test_a_ticker_sold_within_30_days_is_not_bought_back(conn, closed_days_ago, placed):
-    _position(conn, "AAA", closed_days_ago=closed_days_ago)
-    report = _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
-    [o] = paper.orders(conn, S)
-    if placed:
-        assert (o["status"], len(report.buys)) == ("pending", 1)
-    else:
-        assert (o["status"], o["note"], report.buys) == ("skipped", "недавно продан", [])
+# --------------------------------------------------------------- score_day
+PAPER_TABLES = ("paper_books", "paper_orders", "paper_positions", "paper_equity")
 
 
-def test_an_order_below_the_minimum_is_skipped_as_too_small(conn):
-    model.create_books(conn, TODAY)
-    conn.execute("UPDATE paper_books SET cash_eur = 1000")        # a model worth 2 000
-    report = _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
-    [o] = paper.orders(conn, S)
-    assert (o["status"], o["note"], o["amount_eur"]) == ("skipped", "мало", None)
-    assert report.buys == []                                       # 1% of 2 000 / 25% = 80
+def _score_day(conn, signals=(), series=None, today=TODAY, **seams):
+    return model.score_day(conn, today, fetch=Fetch(series or {}), signals=list(signals), **_seams(**seams))
 
 
-@pytest.mark.parametrize("cash,status,amount", [(200.0, "skipped", None), (700.0, "pending", 700.0)])
-def test_a_sleeve_short_of_cash_buys_with_what_is_left_if_that_is_half(conn, cash, status, amount):
-    model.create_books(conn, TODAY)
-    conn.execute("UPDATE paper_books SET cash_eur = ? WHERE code = ?", (cash, S))
-    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
-    [o] = paper.orders(conn, S)
-    assert (o["status"], o["amount_eur"]) == (status, amount)     # the size is ~1 200
-    assert o["note"] == ("нет денег" if status == "skipped" else None)
-    assert (o["stop_pct"], o["score"]) == (0.25, 60.0)            # kept on the skip, too
+def _paper_rows(conn) -> int:
+    return sum(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in PAPER_TABLES)
 
 
-def test_a_held_or_pending_ticker_gets_no_second_order_and_no_skip_row(conn):
-    _position(conn, "AAA", stop_pct=0.25)
-    signals, series = [_sig("AAA"), _sig("BBB")], {"AAA": _stock_bars(), "BBB": _stock_bars()}
-    _run(conn, signals, series)
-    assert [(o["ticker"], o["status"]) for o in paper.orders(conn, S)] == [("BBB", "pending")]
-    report = _run(conn, signals, series)                            # the same day again
-    assert len(paper.orders(conn, S)) == 1 and report.buys == []
+def test_score_day_scores_stores_the_days_scores_and_reports_them(conn):
+    report = _score_day(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],
+                  {"AAA": _stock_bars(), "BBB": _stock_bars(), "BTC-USD": _rising()})
+    assert isinstance(report, model.ScoreReport) and report.complete is True
+    assert [(s.ticker, s.total, s.decision) for s in report.scored] == [
+        ("AAA", 65.0, "buy"), ("CRYPTO:BTC", 60, "buy"), ("BBB", 34.0, "skip"), ("CRYPTO:ETH", 0, "watch")]
+    assert report.decisions == {"AAA": "buy", "CRYPTO:BTC": "buy", "BBB": "skip", "CRYPTO:ETH": "watch"}
+    assert [(s.ticker, s.total) for s in model.cached_scores(conn, TODAY)] == [
+        (s.ticker, s.total) for s in report.scored]
 
 
-def test_a_watch_or_blocked_stock_is_not_bought(conn):
-    weak = _sig("WWW", n=2, roles=(), pct=None)                     # 34: skip
-    report = _run(conn, [weak, _sig("BBB")], {"WWW": _stock_bars(), "BBB": _stock_bars()},
-                  news_fn=lambda t, s: [{"title": "BBB faces SEC investigation"}])
-    assert paper.orders(conn, S) == [] and report.buys == []
-    assert report.decisions["BBB"] == model_score.BLOCK and report.decisions["WWW"] == model_score.SKIP
+def test_score_day_trades_nothing_and_writes_no_paper_row(conn):
+    """The virtual books are gone: scoring places no order, opens no book, stamps no equity."""
+    _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars(), "BTC-USD": _rising()})
+    assert _paper_rows(conn) == 0
 
 
-# ------------------------------------------------ the weekly buys: run(buy=False)
-def test_a_run_without_buys_places_no_order_and_keeps_scoring_and_the_snapshot(conn):
-    series = {"AAA": _stock_bars(), "BTC-USD": _rising()}
-    report = _run(conn, [_sig("AAA"), _flow("BTC")], series, buy=False)
-    assert paper.orders(conn, S) == [] and paper.orders(conn, C) == []     # no buy, no skip row either
-    assert report.buys == []
-    assert report.decisions["AAA"] == model_score.BUY                      # ... but it was scored,
-    assert report.decisions["CRYPTO:BTC"] == model_score.BUY
-    assert [s.ticker for s in model.cached_scores(conn, TODAY)][:1] == ["CRYPTO:BTC"]      # ... and kept
-    assert conn.execute("SELECT COUNT(*) FROM paper_equity").fetchone()[0] == 2      # ... and stamped
+def test_score_day_hands_every_seam_to_the_scoring(conn, monkeypatch):
+    seen = {}
 
+    def score_today(conn_, today, **kw):
+        seen.update(kw, today=today)
+        return []
+    monkeypatch.setattr(model, "score_today", score_today)
+    fetch, news, trend, signals = Fetch({}), lambda t, s: [], lambda c, s: None, [_sig("AAA")]
+    model.score_day(conn, TODAY, fetch=fetch, news_fn=news, trend_fn=trend, signals=signals, t212=T212)
+    assert seen == {"today": TODAY, "fetch": fetch, "news_fn": news, "trend_fn": trend,
+                    "signals": signals, "t212": T212}
 
-def test_a_run_without_buys_still_sells_on_an_exit_rule(conn):
-    _position(conn, "AAA", stop_pct=0.10)                     # the zigzag's peak 120 puts the line at 108
-    report = _run(conn, [_sig("BBB")], {"AAA": _stock_bars(), "BBB": _stock_bars()}, buy=False)
-    assert [t.reasons for t in report.sells] == [["стоп: −10% от максимума"]]
-    assert [(o["ticker"], o["side"], o["status"]) for o in paper.orders(conn, S)] == [("AAA", "sell", "pending")]
-    assert report.buys == []
 
+def test_score_day_scores_for_today_when_no_day_is_given(conn):
+    report = model.score_day(conn, fetch=Fetch({}), signals=[], **_seams())
+    assert report.complete is True
+    assert model.cached_scores(conn) is not None and model.cached_scores(conn, dt.date.today()) is not None
 
-def test_a_run_without_buys_does_not_skip_a_blocked_candidate_either(conn):
-    _position(conn, "OLD", closed_days_ago=5)                 # sold 5 days ago: a buy would be «недавно продан»
-    _run(conn, [_sig("OLD")], {"OLD": _stock_bars()}, buy=False)
-    assert paper.orders(conn, S) == []
-
-
-def test_buys_are_on_unless_asked_off(conn):
-    series = {"AAA": _stock_bars(), "BTC-USD": _rising()}
-    report = _run(conn, [_sig("AAA"), _flow("BTC")], series)               # the default
-    assert sorted(t.ticker for t in report.buys) == ["AAA", "CRYPTO:BTC"]
-    explicit = _run(conn, [_sig("BBB")], {"BBB": _stock_bars()}, buy=True)
-    assert [t.ticker for t in explicit.buys] == ["BBB"]
-
-
-# ------------------------------------------------------------- stock exits
-PATH = [100, 105, 110, 120, 130, 128, 125, 122, 120]     # closes from the fill day (10 days ago) on
 
-
-def _path(last):
-    return PATH + [last]
+def test_score_day_without_scores_is_incomplete_and_keeps_nothing(conn, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("finders down")
+    monkeypatch.setattr(model, "score_today", boom)
+    report = _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert (report.complete, report.scored, report.decisions) == (False, [], {})
+    assert model.cached_scores(conn, TODAY) is None
+    assert "[model] scoring failed: RuntimeError: finders down" in capsys.readouterr().err
 
-
-def _exit(conn, pos, closes=None, headlines=None, today=TODAY):
-    bars = _bars(closes, YESTERDAY) if closes else []
-    return model.stock_exit_reason(conn, pos, bars, today, headlines)
-
-
-@pytest.mark.parametrize("last,expected", [(116, "стоп: −10% от максимума"), (118, None)])
-def test_the_trailing_stop_follows_the_highest_close_since_the_fill(conn, last, expected):
-    pos = _position(conn, stop_pct=0.10)                        # peak 130: the line is 117
-    assert _exit(conn, pos, _path(last)) == expected
 
+def test_score_day_undoes_what_a_failed_scoring_left_in_the_open_transaction(conn, monkeypatch):
+    def half_done(*a, **k):
+        conn.execute("INSERT INTO kv_cache (key, value, computed_at) VALUES ('half', 1, '2026-10-05T00:00:00')")
+        raise RuntimeError("down")
+    monkeypatch.setattr(model, "score_today", half_done)
+    assert _score_day(conn).complete is False
+    assert conn.execute("SELECT COUNT(*) FROM kv_cache WHERE key = 'half'").fetchone() == (0,)
 
-def test_the_fill_days_own_close_can_be_the_peak(conn):
-    pos = _position(conn, stop_pct=0.10)
-    fell = [100, 95, 96, 95, 94, 93, 92, 91, 90, 89]         # the fill day is the highest close
-    assert _exit(conn, pos, fell) == "стоп: −10% от максимума"
 
-
-def test_a_high_before_the_fill_does_not_set_the_peak(conn):
-    pos = _position(conn, stop_pct=0.10)
-    bars = _bars([200.0, 200.0] + _path(118), YESTERDAY)        # two closes before the fill day
-    assert model.stock_exit_reason(conn, pos, bars, TODAY, None) is None
-
-
-def test_a_position_without_a_stored_stop_takes_the_one_its_history_gives(conn):
-    pos = _position(conn, stop_pct=None)
-    calm = _bars([100.0] * 24 + _path(116), YESTERDAY)          # flat before the fill: the 10% floor
-    assert model.stock_exit_reason(conn, pos, calm, TODAY, None) == "стоп: −10% от максимума"
-
-
-@pytest.mark.parametrize("last,expected", [(110, "стоп: −15% от максимума"), (112, None)])
-def test_with_no_history_before_the_fill_the_stop_is_15_percent(conn, last, expected):
-    pos = _position(conn, stop_pct=None)                        # peak 130: the line is 110.5
-    assert _exit(conn, pos, _path(last)) == expected
-
-
-def test_an_insider_selling_after_the_fill_sells(conn):
-    add_sec_sale(conn, "AAA", "Jane Doe", 500_000, _day(5))
-    pos = _position(conn)
-    assert _exit(conn, pos, [100.0] * 10) == f"продаёт инсайдер: Jane Doe — Form 4, {_day(5)}"
-
-
-def test_an_insider_sale_before_the_fill_does_not_count(conn):
-    add_sec_sale(conn, "AAA", "Jane Doe", 500_000, _day(20))
-    assert _exit(conn, _position(conn), [100.0] * 10) is None
-
-
-@pytest.mark.parametrize("before,after,source,expected", [
-    (9.0, 6.0, "SEC13DG", "активист сократил долю"),
-    (9.0, 11.0, "SEC13DG", None),                # raised
-    (9.0, 9.0, "SEC13DG", None),                 # unchanged
-    (9.0, None, "SEC13DG", None),                # nothing filed since
-    (9.0, 6.0, "SEC", None),                     # a cluster buy, not a stake
-])
-def test_an_activist_cutting_the_stake_sells(conn, before, after, source, expected):
-    add_stake(conn, "AAA", "Fund LP", before, event_date=_day(30))
-    if after is not None:
-        add_stake(conn, "AAA", "Fund LP", after, event_date=_day(3))
-    add_stake(conn, "AAA", "Someone Else", 1.0, event_date=_day(2))     # another holder: ignored
-    pos = _position(conn, source=source, insiders=("Fund LP",))
-    assert _exit(conn, pos, [100.0] * 10) == expected
-
-
-@pytest.mark.parametrize("days_ago,bdays,value,expected", [
-    (83, 59, 8_160.0, None),                    # one business day short
-    (84, 60, 8_160.0, "стоит на месте"),        # +2%
-    (85, 61, 8_160.0, "стоит на месте"),
-    (85, 61, 8_399.0, "стоит на месте"),        # +4.99%
-    (85, 61, 8_480.0, None),                    # +6%: it is going somewhere
-])
-def test_a_position_that_goes_nowhere_for_60_business_days_sells(conn, days_ago, bdays, value, expected):
-    pos = _position(conn, fill_days_ago=days_ago, value=value, net=8_000.0)
-    assert paper.business_days_between(pos["fill_date"], TODAY) == bdays
-    assert _exit(conn, pos, [100.0] * days_ago) == expected
-
-
-@pytest.mark.parametrize("days_ago,value,expected", [
-    (364, 12_000.0, None),
-    (365, 12_000.0, "год в позиции"),
-    (365, 8_160.0, "стоит на месте"),           # dead money is checked first
-])
-def test_a_position_held_a_year_sells(conn, days_ago, value, expected):
-    pos = _position(conn, fill_days_ago=days_ago, value=value, net=8_000.0)
-    assert _exit(conn, pos, [100.0] * days_ago) == expected
-
-
-def test_a_red_flag_headline_sells_and_other_news_does_not(conn):
-    pos = _position(conn)
-    red = [{"title": "Acme under SEC investigation", "published": "2026-10-01"}]
-    bad = [{"title": "Analyst downgrade for Acme", "published": "2026-10-01"}]
-    assert _exit(conn, pos, [100.0] * 10, red) == "новости: Acme under SEC investigation"
-    assert _exit(conn, pos, [100.0] * 10, bad) is None
-
-
-def test_headlines_are_fetched_only_when_no_earlier_rule_fires(conn):
-    asked = []
-
-    def headlines():
-        asked.append(1)
-        return [{"title": "Acme accused of fraud"}]
-
-    pos = _position(conn, stop_pct=0.10)
-    assert _exit(conn, pos, _path(116), headlines) == "стоп: −10% от максимума"
-    assert asked == []                                        # the stop decided: no fetch
-    assert _exit(conn, pos, _path(118), headlines) == "новости: Acme accused of fraud"
-    assert asked == [1]
-
-
-def test_a_coins_headlines_are_fetched_last_too(conn):
-    asked = []
-
-    def headlines():
-        asked.append(1)
-        return [{"title": "Exchange hack drains hot wallet"}]
-
-    pos = _coin_position(conn)
-    assert _coin_exit(conn, pos, _falling(), headlines) == "тренд вниз"
-    assert asked == []
-    assert _coin_exit(conn, pos, _rising(), headlines) == "новости: Exchange hack drains hot wallet"
-    assert asked == [1]
-
-
-def test_the_first_matching_exit_wins(conn):
-    add_sec_sale(conn, "AAA", "Jane Doe", 500_000, _day(5))
-    pos = _position(conn, stop_pct=0.10)
-    red = [{"title": "Acme fraud"}]
-    assert _exit(conn, pos, _path(116), red) == "стоп: −10% от максимума"
-    assert _exit(conn, pos, _path(118), red).startswith("продаёт инсайдер")
-
-
-# --------------------------------------------------------------- coin exits
-def _coin_exit(conn, pos, bars, headlines=None, trend=None):
-    return model.coin_exit_reason(conn, pos, bars, TODAY, headlines, lambda c, s: trend)
-
-
-def test_a_coins_stop_defaults_to_25_percent(conn):
-    pos = _coin_position(conn)
-    path = [100, 120, 140, 160, 180, 200, 190, 170, 160, 149]        # ends yesterday; the fill is its 6th
-    assert _coin_exit(conn, pos, _bars(path, YESTERDAY)) == "стоп: −25% от максимума"
-    assert _coin_exit(conn, pos, _bars(path[:-1] + [151], YESTERDAY)) is None
-    assert _coin_exit(conn, _coin_position(conn, stop_pct=0.15), _bars(path[:-1] + [169], YESTERDAY)
-                      ) == "стоп: −15% от максимума"
-
-
-def test_a_coin_below_its_100_day_average_and_falling_is_a_downtrend_exit(conn):
-    pos = _coin_position(conn)
-    assert _coin_exit(conn, pos, _falling()) == "тренд вниз"
-    assert _coin_exit(conn, pos, _rising()) is None
-
-
-def _journal(conn, coin, tier, days_ago):
-    db.journal_signal(conn, {"source": "CRYPTO_ETF", "kind": "etf_flow", "ticker": f"CRYPTO:{coin}",
-                             "tier": tier, "total_value_eur": 9e8})
-    conn.execute("UPDATE signal_journal SET emitted_at = ? WHERE id = (SELECT max(id) FROM signal_journal)",
-                 (_day(days_ago) + " 12:00:00",))
-    conn.commit()
-
-
-def test_a_price_confirmed_caution_is_an_exit_and_an_unconfirmed_one_is_not(conn):
-    pos = _coin_position(conn)
-    _journal(conn, "BTC", "caution", 2)
-    reason = _coin_exit(conn, pos, _rising(), trend=FALLING)
-    assert reason.startswith("осторожно: отток из спот-ETF (€900 млн); цена подтверждает")
-    assert _coin_exit(conn, pos, _rising(), trend=RISING) is None
-
-
-def test_a_coin_red_flag_includes_the_coin_words_a_stock_ignores(conn):
-    headlines = [{"title": "Exchange hack drains hot wallet"}]
-    assert _coin_exit(conn, _coin_position(conn), _rising(), headlines) == \
-        "новости: Exchange hack drains hot wallet"
-    assert _exit(conn, _position(conn), [100.0] * 10, headlines) is None
-
-
-# ------------------------------------------------------------- the run: sells
-def test_a_red_flag_headline_places_a_sale_and_reports_it_once(conn):
-    _position(conn, "AAA", net=8_000.0, stop_pct=0.10, score=64.0)
-    closes = [100.0] * 9 + [110.0]                                   # up 10% since the fill
-    fraud = lambda t, s: [{"title": "AAA accused of fraud", "published": "2026-10-02"}]  # noqa: E731
-    report = _run(conn, [], {"AAA": _bars(closes, YESTERDAY)}, news_fn=fraud)
-    [order] = [o for o in paper.orders(conn, S) if o["side"] == "sell"]
-    assert (order["status"], order["reason"]) == ("pending", "новости: AAA accused of fraud")
-    [t] = report.sells
-    assert (t.side, t.ticker, t.reasons, t.stop_pct, t.score) == ("sell", "AAA", ["новости: AAA accused of fraud"], 0.10, 64.0)
-    assert t.amount_eur == pytest.approx(8_800.0) and t.result == pytest.approx(0.10)
-    again = _run(conn, [], {"AAA": _bars(closes, YESTERDAY)}, news_fn=fraud)   # still pending
-    assert again.sells == [] and len([o for o in paper.orders(conn, S) if o["side"] == "sell"]) == 1
-
-
-def test_a_sale_fills_at_the_next_close_on_a_later_run(conn):
-    _position(conn, "AAA", net=8_000.0)
-    fraud = lambda t, s: [{"title": "AAA accused of fraud"}]  # noqa: E731
-    _run(conn, [], {"AAA": _bars([100.0] * 9 + [110.0], YESTERDAY)}, news_fn=fraud)
-    series = {"AAA": _bars([100.0] * 9 + [110.0], YESTERDAY) + [("2026-10-05", 111.0), ("2026-10-06", 121.0)]}
-    _run(conn, [], series, today=dt.date(2026, 10, 7), news_fn=fraud)
-    [closed] = paper.closed_positions(conn, S)
-    assert closed["closed_date"] == "2026-10-06"
-    assert closed["proceeds_eur"] == pytest.approx(8_000 * 1.21 * (1 - 0.0025))
-
-
-def test_headlines_are_fetched_once_per_ticker_for_the_whole_run(conn):
-    _position(conn, "AAA", stop_pct=0.25)
-    calls = []
-    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()},
-         news_fn=lambda t, s: calls.append((t, s)) or [])
-    assert calls.count(("AAA", "SEC")) == 1
-    assert ("CRYPTO:BTC", "CRYPTO") in calls and ("CRYPTO:ETH", "CRYPTO") in calls
-
-
-def test_a_position_sold_on_the_stop_never_asks_for_its_headlines(conn):
-    _position(conn, "AAA", stop_pct=0.10)                     # the zigzag's peak 120 puts the line at 108
-    calls = []
-    report = _run(conn, [], {"AAA": _stock_bars()}, news_fn=lambda t, s: calls.append(t) or [])
-    assert [t.reasons for t in report.sells] == [["стоп: −10% от максимума"]]
-    assert "AAA" not in calls
-
-
-# ------------------------------------------------------------- the run: coins
-def test_a_rising_coin_with_a_bullish_flow_is_bought_for_the_crypto_sleeve(conn):
-    report = _run(conn, [_flow("BTC")], {"BTC-USD": _rising()})
-    [o] = paper.orders(conn, C)
-    assert (o["ticker"], o["source"], o["side"], o["status"]) == ("CRYPTO:BTC", "CRYPTO", "buy", "pending")
-    assert o["stop_pct"] == 0.15 and o["score"] == 75.0             # trend 60 + flow 15
-    assert o["amount_eur"] == pytest.approx(1_000 / 0.15)           # 6 667: under 35% of 30 000
-    assert o["amount_eur"] <= 0.35 * 30_000
-    assert o["reason"].startswith("балл 75: выше 100-дн. средней; 20 дн. +4%")
-    [t] = report.buys
-    assert (t.ticker, t.company, t.score) == ("CRYPTO:BTC", "BTC", 75.0)
-    assert paper.orders(conn, S) == []                              # ETH has no series: only watched
-    assert report.decisions["CRYPTO:ETH"] == model_score.WATCH
-
-
-def test_a_coin_is_capped_at_35_percent_of_the_crypto_sleeve(conn):
-    model.create_books(conn, TODAY)
-    conn.execute("UPDATE paper_books SET cash_eur = 6_000 WHERE code = ?", (C,))       # sleeve 6k, model 76k
-    _run(conn, [_flow("BTC")], {"BTC-USD": _rising()})
-    [o] = paper.orders(conn, C)
-    assert o["amount_eur"] == pytest.approx(0.35 * 6_000)           # risk sizing says 5 067
-
-
-def test_a_falling_coin_that_is_held_is_sold_as_a_downtrend(conn):
-    _coin_position(conn, net=10_000.0)
-    report = _run(conn, [], {"BTC-USD": _falling()})
-    [o] = [o for o in paper.orders(conn, C) if o["side"] == "sell"]
-    assert (o["status"], o["reason"]) == ("pending", "тренд вниз")
-    [t] = report.sells
-    assert (t.ticker, t.company, t.reasons) == ("CRYPTO:BTC", "BTC", ["тренд вниз"])
-    assert t.result == pytest.approx(101 / 105 - 1)
-
-
-@pytest.mark.parametrize("closed_days_ago,placed", [(3, False), (7, False), (8, True)])
-def test_a_coin_sold_within_7_days_is_not_bought_back_though_its_trend_is_up(conn, closed_days_ago, placed):
-    _coin_position(conn, fill_days_ago=20, closed_days_ago=closed_days_ago)
-    report = _run(conn, [_flow("BTC")], {"BTC-USD": _rising()})
-    [o] = paper.orders(conn, C)
-    if placed:
-        assert (o["status"], len(report.buys)) == ("pending", 1)
-    else:
-        assert (o["status"], o["note"], report.buys) == ("skipped", "недавно продан", [])
-        assert o["score"] == 75.0                              # the score it would have bought on
-
-
-def test_a_held_coin_is_not_bought_again(conn):
-    _coin_position(conn)
-    _run(conn, [_flow("BTC")], {"BTC-USD": _rising()})
-    assert paper.orders(conn, C) == []
-
-
-# ---------------------------------------------------------- failing sleeves
-def test_a_failing_sleeve_is_logged_and_the_other_one_carries_on(conn, monkeypatch, capsys):
-    real = paper.fill_orders
-
-    def flaky(conn_, code, prices, today):
-        if code == C:
-            raise RuntimeError("boom")
-        return real(conn_, code, prices, today)
-
-    monkeypatch.setattr(paper, "fill_orders", flaky)
-    series = {"AAA": _stock_bars(), "BTC-USD": _rising(), "SPY": _bars([100.0] * 30, YESTERDAY)}
-    report = _run(conn, [_sig("AAA"), _flow("BTC")], series)
-    assert [o["ticker"] for o in paper.orders(conn, S)] == ["AAA"]
-    assert paper.orders(conn, C) == []                       # the failed sleeve neither buys ...
-    assert conn.execute("SELECT book FROM paper_equity").fetchall() == [(S,)]     # ... nor is stamped
-    assert "[model] MODEL-C failed: RuntimeError: boom" in capsys.readouterr().err
-    assert report.bench is None and len(report.buys) == 1
+def test_scores_that_could_not_be_kept_do_not_make_the_day_incomplete(conn, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("cache")
+    monkeypatch.setattr(model, "keep_scores", boom)
+    report = _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert report.complete is True and [s.ticker for s in report.scored][:1] == ["AAA"]
+    assert "[model] scores not kept: RuntimeError: cache" in capsys.readouterr().err
 
 
 # -------------------------------------------------------------- score_today
@@ -908,34 +427,6 @@ def test_coin_headlines_score_and_a_red_flag_blocks(conn):
     assert (by["CRYPTO:ETH"].decision, by["CRYPTO:ETH"].block) == ("block", "Protocol exploit drains ETH")
 
 
-# ------------------------------------------------------------- the day report
-def test_the_report_carries_decisions_and_the_two_books_value(conn):
-    report = _run(conn, [_sig("AAA"), _sig("BBB", n=3, roles=(), pct=None),
-                         _sig("CCC", n=2, roles=(), pct=None)],
-                  {t: _stock_bars() for t in ("AAA", "BBB", "CCC")})
-    assert report.decisions == {"AAA": "buy", "BBB": "skip", "CCC": "skip",
-                                "CRYPTO:BTC": "watch", "CRYPTO:ETH": "watch"}
-    assert [s.ticker for s in report.scored][:1] == ["AAA"]
-    assert report.value == pytest.approx(100_000.0)
-    assert report.value == pytest.approx(paper.book_value(conn, S) + paper.book_value(conn, C))
-    assert conn.execute("SELECT book, value, cash FROM paper_equity ORDER BY book").fetchall() == [
-        (C, 30_000.0, 30_000.0), (S, 70_000.0, 70_000.0)]
-
-
-def test_the_benchmark_is_the_two_books_benchmarks_added_up(conn):
-    flat = {"SPY": _bars([100.0] * 12, YESTERDAY), "BTC-USD": _bars([100.0] * 12, YESTERDAY)}
-    assert _run(conn, [], flat).bench == pytest.approx(100_000.0)             # day one: the start money
-    moved = {"SPY": _bars([100.0] * 6 + [110.0] * 6, dt.date(2026, 10, 11)),      # 10/05: 100, then 110
-             "BTC-USD": _bars([100.0] * 6 + [120.0] * 6, dt.date(2026, 10, 11))}
-    later = _run(conn, [], moved, today=dt.date(2026, 10, 12))
-    assert later.bench == pytest.approx(70_000 * 1.10 + 30_000 * 1.20)
-
-
-def test_the_benchmark_is_missing_when_either_book_has_none(conn):
-    assert _run(conn, [], {"SPY": _bars([100.0] * 12, YESTERDAY)}).bench is None
-    assert _run(conn, [], {}).bench is None
-
-
 # ------------------------------------------------- stake candidates: only a real signal is a trigger
 @pytest.mark.parametrize("stake,points", [
     (_stake("AAA", form="SCHEDULE 13D", percent=8.0), 15),
@@ -1011,9 +502,9 @@ def test_the_pruning_line_is_the_watch_bar_less_the_momentum_and_news_caps(conn)
 
 
 # ------------------------------------------------- today's scores are kept for the menu and the analyst
-def test_the_run_keeps_todays_scores_and_they_come_back_as_they_were(conn):
+def test_the_day_keeps_its_scores_and_they_come_back_as_they_were(conn):
     import telegram_notify
-    report = _run(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],
+    report = _score_day(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],
                   {"AAA": _stock_bars(), "BBB": _stock_bars(), "BTC-USD": _rising()},
                   t212=types.SimpleNamespace(can_buy=lambda t, s: t != "BBB"))
     cached = model.cached_scores(conn, TODAY)
@@ -1031,7 +522,7 @@ def test_the_run_keeps_todays_scores_and_they_come_back_as_they_were(conn):
 
 
 def test_only_todays_kept_scores_count(conn):
-    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
     assert model.cached_scores(conn, TODAY) is not None
     assert model.cached_scores(conn, TODAY + dt.timedelta(days=1)) is None
     assert model.cached_scores(conn, YESTERDAY) is None
@@ -1041,56 +532,25 @@ def test_a_failed_scoring_keeps_nothing(conn, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("finders down")
     monkeypatch.setattr(model, "score_today", boom)
-    _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
     assert model.cached_scores(conn, TODAY) is None
 
 
-# ------------------------------------------------- the report says whether the pass was complete
-def test_a_clean_pass_is_complete(conn):
-    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is True
-    assert _run(conn, [], {}, buy=False).complete is True          # whether it buys does not matter
-
-
-def test_a_pass_with_a_failed_sleeve_is_not_complete(conn, monkeypatch):
-    real = paper.fill_orders
-
-    def flaky(conn_, code, prices, today):
-        if code == C:
-            raise RuntimeError("boom")
-        return real(conn_, code, prices, today)
-
-    monkeypatch.setattr(paper, "fill_orders", flaky)
-    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is False
-
-
-def test_a_failing_buy_in_one_sleeve_is_not_complete_though_the_other_buys(conn, monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("no sector")
-    monkeypatch.setattr(model, "_buy_coins", boom)
-    report = _run(conn, [_sig("AAA")], {"AAA": _stock_bars()})
-    assert report.complete is False and [t.ticker for t in report.buys] == ["AAA"]
-
-
-def test_a_failing_snapshot_is_not_complete(conn, monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("disk")
-    monkeypatch.setattr(paper, "_snapshot", boom)
-    assert _run(conn, [], {}).complete is False
-
-
-def test_a_failed_scoring_is_not_complete(conn, monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("finders down")
-    monkeypatch.setattr(model, "score_today", boom)
-    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is False
-
-
-def test_scores_that_could_not_be_kept_do_not_make_a_pass_incomplete(conn, monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("cache")
-    monkeypatch.setattr(model, "keep_scores", boom)
-    assert _run(conn, [_sig("AAA")], {"AAA": _stock_bars()}).complete is True
-
-
-def test_no_run_today_means_no_kept_scores(conn):
+def test_no_scoring_today_means_no_kept_scores(conn):
     assert model.cached_scores(conn, TODAY) is None
+
+
+# ------------------------------------------------- news is fetched once a ticker for the whole pass
+def test_headlines_are_fetched_once_per_ticker_for_the_whole_pass(conn):
+    calls = []
+    _score(conn, [_sig("AAA"), _sig("AAA", n=4)], {"AAA": _stock_bars()},
+           news_fn=lambda t, s: calls.append((t, s)) or [])
+    assert calls.count(("AAA", "SEC")) == 1                       # two signals on one name: one fetch
+    assert ("CRYPTO:BTC", "CRYPTO") in calls and ("CRYPTO:ETH", "CRYPTO") in calls
+
+
+# ------------------------------------------------- the exit rules the user's positions read from here
+def test_the_exit_constants_and_the_activist_helper_positions_reads_are_here():
+    assert model.FALLBACK_STOP == {"stock": 0.15, "crypto": 0.25}
+    assert (model.DEAD_MONEY_BDAYS, model.DEAD_MONEY_MIN_RETURN, model.MAX_HOLD_DAYS) == (60, 0.05, 365)
+    assert model.STAKE_SOURCE == "SEC13DG" and callable(model._activist_cut) and callable(model.default_news)

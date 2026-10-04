@@ -48,6 +48,30 @@ def _b(text: str, html: bool) -> str:
     return f"<b>{_esc(text)}</b>" if html else text
 
 
+# ------------------------------------------------------------------ the signal line
+# Every automatic signal is one short message in the same shape (spec 2026-10-04-signal-message-style.md):
+# «🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, итог <b>−$24,00</b> (−10,4%)».
+DOT_GREEN, DOT_RED, DOT_NEUTRAL = "🟢", "🔴", "⚪"   # a buy or a gain / a loss or an unknown result / a neutral event
+
+
+def signal_line(dot: str, name: str, event: str, details: str | None = None, *,
+                result: str | None = None, extra: str | None = None, html: bool = True,
+                label: str = "итог") -> str:
+    """`{dot} <b>{name}!</b>: {event} — {details}`, and for a close `, итог <b>{result}</b>{extra}`.
+
+    `extra` follows the bold result as it is (a leading space and its brackets are the caller's:
+    « (−10,4%)»). `label` is what the result is called -- «итог», or «итог ≈» (a result on the last
+    price known). A part that is None or empty is left out, and
+    `extra` goes with the result alone. Every part is escaped; with html=False there are no tags
+    and nothing is escaped (the log, the menu)."""
+    text = f"{_e(dot, html)} {_b(f'{name}!', html)}: {_e(event, html)}"
+    if details:
+        text += f" — {_e(details, html)}"
+    if result:
+        text += f", {_e(label, html)} {_b(result, html)}{_e(extra or '', html)}"
+    return text
+
+
 def _chunk(text: str, size: int) -> list[str]:
     """Split a digest for Telegram's message limit, preferring signal boundaries.
 
@@ -330,29 +354,50 @@ def format_ticker_backtest(result: dict) -> str:
     return "\n".join(L)
 
 
+_CARRY_DOT = {"LONG": DOT_GREEN, "SHORT": DOT_RED, "FLAT": DOT_NEUTRAL}
+_CARRY_SIDE = {"LONG": "лонг", "SHORT": "шорт"}
+# carry_strategy.step's reasons, in words
+_CARRY_REASON = {"entry": "новый сигнал", "trailing stop": "сработал стоп", "signal off": "сигнал снят"}
+
+
+def _rate(x: float) -> str:
+    """An EURUSD rate to four places, a comma decimal: «1,1327»."""
+    return f"{x:.4f}".replace(".", ",")
+
+
+def _spread(x: float) -> str:
+    """A yield spread in percentage points, signed: «+0,35 п.п.», «−1,68 п.п.»."""
+    return f"{round(x, 2) or 0.0:+.2f}".replace(".", ",").replace("-", "−") + " п.п."
+
+
 def format_carry_signal(from_state: str, to_state: str, s: dict, *, reason: str,
                          level: float | None) -> str:
-    """A EURUSD carry-gated-strategy state change, from carry_strategy.py.
+    """An EURUSD carry-gated-strategy state change, from carry_strategy.py, as one signal line:
 
-    Deliberately not styled like the disclosure signals above (no score, no
-    buyer list) -- this is a different kind of thing, a price/rate-driven
-    trading rule rather than a disclosed transaction. States facts (today's
-    price, MA, rate spread, and the stop level) and says explicitly that
-    execution is manual, matching this project's stance everywhere else: no
-    verdict, no advice, no order placed on the user's behalf.
-    """
-    icon = {"LONG": "📈", "SHORT": "📉", "FLAT": "⚪️"}[to_state]
-    lines = [f"{icon} EURUSD carry-gated: {from_state} → {to_state} ({reason})"]
-    lines.append(f"   price {s['close']:.4f} · 200d MA {s['ma']:.4f} · "
-                 f"DE-US 2y spread {s['diff']:+.2f}pp")
-    if to_state in ("LONG", "SHORT") and level is not None:
-        lines.append(f"   initial stop ~{level:.4f} (6×ATR={s['atr']:.4f}) — set a "
-                      f"broker-side ATR trailing stop at this distance if you take it")
-    elif level is not None:
-        lines.append(f"   exit ~{level:.4f}")
-    lines.append("   Manual execution — backtested OOS PF 1.92 on 15 trades "
-                 "(small sample, see ~/forex-daytrader)")
-    return "\n".join(lines)
+        🟢 EURUSD!: вход в лонг (новый сигнал) — цена 1,2000, 200-дн. средняя 1,1500, спред DE-US 2 г.
+                    +0,35 п.п., стоп ~1,1520 (6×ATR)
+        🔴 EURUSD!: вход в шорт (новый сигнал) — ...
+        ⚪ EURUSD!: выход во флэт (сработал стоп) — цена 1,1600, выход ~1,1670
+
+    A price/rate-driven trading rule rather than a disclosed transaction, so it states facts only --
+    today's price, the average, the rate spread (DE 2y less US 2y), the stop level and where the
+    exit is -- with no verdict and no advice; execution is the user's. `reason` is carry_strategy's
+    own («entry», «trailing stop», «signal off»), put into words; one nobody translated is shown as
+    it is. What is not known (the average, the spread, the level) is left out. `from_state` is
+    only for the caller's own reading: the line is about where the strategy is now."""
+    why = _CARRY_REASON.get(reason, reason)
+    if to_state == "FLAT":
+        details = f"цена {_rate(s['close'])}" + (f", выход ~{_rate(level)}" if level is not None else "")
+        return signal_line(DOT_NEUTRAL, "EURUSD", f"выход во флэт ({why})", details)
+    facts = [f"цена {_rate(s['close'])}"]
+    if s.get("ma") is not None:
+        facts.append(f"200-дн. средняя {_rate(s['ma'])}")
+    if s.get("diff") is not None:
+        facts.append(f"спред DE-US 2 г. {_spread(s['diff'])}")
+    if level is not None:
+        facts.append(f"стоп ~{_rate(level)} (6×ATR)")
+    return signal_line(_CARRY_DOT[to_state], "EURUSD", f"вход в {_CARRY_SIDE[to_state]} ({why})",
+                       ", ".join(facts))
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -577,14 +622,41 @@ def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
     return "\n\n".join(parts) if len(parts) > 1 else parts[0]
 
 
-_CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution": "сигнал осторожности",
-                 "trailing_stop": "стоп от максимума", "activist_cut": "активист сократил долю",
-                 "dead_money": "стоит на месте",
-                 "time": "год в позиции", "trend_down": "тренд вниз", "news": "плохие новости"}
+# ------------------------------------------- the signals on the user's own positions (positions.py)
+def money_cents(x: float, currency: str | None = "EUR") -> str:
+    """A profit or loss to the cent, its sign before the currency: «+€8,30», «−$26,40», «+8,30 CHF»
+    for a currency with no sign of its own. No currency told is the euro, as money() has it."""
+    cents = round(abs(x), 2)
+    sign = "−" if x < 0 and cents else "+"
+    mark = _CURRENCY_SIGN.get(currency or "EUR")
+    return f"{sign}{mark}{_price(cents)}" if mark else f"{sign}{_price(cents)} {currency}"
+
+
+def position_result(entry: float, last: float, qty: float | None = None,
+                    currency: str | None = "EUR") -> tuple[str, str | None, bool]:
+    """How a real position stands, as signal_line shows it: (result, extra, gain).
+
+    With a quantity (a Trading 212 holding) the result is the money, in the position's own
+    currency -- no euro value is known here -- and `extra` the percent in brackets: «−$24,00»,
+    « (−10,4%)». Without one it is the percent alone: «−10,4%», None. `gain` is whether the
+    result, as shown, is zero or more (a green dot): it follows the rounded figure, so «+0,0%» is
+    never a loss."""
+    pct = last / entry - 1
+    if qty:
+        money = (last - entry) * qty
+        return money_cents(money, currency), f" ({signed_pct(pct)})", round(money, 2) >= 0
+    return signed_pct(pct), None, round(pct * 100, 1) >= 0
+
+
+# What a close alert says happened, by its trigger (positions.py).
+CLOSE_EVENT = {"trailing_stop": "сработал стоп", "insider_sell": "продаёт инсайдер",
+               "caution": "отток по монете", "trend_down": "тренд развернулся вниз",
+               "dead_money": "стоит на месте", "time": "год в позиции", "news": "плохие новости",
+               "activist_cut": "активист сократил долю"}
 
 
 def _position_name(pos) -> str:
-    """What a close alert and the menu's list call a position: its ticker -- but a Trading 212
+    """What the menu's list calls a position: its ticker -- but a Trading 212
     holding keyed by its ISIN by its Trading 212 symbol (SAP, not DE0007164600), the name its
     owner knows."""
     import positions        # light, and positions never imports this module
@@ -593,16 +665,78 @@ def _position_name(pos) -> str:
     return pos.ticker
 
 
+def _signal_name(pos) -> str:
+    """What a signal calls a position of the user's: a coin by its symbol (BTC), a Trading 212
+    holding by the name its owner knows (positions.name_of), anything else by its ticker."""
+    import positions
+    return positions.display_name(pos)
+
+
+# ---- the detail line of a sell alert
+# positions.py words an alert's detail for the log and the menu -- an ISO date, an English decimal point,
+# a comma between thousands. The message shows it the Russian way; the alert itself is not changed.
+_NUMBER = re.compile(r"(?<![\w.,])([-+−])?(\d{1,3}(?:,\d{3})+(?!\d)|\d+)(?:\.(\d+))?(?!\.?\d)")
+_ISO_DATE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+
+
+def _ru_number(m) -> str:
+    sign, whole, fraction = m.groups()
+    text = whole.replace(",", " ") + (f",{fraction}" if fraction else "")
+    return ("−" if sign == "-" else sign or "") + text
+
+
+def _short_date(m) -> str:
+    try:
+        return f"{dt.date.fromisoformat(m.group()):%d.%m}"
+    except ValueError:                  # 2026-13-45 is no date: left as it is
+        return m.group()
+
+
+def ru_text(text: str) -> str:
+    """`text` as the Russian message has its numbers and dates: a comma decimal, a space between
+    thousands, the real minus («-6.2%» is «−6,2%», «€1,050 млн» is «€1 050 млн»), and an ISO date
+    as DD.MM («2026-10-01» is «01.10»). A comma is a thousands separator only before exactly three
+    digits (a number already written the Russian way, «9,0%», stays); a date that is not an ISO
+    date is left alone. Numbers go first, so that the DD.MM it writes is not read as a decimal."""
+    return _ISO_DATE.sub(_short_date, _NUMBER.sub(_ru_number, text))
+
+
+# The triggers whose alert has a second line: who sold and when, what the outflow was, which headline.
+# For every other trigger the main line says it all.
+_DETAIL_TRIGGERS = ("insider_sell", "caution", "news")
+
+
+def alert_detail(alert) -> str | None:
+    """The second line of a sell alert, or None. Only an insider's sale, a coin's caution and bad
+    news have one -- the alert's own detail (positions.CloseAlert.detail), with its dates and numbers in
+    the Russian format (ru_text); a news headline is somebody else's text and is quoted as it is."""
+    if alert.trigger not in _DETAIL_TRIGGERS or not alert.detail:
+        return None
+    return alert.detail if alert.trigger == "news" else ru_text(alert.detail)
+
+
 def format_close_alert(alert, *, html: bool = True) -> str:
+    """The sell alert on a position of the user's (/bought or the Trading 212 account), one message:
+
+        🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, итог <b>−$24,00</b> (−10,4%)
+
+    The dot is green when the result is zero or more and red when it is a loss or there is no
+    price to tell it by (then «пора продавать: вход X» stands alone). A position with a quantity
+    gets its money result first (position_result), any other the percent. A second line, plain,
+    only for an insider's sale (who and when), a coin's caution (the outflow) and bad news (the
+    headline): see alert_detail. Every other alert is the one line."""
     pos = alert.position
-    reason = _CLOSE_REASON.get(alert.trigger, alert.trigger)
-    price = ""
-    if alert.last_price:
-        change = (alert.last_price / pos.entry_price - 1) * 100
-        price = f" · вход {pos.entry_price:,.2f} → {alert.last_price:,.2f} ({change:+.1f}%)"
-    head = f"🚪 {_position_name(pos)} — {reason}"
-    detail = f"{alert.detail}{price} · открыта {datefmt.fmt(pos.opened_at)}"
-    return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
+    event = CLOSE_EVENT.get(alert.trigger, alert.trigger)
+    details = f"пора продавать: вход {_price(pos.entry_price)}"
+    shown = None
+    if alert.last_price and pos.entry_price:
+        details += f" → сейчас {_price(alert.last_price)}"
+        shown = position_result(pos.entry_price, alert.last_price, pos.quantity, pos.currency)
+    dot = DOT_GREEN if shown and shown[2] else DOT_RED
+    line = signal_line(dot, _signal_name(pos), event, details, html=html,
+                       result=shown[0] if shown else None, extra=shown[1] if shown else None)
+    detail = alert_detail(alert)
+    return f"{line}\n   {_e(detail, html)}" if detail else line
 
 
 def format_positions(positions: list, price_fn) -> str:
@@ -619,7 +753,7 @@ def format_positions(positions: list, price_fn) -> str:
     return "\n".join(lines)
 
 
-# ------------------------------------------------------------------ the model portfolio
+# ------------------------------------------------------- numbers, and the model's scores
 _MAX_OTHER_STOCKS = 15
 
 
@@ -634,11 +768,6 @@ def money(x: float, currency: str | None = "EUR") -> str:
     minus = "−" if x < 0 and n else ""
     sign = _CURRENCY_SIGN.get(currency or "EUR")
     return f"{minus}{sign}{amount}" if sign else f"{minus}{amount} {currency}"
-
-
-def money_eur(x: float) -> str:
-    """«€9 800»: a space between thousands, a real minus sign."""
-    return money(x, "EUR")
 
 
 def signed_pct(x: float | None) -> str:
@@ -702,9 +831,8 @@ def format_scored(scored: list, *, html: bool = False) -> str:
 
 
 # ------------------------------------------------------- your own positions (/portfolio)
-_NO_POSITIONS = ("Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
-                 "Модельный портфель: /model.")
-_SELL_HINT = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть, /model — модельный портфель."
+_NO_POSITIONS = "Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10."
+_SELL_HINT = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть."
 
 
 def _price(x: float) -> str:
@@ -718,11 +846,10 @@ def quantity(x: float) -> str:
     return text.replace(",", " ").replace(".", ",")
 
 
-def _status_lines(pos, st: dict, model_holds: bool) -> list[str]:
-    """What stands under a position's own line: the stop (when there is a price), who it watches,
-    and whether the model holds it too. `st` is positions.position_status; its to_stop is how far
-    the price can still fall before the stop, and below the stop (negative) «ниже стопа на» shows
-    the same figure without its sign."""
+def _status_lines(pos, st: dict) -> list[str]:
+    """What stands under a position's own line: the stop (when there is a price) and who it watches.
+    `st` is positions.position_status; its to_stop is how far the price can still fall before the
+    stop, and below the stop (negative) «ниже стопа на» shows the same figure without its sign."""
     lines = []
     if st["last"] is not None:
         gap = (f"до стопа {share_pct(st['to_stop'])}" if st["to_stop"] >= 0
@@ -731,25 +858,23 @@ def _status_lines(pos, st: dict, model_holds: bool) -> list[str]:
                      f"{_price(st['peak'])}), {gap}")
     if pos.insiders:
         lines.append(f"   слежу за продажами: {', '.join(pos.insiders)}")
-    if model_holds:
-        lines.append("   модель тоже держит")
     return lines
 
 
-def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
+def _my_block(pos, st: dict, html: bool) -> str:
     """One position: how it stands now, then its status lines (_status_lines)."""
     now = (f"сейчас {_price(st['last'])} ({signed_pct(st['result'])})" if st["last"] is not None
            else "сейчас — цена недоступна")
     lines = [f"• {crypto.symbol_of(pos.ticker)}: вход {_price(pos.entry_price)} "
              f"({dt.date.fromisoformat(pos.opened_at):%d.%m}), {now}, {st['days']} дн."]
-    return "\n".join(_e(line, html) for line in lines + _status_lines(pos, st, model_holds))
+    return "\n".join(_e(line, html) for line in lines + _status_lines(pos, st))
 
 
 def my_position_blocks(rows: list, *, html: bool = True) -> list[str]:
-    """The positions of `rows` -- (Position, positions.position_status, model_holds) -- oldest
-    first, one block each (its lines joined by a newline)."""
+    """The positions of `rows` -- (Position, positions.position_status) -- oldest first, one block
+    each (its lines joined by a newline)."""
     ordered = sorted(rows, key=lambda r: (r[0].opened_at, r[0].id))
-    return [_my_block(pos, st, held, html) for pos, st, held in ordered]
+    return [_my_block(pos, st, html) for pos, st in ordered]
 
 
 # ---- the Trading 212 account in /portfolio (t212_account.portfolio_view builds what is shown)
@@ -833,9 +958,7 @@ def _t212_block(h, html: bool) -> str:
         parts.append(f"{h.days} дн.")
     lines = [f"• {h.name} — " + ", ".join(parts)]
     if h.position is not None and h.status is not None:
-        lines += _status_lines(h.position, h.status, h.model_holds)
-    elif h.model_holds:
-        lines.append("   модель тоже держит")
+        lines += _status_lines(h.position, h.status)
     return "\n".join(_e(line, html) for line in lines)
 
 
@@ -869,7 +992,7 @@ def format_my_portfolio(rows: list, *, html: bool = True, t212=None) -> str:
     account line and a block per holding, or why Trading 212 gave no answer -- and `rows`, the
     positions that are not in the account, follow under «✍️ Вне Trading 212». The average is
     then over both."""
-    results = [st["result"] for _pos, st, _held in rows if st["result"] is not None]
+    results = [st["result"] for _pos, st in rows if st["result"] is not None]
     if t212 is None:
         if not rows:
             return _NO_POSITIONS

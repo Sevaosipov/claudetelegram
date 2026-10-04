@@ -18,10 +18,10 @@ mode included), `--tools Bash` (no Read, Write, Glob, Grep or WebFetch, so .env 
 only the TradingView MCP server, `--permission-mode dontAsk` (whatever is not allowed is
 denied), and a shell allowed exactly three read commands, named by their absolute paths
 (ANALYST_CMD is `<BASE_DIR>/.venv/bin/python <BASE_DIR>/analyst.py`):
-    ANALYST_CMD context 'TICKER'     the model's score, the positions, the dossier
+    ANALYST_CMD context 'TICKER'     the model's score, the owner's position, the dossier
     ANALYST_CMD portfolio            the owner's positions (the Trading 212 account as the bot
-                                     last stored it, and /bought), the model summary, the
-                                     watchlist, today's buys
+                                     last stored it, and /bought), the buy signals of the last
+                                     30 days, the watchlist
     ANALYST_CMD news 'QUERY'         up to 10 Google News headlines with dates
 Each Claude runs in a fresh empty folder outside the project, removed after the run: the
 read-only shell commands Claude may run in its working directory without a rule find nothing
@@ -56,14 +56,12 @@ import assets
 import db
 import model
 import model_score
-import paper
-import paper_report
 import positions
+import prices
 import research
 import sources
 import t212_account
 import telegram_notify
-from telegram_notify import money_eur, signed_pct
 
 BASE_DIR = Path(__file__).resolve().parent
 CLAUDE_BIN = Path.home() / ".local" / "bin" / "claude"
@@ -114,6 +112,7 @@ TERMINATED_EXIT = 143           # 128 + SIGTERM: the analyst was stopped, and to
 CHILD_EXIT = 3                  # ask / process-queue started from inside the analyst's Claude
 KILL_GRACE_SECONDS = 3          # between SIGTERM and SIGKILL to a timed-out run's process group
 WATCHLIST_MAX = 10
+BUY_SIGNALS_DAYS = 30           # the buy signals the portfolio command lists: those sent in this many days
 NEWS_MAX = 10
 _DECISION = {model_score.BUY: "покупка", model_score.WATCH: "наблюдение",
              model_score.BLOCK: "блок", model_score.SKIP: "пропуск"}
@@ -553,8 +552,8 @@ def _quiet_lines(conn, ticker: str) -> list[str]:
             name, source = venue
         else:
             name, source = asset.symbol, positions.position_source(conn, asset.symbol)
-        listed = paper.listing(name, source)
-        closes = [c for _d, c in paper.Prices(None, dt.date.today()).bars(listed[0])] if listed else []
+        listed = prices.listing(name, source)
+        closes = [c for _d, c in prices.Prices(None, dt.date.today()).bars(listed[0])] if listed else []
         news_part, red = model_score.news_part(model.default_news(name, source))
     except Exception as e:
         return [f"  импульс и новости недоступны: {type(e).__name__}"]
@@ -593,15 +592,10 @@ def _model_lines(conn, scored: list, ticker: str) -> list[str]:
 
 
 def _position_lines(conn, ticker: str) -> list[str]:
+    """«ВАША ПОЗИЦИЯ (…)»: the owner's open positions in `ticker` -- read from the Trading 212 account or
+    recorded with /bought. The bot holds no portfolio of its own, so there is nothing else to say."""
     keys = _Spellings(ticker)
     lines = []
-    for code in model.BOOKS:
-        for p in paper.open_positions(conn, code):
-            if keys.matches(p["ticker"], p["source"]):
-                result = (p["last_value"] / p["cost_eur"] - 1
-                          if p["last_value"] is not None and p["cost_eur"] else None)
-                lines.append(f"МОДЕЛЬ ДЕРЖИТ: {code} с {p['fill_date']}, результат "
-                             f"{signed_pct(result)}, {_stop(p['stop_pct'])}")
     for p in positions.open_positions(conn):
         if keys.matches(p.ticker, p.source):
             held = p.origin == positions.T212         # read from the Trading 212 account, not /bought
@@ -645,7 +639,7 @@ def _score_today(conn, ticker: str | None = None) -> tuple[list | None, str | No
 
 def context(conn, ticker: str, *, scored=None) -> str:
     """What the bot knows about `ticker` (its key as the queue stores it, "$NVDA" included):
-    the model's score and decision, the model's and the user's positions in it, the dossier.
+    the model's score and decision, the user's position in it, the dossier.
     `scored` is model.score_today's list; else today's kept scores when they have the ticker,
     else that one ticker is scored now."""
     error = None
@@ -661,23 +655,23 @@ def context(conn, ticker: str, *, scored=None) -> str:
 
 
 # ---------------------------------------------------------------- portfolio, news
-def _buys_today(conn, today: dt.date) -> list[str]:
-    rows = conn.execute(
-        f"SELECT book, ticker, amount_eur, score, stop_pct FROM paper_orders "
-        f"WHERE created = ? AND side = 'buy' AND status IN ('pending', 'filled') "
-        f"AND book IN ({','.join('?' * len(model.BOOKS))}) ORDER BY id",
-        (today.isoformat(), *model.BOOKS)).fetchall()
+def _buy_signals(conn, today: dt.date) -> list[str]:
+    """«СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ:» and the weekly buy signals the bot sent in that time (the buy_signals
+    table: the day, the ticker, the score), the newest first; «…: нет» when there are none."""
+    since = (today - dt.timedelta(days=BUY_SIGNALS_DAYS)).isoformat()
+    rows = conn.execute("SELECT sent_at, ticker, score FROM buy_signals WHERE sent_at >= ? "
+                        "ORDER BY sent_at DESC, id DESC", (since,)).fetchall()
+    head = f"СИГНАЛЫ НА ПОКУПКУ ЗА {BUY_SIGNALS_DAYS} ДНЕЙ"
+    if not rows:
+        return [f"{head}: нет"]
     lines = []
-    for book, ticker, amount, score, stop in rows:
-        line = f"  • {ticker} ({book})"
-        if amount is not None:
-            line += f": {money_eur(amount)}"
-        if score is not None:
-            line += f", балл {_pts(score)}"
-        if stop:
-            line += f", {_stop(stop)}"
-        lines.append(line)
-    return lines
+    for sent_at, ticker, score in rows:
+        try:
+            day = dt.date.fromisoformat(sent_at).strftime("%d.%m")
+        except ValueError:
+            day = sent_at
+        lines.append(f"  • {day} {ticker}" + (f" — балл {_pts(score)}" if score is not None else ""))
+    return [f"{head}:"] + lines
 
 
 def _watchlist(scored: list) -> list[str]:
@@ -722,9 +716,10 @@ def _own_positions(conn, today: dt.date) -> list[str]:
 
 
 def portfolio(conn, *, scored=None) -> str:
-    """The owner's own positions (the Trading 212 account as stored, and /bought), then the model:
-    its summary, the stocks and coins it is watching and today's buys. `scored` is model.score_today's list; else today's kept
-    scores, else everything is scored now."""
+    """The owner's own positions (the Trading 212 account as stored, and /bought), then the buy signals the
+    bot sent in the last BUY_SIGNALS_DAYS days, then the stocks and coins its scoring is watching. The bot
+    holds no portfolio of its own: the account is the only one. `scored` is model.score_today's list; else
+    today's kept scores, else everything is scored now."""
     today = dt.date.today()
     error = None
     if scored is None:
@@ -733,10 +728,7 @@ def portfolio(conn, *, scored=None) -> str:
         scored, error = _score_today(conn)
     watch_lines = ([f"НАБЛЮДЕНИЕ: не посчитано: {error}"] if scored is None
                    else _watchlist(scored))
-    buys = _buys_today(conn, today)
-    buy_lines = ["ПОКУПКИ СЕГОДНЯ:"] + buys if buys else ["ПОКУПКИ СЕГОДНЯ: нет"]
-    return "\n".join(_own_positions(conn, today) + ["", paper_report.format_summary(conn, today), ""]
-                     + watch_lines + [""] + buy_lines)
+    return "\n".join(_own_positions(conn, today) + [""] + _buy_signals(conn, today) + [""] + watch_lines)
 
 
 def news(query: str) -> str:
@@ -777,10 +769,10 @@ def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="analyst.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
-    sub.add_parser("context", help="the model's score, positions and the dossier: context TICKER"
+    sub.add_parser("context", help="the model's score, your position and the dossier: context TICKER"
                    ).add_argument("ticker")
-    sub.add_parser("portfolio", help="your positions (Trading 212 as stored, /bought), model summary, "
-                                     "watchlist, today's buys")
+    sub.add_parser("portfolio", help="your positions (Trading 212 as stored, /bought), the buy signals of "
+                                     "the last 30 days, the watchlist")
     sub.add_parser("news", help="Google News headlines: news QUERY").add_argument("query", nargs="*")
     sub.add_parser("ask", help="ask the analyst from the terminal: ask TEXT").add_argument(
         "text", nargs="*")

@@ -468,19 +468,31 @@ def _watched(conn, key: str, source: str | None, insiders: list[str]) -> str:
 
 
 def _new_text(name: str, h: T212Position, watched: str) -> str:
-    esc = telegram_notify._esc
+    """«⚪ GME!: куплено в Trading 212 — 10 шт. по 23,10 USD, слежу: стоп, срок и новости»: a holding
+    that appeared in the account, with what is known of the lot and what the bot really watches
+    for it (_watched). The dot is white: it is news, not a signal to buy or sell."""
     lot = []
     if h.quantity is not None:
         lot.append(f"{telegram_notify.quantity(h.quantity)} шт.")
     entry = _entry(h)
     if entry is not None:
-        lot.append(f"по {telegram_notify._price(entry)}" + (f" {esc(h.currency)}" if h.currency else ""))
-    what = (" — " + " ".join(lot)).rstrip(".") if lot else ""
-    return f"📥 Вижу в Trading 212: {esc(name)}{what}. Слежу: {watched}."
+        lot.append(f"по {telegram_notify._price(entry)}" + (f" {h.currency}" if h.currency else ""))
+    details = f"{' '.join(lot)}, слежу: {watched}" if lot else f"слежу: {watched}"
+    return telegram_notify.signal_line(telegram_notify.DOT_NEUTRAL, name, "куплено в Trading 212", details)
 
 
-def _sold_text(name: str) -> str:
-    return f"📤 {telegram_notify._esc(name)} больше нет в Trading 212 — слежение закрыто."
+def _sold_text(name: str, pos: positions.Position | None = None, last_price: float | None = None) -> str:
+    """«⚪ GME!: продано в Trading 212 — слежение закрыто, итог ≈ +$9,50 (+4,1%)»: a holding the
+    account no longer has. The result is the last price known (`last_price`) against the average
+    price paid -- money first, in the holding's own currency, when its quantity is known -- and «≈»
+    says it is not the price it was sold at. Left out without a position or a price. The dot stays
+    white whatever the result."""
+    shown = None
+    if pos is not None and last_price and pos.entry_price:
+        shown = telegram_notify.position_result(pos.entry_price, last_price, pos.quantity, pos.currency)
+    return telegram_notify.signal_line(telegram_notify.DOT_NEUTRAL, name, "продано в Trading 212",
+                                       "слежение закрыто", label="итог ≈",
+                                       result=shown[0] if shown else None, extra=shown[1] if shown else None)
 
 
 def _first_text(names: list[str], legacy_since: str | None, day: str) -> str:
@@ -549,7 +561,7 @@ def _close_missing(conn, missing: list[positions.Position], holdings: list[T212P
                    summary: T212Summary | None, agrees: bool | None, unkeyed: int, now: dt.datetime,
                    result: SyncResult) -> list[str]:
     """Close the tracked positions the list did not show -- when the list can be believed
-    (`agrees`: _list_agrees). Returns the «📤» messages of those closed; the others go to
+    (`agrees`: _list_agrees). Returns the «продано» messages of those closed; the others go to
     result.held with result.note.
 
       the list adds up to the summary     every missing one was sold: closed;
@@ -585,7 +597,8 @@ def _close_missing(conn, missing: list[positions.Position], holdings: list[T212P
         conn.execute("UPDATE positions SET closed_at = ?, close_reason = ? WHERE id = ?",
                      (day, SOLD_REASON, pos.id))
         result.closed.append(pos.ticker)
-        texts.append(_sold_text(positions.display_name(pos)))
+        last = positions.t212_price(conn, pos.ticker, now.date())     # the sync's last fresh price of it
+        texts.append(_sold_text(positions.display_name(pos), pos, last))
     closed = {p.id for p in sold}
     kept = [p for p in missing if p.id not in closed]
     if kept:
@@ -1033,7 +1046,6 @@ class Holding:
     pnl_currency: str | None = None
     position: positions.Position | None = None
     status: dict | None = None
-    model_holds: bool = False
     opened: str = ""
     days: int | None = None
     price_date: str | None = None       # the day of a stored price too old to be one («цена на DD.MM»)
@@ -1057,15 +1069,6 @@ def _status(conn, pos: positions.Position, today: dt.date, price: float | None) 
     return positions.position_status(pos, today, price_fn=lambda ticker, source=None: price, conn=conn)
 
 
-def _model_holds(conn, ticker: str, source: str | None, held: set) -> bool:
-    """MODEL-S or MODEL-C holds the same name: the same key, or -- for a holding keyed by the ISIN
-    of an Oslo listing -- that listing, which is how the model holds a Norwegian company."""
-    if positions._asset_key(ticker, source) in held:
-        return True
-    oslo = positions.oslo_ticker(conn, ticker) if source == positions.T212_SOURCE else None
-    return bool(oslo) and positions._asset_key(oslo, "NORWAY") in held
-
-
 def _days_held(created: str | None, today: dt.date) -> int | None:
     """Days since Trading 212's purchase date, or None when it isn't known."""
     try:
@@ -1079,7 +1082,6 @@ def stored_holdings(conn, today: dt.date) -> list[Holding]:
     average from the positions, the price from the last stored day price, the profit or loss in
     the instrument's own currency (the account's is only known live). A stored price older than
     STALE_DAYS is not a price: it is shown with its date, and the status has none."""
-    held = positions._model_names(conn)
     rows = []
     for pos in positions.open_positions(conn):
         if pos.origin != positions.T212:
@@ -1094,7 +1096,6 @@ def stored_holdings(conn, today: dt.date) -> list[Holding]:
             pnl=(price - pos.entry_price) * pos.quantity if known else None,
             pnl_currency=pos.currency if known else None, position=pos,
             status=_status(conn, pos, today, None if stale else price),
-            model_holds=_model_holds(conn, pos.ticker, pos.source, held),
             opened=pos.t212_created or pos.opened_at, days=_days_held(pos.t212_created, today),
             price_date=price_day if stale else None))
     return rows
@@ -1161,24 +1162,31 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
     except BaseException:
         conn.rollback()
         raise
-    held = positions._model_names(conn)
     rows = []
     for h, key, pos in found:
         created = _created_date(h.created_at) or (pos.t212_created if pos else None)
         if pos is not None:
-            name, where = positions.display_name(pos), (pos.ticker, pos.source)
+            name = positions.display_name(pos)
         else:
             name = positions.name_of(key[0], key[1], h.t212_ticker) if key else _untracked_name(h)
-            where = key
         price = h.current_price if h.current_price is not None and h.current_price > 0 else None
         rows.append(Holding(
             name=name, quantity=h.quantity, avg_price=h.avg_price, price=price,
             currency=h.currency, pnl=h.pnl_eur,
             pnl_currency=h.account_currency or (summary.currency if summary else None),
             position=pos, status=_status(conn, pos, today, price) if pos else None,
-            model_holds=bool(where) and _model_holds(conn, where[0], where[1], held),
             opened=created or (pos.opened_at if pos else ""), days=_days_held(created, today)))
     return PortfolioView(rows, summary=summary)
+
+
+def portfolio_text(conn, today: dt.date, *, html: bool = True) -> str:
+    """What /portfolio says, and the menu's «Мой портфель»: «💼 Trading 212» -- the account, asked live
+    (portfolio_view; or what the last sync stored, with why) -- then the positions recorded with /bought
+    (positions.portfolio_rows), as telegram_notify.format_my_portfolio writes them. Plain text with
+    html=False. The bot holds no portfolio of its own: this is the whole of it."""
+    view = portfolio_view(conn, today)
+    rows = positions.portfolio_rows(conn, today, origin=positions.MANUAL)
+    return telegram_notify.format_my_portfolio(rows, html=html, t212=view)
 
 
 # ------------------------------------------------------------------ command line
