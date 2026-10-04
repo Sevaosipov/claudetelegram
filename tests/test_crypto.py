@@ -456,12 +456,72 @@ def test_farside_page_without_a_table_is_empty():
     assert crypto_etf.parse_farside("BTC", "<html>redesigned</html>") == []
 
 
+SOL_FUNDS = {"BSOL", "FSOL", "GSOL", "MSOL", "SOEZ", "TSOL", "VSOL"}
+
+
+def test_farside_sol_page_parses_its_seven_funds():
+    flows = crypto_etf.parse_farside("SOL", fixture_text("farside_sol_snippet.html"))
+    assert {f.coin for f in flows} == {"SOL"} and {f.fund for f in flows} == SOL_FUNDS
+    assert len(flows) == 5 * 7 - 1                              # SOEZ shows "-" on 21 Sep: no figure yet
+    by = {(f.date, f.fund): f.flow_usd for f in flows}
+    assert ("2026-09-21", "SOEZ") not in by
+    assert by[("2026-09-24", "BSOL")] == pytest.approx(-5.0e6)     # outflows are in parentheses
+    assert by[("2026-09-25", "BSOL")] == pytest.approx(60.2e6)
+    assert by[("2026-09-23", "GSOL")] == pytest.approx(-3.2e6)
+    for day, total in (("2026-09-21", 16.2e6), ("2026-09-22", 37.6e6), ("2026-09-23", 64.6e6),
+                       ("2026-09-24", -8.5e6), ("2026-09-25", 90.0e6)):
+        assert sum(v for (d, _f), v in by.items() if d == day) == pytest.approx(total)
+    assert sorted({f.date for f in flows}) == [f"2026-09-{d}" for d in (21, 22, 23, 24, 25)]   # no Total/Average rows
+
+
+class _PageSession:
+    """Answers every GET with the SOL fixture and remembers which URL was asked."""
+    def __init__(self):
+        self.urls = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.urls.append(url)
+        return _resp(200, fixture_text("farside_sol_snippet.html"))
+
+
+def test_sol_is_a_farside_coin_with_no_all_data_page():
+    assert crypto_etf.FARSIDE_URLS["SOL"] == "https://farside.co.uk/sol/"
+    assert "SOL" not in crypto_etf.FARSIDE_ALL_URLS
+    assert crypto_etf.FARSIDE_URLS["BTC"] == "https://farside.co.uk/btc/"
+    assert crypto_etf.FARSIDE_URLS["ETH"] == "https://farside.co.uk/eth/"
+
+
+def test_the_full_history_of_sol_is_the_recent_page():
+    session = _PageSession()
+    flows = crypto_etf.fetch_farside("SOL", full_history=True, session=session)
+    assert session.urls == ["https://farside.co.uk/sol/"] and len(flows) == 34
+    assert {f.coin for f in flows} == {"SOL"}
+
+
+def test_the_recent_page_of_sol_is_the_recent_page():
+    session = _PageSession()
+    crypto_etf.fetch_farside("SOL", session=session)
+    assert session.urls == ["https://farside.co.uk/sol/"]
+
+
+def test_bitcoin_and_ether_still_have_their_all_data_pages():
+    session = _PageSession()
+    crypto_etf.fetch_farside("BTC", full_history=True, session=session)
+    crypto_etf.fetch_farside("ETH", full_history=True, session=session)
+    crypto_etf.fetch_farside("BTC", session=session)
+    assert session.urls == ["https://farside.co.uk/bitcoin-etf-flow-all-data/",
+                            "https://farside.co.uk/ethereum-etf-flow-all-data/", "https://farside.co.uk/btc/"]
+
+
 def test_etf_flows_are_stored_and_the_newest_day_is_rewritten(conn):
     db.save_etf_flows(conn, [crypto_etf.Flow("BTC", "2026-09-25", "IBIT", 1e6)])
     db.save_etf_flows(conn, [crypto_etf.Flow("BTC", "2026-09-25", "IBIT", 5e6)])   # late funds filled in
     assert conn.execute("SELECT flow_usd FROM crypto_etf_flows").fetchall() == [(5e6,)]
     assert db.etf_flow_count(conn, "BTC") == 1 and db.etf_flow_count(conn, "ETH") == 0
     assert db.etf_flow_latest(conn, "BTC") == "2026-09-25" and db.etf_flow_latest(conn, "ETH") is None
+
+
+_FUND = {"BTC": "IBIT", "ETH": "ETHA", "SOL": "BSOL"}
 
 
 def _farside(calls=None, down=()):
@@ -472,7 +532,7 @@ def _farside(calls=None, down=()):
             calls.append((coin, full_history))
         if coin in down:
             raise crypto_etf.requests.RequestException("down")
-        return [crypto_etf.Flow(coin, _days_ago(1), "IBIT" if coin == "BTC" else "ETHA", 1e6)]
+        return [crypto_etf.Flow(coin, _days_ago(1), _FUND[coin], 1e6)]
     return fetch
 
 
@@ -482,14 +542,34 @@ def test_etf_pass_loads_the_full_history_once(conn, monkeypatch):
     monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(calls))
     passes.run_farside_pass(conn, None)
     passes.run_farside_pass(conn, None)
-    assert calls == [("BTC", True), ("ETH", True), ("BTC", False), ("ETH", False)]
+    assert calls == [("BTC", True), ("ETH", True), ("SOL", True),
+                     ("BTC", False), ("ETH", False), ("SOL", False)]
+
+
+def test_etf_pass_includes_sol(conn, monkeypatch):
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside())
+    assert list(crypto_etf.FARSIDE_URLS) == ["BTC", "ETH", "SOL"]
+    assert passes.run_farside_pass(conn, None) == 3
+    assert db.etf_flow_count(conn, "SOL") == 1 and db.etf_flow_latest(conn, "SOL") == _days_ago(1)
+
+
+def test_the_first_sol_run_says_it_read_the_recent_page_not_the_full_history(conn, monkeypatch, capsys):
+    """SOL has no all-data page: its history is built day by day, so the log must not claim a full one."""
+    import passes
+    monkeypatch.setattr(crypto_etf, "fetch_farside", _farside())
+    passes.run_farside_pass(conn, None)
+    out = capsys.readouterr().out
+    assert "Farside BTC: 1 fund-day(s) (full history)" in out
+    assert "Farside SOL: 1 fund-day(s)\n" in out and "Farside SOL: 1 fund-day(s) (full history)" not in out
 
 
 def test_etf_pass_survives_farside_being_down(conn, monkeypatch):
     import passes
     monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(down={"BTC"}))
-    assert passes.run_farside_pass(conn, None) == 1                  # ETH still collected
+    assert passes.run_farside_pass(conn, None) == 2                  # ETH and SOL still collected
     assert db.etf_flow_count(conn, "BTC") == 0 and db.etf_flow_count(conn, "ETH") == 1
+    assert db.etf_flow_count(conn, "SOL") == 1
 
 
 def test_farside_pass_fails_when_every_coin_is_down(conn, monkeypatch):
@@ -506,7 +586,7 @@ def test_farside_pass_reloads_the_history_after_a_gap(conn, monkeypatch):
                              crypto_etf.Flow("ETH", _days_ago(10), "ETHA", 1e6)])
     monkeypatch.setattr(crypto_etf, "fetch_farside", _farside(calls))
     passes.run_farside_pass(conn, None)
-    assert calls == [("BTC", True), ("ETH", False)]
+    assert calls == [("BTC", True), ("ETH", False), ("SOL", True)]     # SOL has nothing stored yet
 
 
 def test_farside_page_parsing_to_nothing_is_reported(conn, monkeypatch, capsys):
@@ -524,7 +604,7 @@ def test_an_ishares_failure_does_not_stop_farside(conn, monkeypatch):
     monkeypatch.setattr(crypto_etf, "fetch_snapshots", ishares_down)
     monkeypatch.setattr(crypto_etf, "fetch_farside", _farside())
     assert bot._run_source("CRYPTO_ETF", passes.run_crypto_etf_pass, conn, None) is None
-    assert bot._run_source("CRYPTO_ETF_FARSIDE", passes.run_farside_pass, conn, None) == 2
+    assert bot._run_source("CRYPTO_ETF_FARSIDE", passes.run_farside_pass, conn, None) == 3
     assert db.etf_flow_count(conn, "BTC") == 1 and db.etf_flow_count(conn, "ETH") == 1
 
 
@@ -604,6 +684,89 @@ def test_under_30_days_of_history_uses_the_fixed_thresholds(conn):
     _add_farside(conn, "BTC", [10, -10] * 5 + [450])
     [sig] = cluster.find_etf_flow_signals(conn)
     assert "порог по умолчанию: мало истории" in sig.details
+
+
+# ----- the bars are per coin: SOL's funds are an order of magnitude smaller than bitcoin's
+def test_the_thresholds_are_per_coin_dicts_with_a_default():
+    from cluster import crypto as cc
+    assert cc.ETF_DAY_FLOW_USD["SOL"] == 50e6 and cc.ETF_STREAK_MIN_USD["SOL"] == 100e6
+    assert cc.ETF_DAY_FLOOR_USD["SOL"] == 25e6 and cc.ETF_STREAK_FLOOR_USD["SOL"] == 60e6
+    for table, value in ((cc.ETF_DAY_FLOW_USD, 400e6), (cc.ETF_STREAK_MIN_USD, 500e6),
+                         (cc.ETF_DAY_FLOOR_USD, 100e6), (cc.ETF_STREAK_FLOOR_USD, 250e6)):
+        assert table["BTC"] == table["ETH"] == table["default"] == value
+
+
+def test_a_60m_sol_day_with_under_30_days_of_history_is_a_signal(conn):
+    _add_farside(conn, "SOL", [1, -1] * 5 + [60], fund="BSOL")
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.ticker == "CRYPTO:SOL" and sig.bullish and sig.url == "https://farside.co.uk/sol/"
+    assert sig.company == "спот-ETF США, фондов: 1"
+    assert sig.details[0].startswith(f"за {_days_ago(1)}: +$60 млн")
+    assert "порог по умолчанию: мало истории" in sig.details
+
+
+def test_a_30m_sol_day_with_under_30_days_of_history_is_not(conn):
+    _add_farside(conn, "SOL", [1, -1] * 5 + [30], fund="BSOL")
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_the_fixed_day_bar_of_sol_is_50m_and_bitcoins_stays_400m(conn):
+    _add_farside(conn, "SOL", [1, -1] * 5 + [49], fund="BSOL")
+    _add_farside(conn, "BTC", [10, -10] * 5 + [399])
+    assert cluster.find_etf_flow_signals(conn) == []
+    _add_farside(conn, "SOL", [1, -1] * 5 + [50], fund="BSOL")
+    _add_farside(conn, "BTC", [10, -10] * 5 + [400])
+    assert sorted(s.ticker for s in cluster.find_etf_flow_signals(conn)) == ["CRYPTO:BTC", "CRYPTO:SOL"]
+
+
+def test_a_sol_outflow_day_is_a_caution(conn):
+    _add_farside(conn, "SOL", [1, -1] * 5 + [-60], fund="BSOL")
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.ticker == "CRYPTO:SOL" and not sig.bullish
+
+
+def test_the_fixed_three_day_bar_of_sol_is_100m_and_bitcoins_stays_500m(conn):
+    _add_farside(conn, "SOL", [-1, 1] * 5 + [-35, -35, -35], fund="BSOL")        # $105m over three days
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.ticker == "CRYPTO:SOL" and not sig.bullish and "3 дн. подряд оттока, всего $105 млн" in sig.details[1]
+    conn.execute("DELETE FROM crypto_etf_flows")
+    _add_farside(conn, "SOL", [-1, 1] * 5 + [-30, -30, -30], fund="BSOL")        # $90m: under it
+    _add_farside(conn, "BTC", [-1, 1] * 5 + [-160, -160, -160])                   # $480m: under bitcoin's
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_the_relative_day_rule_uses_sol_floors(conn):
+    """Top of its history and over SOL's $25m floor -- though far under the $100m floor of bitcoin."""
+    _add_farside(conn, "SOL", [5, -4] * 30 + [30], fund="BSOL")
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.ticker == "CRYPTO:SOL" and "больше, чем в 100% из 60 дней" in sig.details[0]
+    conn.execute("DELETE FROM crypto_etf_flows")
+    _add_farside(conn, "SOL", [5, -4] * 30 + [20], fund="BSOL")                   # top of its history, under $25m
+    assert cluster.find_etf_flow_signals(conn) == []
+    conn.execute("DELETE FROM crypto_etf_flows")
+    _add_farside(conn, "BTC", [5, -4] * 30 + [30])                                # the same $30m on bitcoin: nothing
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_the_relative_streak_rule_uses_sol_floors(conn):
+    _add_farside(conn, "SOL", [-3, 3] * 30 + [-20, -20, -20], fund="BSOL")        # $60m: SOL's floor
+    [sig] = cluster.find_etf_flow_signals(conn)
+    assert sig.ticker == "CRYPTO:SOL" and "3 дн. подряд оттока, всего $60 млн" in sig.details[1]
+    conn.execute("DELETE FROM crypto_etf_flows")
+    _add_farside(conn, "SOL", [-3, 3] * 30 + [-15, -15, -15], fund="BSOL")        # $45m: under it
+    assert cluster.find_etf_flow_signals(conn) == []
+
+
+def test_a_stale_sol_has_no_issuer_page_to_fall_back_to_and_says_nothing(conn):
+    _add_farside(conn, "SOL", [5, -4] * 30 + [900], fund="BSOL", newest_days_ago=10)
+    assert cluster.find_etf_flow_signals(conn) == []
+    assert cluster.daily_etf_flows(conn)["SOL"][-1][0] == _days_ago(10)
+
+
+def test_an_explicit_fixed_bar_still_overrides_every_coin(conn):
+    _add_farside(conn, "SOL", [1, -1] * 5 + [30], fund="BSOL")
+    assert cluster.find_etf_flow_signals(conn) == []
+    assert [s.ticker for s in cluster.find_etf_flow_signals(conn, day_flow_usd=20e6)] == ["CRYPTO:SOL"]
 
 
 def test_stale_farside_falls_back_to_the_issuer_snapshots(conn):

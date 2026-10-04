@@ -514,7 +514,8 @@ FARSIDE_RELOAD_GAP_DAYS = 10
 def run_farside_pass(conn, args) -> int:
     """Every US spot fund's daily flows from Farside (crypto_etf.py) -- the whole
     history when nothing is stored for a coin or its newest stored day is more than
-    FARSIDE_RELOAD_GAP_DAYS old, the recent table otherwise. Returns how many
+    FARSIDE_RELOAD_GAP_DAYS old, the recent table otherwise (SOL has no all-data page: it
+    always reads the recent one and builds its history day by day). Returns how many
     fund-day rows were parsed, so a redesign that parses to nothing shows up as a
     silent source; raises when every coin's fetch failed, so the run reports it."""
     today = dt.date.today()
@@ -534,7 +535,8 @@ def run_farside_pass(conn, args) -> int:
             continue
         db.save_etf_flows(conn, flows)
         parsed += len(flows)
-        print(f"[CRYPTO] Farside {coin}: {len(flows)} fund-day(s)" + (" (full history)" if full else ""))
+        print(f"[CRYPTO] Farside {coin}: {len(flows)} fund-day(s)"
+              + (" (full history)" if full and coin in crypto_etf.FARSIDE_ALL_URLS else ""))
     if failed and failed == len(crypto_etf.FARSIDE_URLS):
         raise RuntimeError("Farside unavailable for every coin")
     return parsed

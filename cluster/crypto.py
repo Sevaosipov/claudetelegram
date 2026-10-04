@@ -42,14 +42,16 @@ TREASURY_WINDOW_DAYS = 14
 # the coin's own recent days -- the top 10% of the previous ETF_HISTORY_DAYS, with a
 # floor -- because the market grows and a fixed dollar bar goes stale. The fixed
 # bars apply only while there are fewer than ETF_MIN_HISTORY_DAYS stored days.
-ETF_DAY_FLOW_USD = 400e6
+# The dollar bars are per coin (etf_bar): SOL's funds are an order of magnitude smaller than
+# bitcoin's, and a coin not named takes "default" -- bitcoin's and ether's numbers.
+ETF_DAY_FLOW_USD = {"BTC": 400e6, "ETH": 400e6, "SOL": 50e6, "default": 400e6}        # fixed day bar
 ETF_STREAK_DAYS = 3
-ETF_STREAK_MIN_USD = 500e6
+ETF_STREAK_MIN_USD = {"BTC": 500e6, "ETH": 500e6, "SOL": 100e6, "default": 500e6}     # fixed 3-day bar
 ETF_MAX_AGE_DAYS = 7       # don't resurface a flow from a day this old
 ETF_HISTORY_DAYS = 126     # about six months of trading days
 ETF_MIN_HISTORY_DAYS = 30
-ETF_DAY_FLOOR_USD = 100e6
-ETF_STREAK_FLOOR_USD = 250e6
+ETF_DAY_FLOOR_USD = {"BTC": 100e6, "ETH": 100e6, "SOL": 25e6, "default": 100e6}       # day floor, relative rule
+ETF_STREAK_FLOOR_USD = {"BTC": 250e6, "ETH": 250e6, "SOL": 60e6, "default": 250e6}    # 3-day floor, relative rule
 TOP_DECILE = 0.9
 # Farside has trading-day rows only, so its staleness is counted in business days.
 FARSIDE_STALE_BUSINESS_DAYS = 3
@@ -316,17 +318,24 @@ def _daily_etf_flows(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
 daily_etf_flows = _daily_etf_flows   # public name for the crypto dossier (crypto_research.py)
 
 
-def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
+def etf_bar(table: dict[str, float], coin: str) -> float:
+    """The coin's own entry of a per-coin ETF bar (ETF_DAY_FLOW_USD ...), else the table's default."""
+    return table.get(coin, table["default"])
+
+
+def find_etf_flow_signals(conn, day_flow_usd: float | None = None,
                           streak_days: int = ETF_STREAK_DAYS,
-                          streak_min_usd: float = ETF_STREAK_MIN_USD,
+                          streak_min_usd: float | None = None,
                           ignore_alert_state: bool = False,
                           today: dt.date | None = None) -> list[CryptoSignal]:
     """An unusual day, or an unusual run of same-direction days, judged on the most
     recent day only so an old flow never resurfaces. Unusual = the top 10% of the
     previous ETF_HISTORY_DAYS (a day against days, a streak against 3-day totals),
-    and at least the floor; with under ETF_MIN_HISTORY_DAYS of history the fixed
-    day_flow_usd / streak_min_usd apply instead. An inflow is a buy signal, an
-    outflow a caution signal (journaled as `caution`, see bot._journal)."""
+    and at least the coin's floor (ETF_DAY_FLOOR_USD / ETF_STREAK_FLOOR_USD); with under
+    ETF_MIN_HISTORY_DAYS of history the coin's fixed bars (ETF_DAY_FLOW_USD /
+    ETF_STREAK_MIN_USD) apply instead -- or `day_flow_usd` / `streak_min_usd`, when given, for
+    every coin. An inflow is a buy signal, an outflow a caution signal (journaled as
+    `caution`, see bot._journal)."""
     today = today or dt.date.today()
     signals = []
     for coin, (source, days) in etf_flow_days(conn, today).items():
@@ -350,10 +359,12 @@ def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
         three_day = [abs(history[i][1] + history[i - 1][1] + history[i - 2][1])
                      for i in range(2, len(history))]
         if relative:
-            day_bar = max(_p90(day_sizes), ETF_DAY_FLOOR_USD)
-            streak_bar = max(_p90(three_day), ETF_STREAK_FLOOR_USD)
+            day_bar = max(_p90(day_sizes), etf_bar(ETF_DAY_FLOOR_USD, coin))
+            streak_bar = max(_p90(three_day), etf_bar(ETF_STREAK_FLOOR_USD, coin))
         else:
-            day_bar, streak_bar = day_flow_usd, streak_min_usd
+            day_bar = day_flow_usd if day_flow_usd is not None else etf_bar(ETF_DAY_FLOW_USD, coin)
+            streak_bar = (streak_min_usd if streak_min_usd is not None
+                          else etf_bar(ETF_STREAK_MIN_USD, coin))
 
         keys, details = [], []
         if abs(last_flow) >= day_bar:
