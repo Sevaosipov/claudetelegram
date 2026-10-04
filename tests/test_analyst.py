@@ -26,7 +26,6 @@ import research
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REAL_LOAD_ENV = analyst.load_env        # the autouse fixture below replaces the module's own
 REAL_ENV_PATH = analyst._env_path       # ... and points this at a file that doesn't exist
-S, C = model.STOCK_BOOK, model.CRYPTO_BOOK
 
 
 # ------------------------------------------------------------------ builders
@@ -97,22 +96,31 @@ def _stub_scoring(monkeypatch, scores, seen=None):
     return seen
 
 
-def _paper_position(conn, code, ticker, *, fill="2026-09-25", cost=8_000.0, last=8_400.0, stop=0.10,
-                    source="SEC"):
-    conn.execute(
-        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-        "net_eur, entry_close, entry_fx, reason, last_value, stop_pct, score) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (code, ticker, source, ticker, "USD", fill, cost, cost * 0.998, 10.0, 1.16, "балл 64", last,
-         stop, 64.0))
+def _signalled(conn, ticker, days_ago=0, score=70.0, *, source="SEC", kind="stock"):
+    """A buy signal the weekly run sent `days_ago` days ago (a buy_signals row)."""
+    conn.execute("INSERT INTO buy_signals (ticker, source, company, kind, score, stop_pct, reasons, t212, sent_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)",
+                 (ticker, source, f"{ticker} Corp", kind, score, 0.10, "[]", 1,
+                  (dt.date.today() - dt.timedelta(days=days_ago)).isoformat()))
     conn.commit()
 
 
-def _paper_order(conn, code, ticker, created, side="buy", score=64.0):
-    conn.execute(
-        "INSERT INTO paper_orders (book, ticker, source, side, amount_eur, reason, created, status, "
-        "score) VALUES (?,?,?,?,?,?,?,?,?)",
-        (code, ticker, "SEC", side, 9_000.0, "балл 64", created, "pending", score))
+def _day(days_ago: int) -> str:
+    """How the portfolio command writes the day of a signal sent `days_ago` days ago."""
+    return (dt.date.today() - dt.timedelta(days=days_ago)).strftime("%d.%m")
+
+
+def _old_virtual_books(conn):
+    """The rows the removed virtual portfolio left in the database: nothing reads them any more."""
+    conn.execute("INSERT INTO paper_books (code, sleeve, start_date, start_eur, cash_eur, bench_symbol) "
+                 "VALUES ('MODEL-S', 'stock', '2026-09-01', 70000, 60000, 'SPY')")
+    conn.execute("INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+                 "net_eur, entry_close, entry_fx, reason, last_value, stop_pct, score) VALUES "
+                 "('MODEL-S', 'NVDA', 'SEC', 'NVDA', 'USD', '2026-09-25', 8000, 7984, 10, 1.16, 'балл 64', 8400, "
+                 "0.12, 64)")
+    conn.execute("INSERT INTO paper_orders (book, ticker, source, side, amount_eur, reason, created, status, "
+                 "score) VALUES ('MODEL-S', 'AAA', 'SEC', 'buy', 9000, 'балл 64', ?, 'pending', 64)",
+                 (dt.date.today().isoformat(),))
     conn.commit()
 
 
@@ -830,20 +838,17 @@ def test_context_scoring_failure_does_not_lose_the_dossier(conn, dossier, monkey
     assert "БРИФ NVDA" in out
 
 
-def test_context_lists_the_models_position_and_the_users(conn, dossier):
-    model.create_books(conn, dt.date(2026, 9, 1))
-    _paper_position(conn, S, "NVDA", fill="2026-09-25", cost=8_000.0, last=8_400.0, stop=0.12)
-    _paper_position(conn, C, "CRYPTO:BTC", fill="2026-09-20", cost=5_000.0, last=4_500.0, stop=0.2)
+def test_context_lists_your_position_and_nothing_of_the_old_virtual_books(conn, dossier):
+    _old_virtual_books(conn)                                         # the removed portfolio holds NVDA in its rows
     conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, stop_pct) "
                  "VALUES ('NVDA', 'SEC', '2026-09-28', 100.0, '[]', 0.15)")
     conn.commit()
     out = analyst.context(conn, "$NVDA", scored=[])
-    assert "MODEL-S" in out and "с 2026-09-25" in out and "+5,0%" in out and "стоп −12%" in out
     assert "/bought" in out and "2026-09-28" in out and "100" in out and "стоп −15%" in out
-    coin = analyst.context(conn, "BTC", scored=[])
-    assert "MODEL-C" in coin and "с 2026-09-20" in coin and "−10,0%" in coin
+    assert "МОДЕЛЬ ДЕРЖИТ" not in out and "MODEL-S" not in out and "2026-09-25" not in out
     none = analyst.context(conn, "AAPL", scored=[])
-    assert "MODEL-S" not in none and "/bought" not in none
+    assert "/bought" not in none and "МОДЕЛЬ ДЕРЖИТ" not in none
+    assert "МОДЕЛЬ: " in out                                         # the score part stays
 
 
 def test_context_not_a_ticker(conn, monkeypatch):
@@ -866,30 +871,44 @@ def test_context_dossier_failure_is_named_but_not_fatal(conn, monkeypatch):
 
 
 # ------------------------------------------------------------------ portfolio / news
-def test_portfolio_has_the_summary_the_watchlist_and_todays_buys(conn):
-    model.create_books(conn, dt.date(2026, 9, 1))
-    today = dt.date.today().isoformat()
-    _paper_order(conn, S, "AAA", today)
-    _paper_order(conn, C, "CRYPTO:BTC", today)
-    _paper_order(conn, S, "OLD", "2020-01-01")
-    _paper_order(conn, S, "SOLD", today, side="sell")
-    _paper_order(conn, "R1-E1", "ARCH", today)           # an archived book is not the model
+def test_portfolio_has_the_buy_signals_of_the_last_30_days_newest_first(conn):
+    _signalled(conn, "OLD", 31, 80.0)                                # a day too old
+    _signalled(conn, "EDGE", 30, 61.0)                               # the 30th day still counts
+    _signalled(conn, "CRYPTO:BTC", 12, 75.0, source="CRYPTO", kind="crypto")
+    _signalled(conn, "AAA", 0, 70.0)
+    _signalled(conn, "BBB", 0, 64.4)                                 # the same day: the later row first
+    out = analyst.portfolio(conn, scored=[])
+    section = out.split("СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ:\n")[1].split("\n\n")[0]
+    assert section.splitlines() == [f"  • {_day(0)} BBB — балл 64", f"  • {_day(0)} AAA — балл 70",
+                                    f"  • {_day(12)} CRYPTO:BTC — балл 75", f"  • {_day(30)} EDGE — балл 61"]
+    assert "OLD" not in out
+
+
+def test_portfolio_sections_come_in_order_positions_then_signals_then_the_watchlist(conn):
+    _signalled(conn, "AAA", 2)
     scored = [_stock("BBB", 52.0, model_score.WATCH, reasons=["один инсайдер", "растёт"]),
               _stock("CCC", 70.0, model_score.BUY), _coin("ETH", 50.0, model_score.WATCH)]
     out = analyst.portfolio(conn, scored=scored)
-    assert "Модельный портфель" in out
-    assert "НАБЛЮДЕНИЕ:" in out and "BBB" in out and "52" in out and "один инсайдер" in out
-    assert "ETH" in out
-    watch = out.split("НАБЛЮДЕНИЕ:")[1].split("ПОКУПКИ СЕГОДНЯ:")[0]
-    assert "CCC" not in watch                              # a buy is not on the watchlist
-    buys = out.split("ПОКУПКИ СЕГОДНЯ:")[1]
-    assert "AAA" in buys and "CRYPTO:BTC" in buys
-    assert "OLD" not in buys and "SOLD" not in buys and "ARCH" not in buys
+    assert out.index("ВАШИ ПОЗИЦИИ") < out.index("СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ") < out.index("НАБЛЮДЕНИЕ:")
+    assert "НАБЛЮДЕНИЕ:" in out and "BBB" in out and "52" in out and "один инсайдер" in out and "ETH" in out
+    watch = out.split("НАБЛЮДЕНИЕ:")[1]
+    assert "CCC" not in watch                                        # a buy is not on the watchlist
+    assert out.count("\n\n") == 2                                   # a blank line between the three sections
+
+
+def test_portfolio_has_nothing_of_the_old_model_portfolio(conn):
+    _old_virtual_books(conn)
+    out = analyst.portfolio(conn, scored=[])
+    for gone in ("Модельный портфель", "MODEL-S", "MODEL-C", "ПОКУПКИ СЕГОДНЯ", "смесь 70/30", "paper.py"):
+        assert gone not in out, gone
+    assert "NVDA" not in out and "AAA" not in out                    # no virtual position, no virtual order
 
 
 def test_portfolio_when_nothing_to_show(conn):
     out = analyst.portfolio(conn, scored=[])
-    assert "НАБЛЮДЕНИЕ: нет" in out and "ПОКУПКИ СЕГОДНЯ: нет" in out
+    assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): нет"
+    assert "СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ: нет" in out and "НАБЛЮДЕНИЕ: нет" in out
+    assert out.index("СИГНАЛЫ НА ПОКУПКУ") < out.index("НАБЛЮДЕНИЕ")
 
 
 def test_portfolio_lists_at_most_ten_watch_scores(conn):
@@ -911,8 +930,7 @@ def my_prices(monkeypatch):
     monkeypatch.setattr(positions, "daily_closes", lambda t, s=None: [])
 
 
-def test_portfolio_opens_with_your_positions_then_the_model(conn, my_prices):
-    model.create_books(conn, dt.date(2026, 9, 1))
+def test_portfolio_opens_with_your_positions_then_the_signals_and_the_watchlist(conn, my_prices):
     _bought(conn, "GME", insiders='["Ryan Cohen"]')
     _bought(conn, "BBB", opened="2026-09-30", entry=10.0)
     out = analyst.portfolio(conn, scored=[])
@@ -925,9 +943,9 @@ def test_portfolio_opens_with_your_positions_then_the_model(conn, my_prices):
         "   слежу за продажами: Ryan Cohen"]
     assert lines[4].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
     assert lines[5].startswith("   стоп ")
-    assert lines[6] == "" and lines[7].startswith("Модельный портфель")        # then the model, as before
-    assert out.index("ВАШИ ПОЗИЦИИ") < out.index("Модельный портфель") < out.index("НАБЛЮДЕНИЕ:") \
-        < out.index("ПОКУПКИ СЕГОДНЯ:")
+    assert lines[6] == "" and lines[7] == "СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ: нет"     # then the signals, then the watchlist
+    assert out.index("ВАШИ ПОЗИЦИИ") < out.index("СИГНАЛЫ НА ПОКУПКУ") < out.index("НАБЛЮДЕНИЕ:")
+    assert "Модельный портфель" not in out and "ПОКУПКИ СЕГОДНЯ" not in out
 
 
 def test_portfolio_prints_your_positions_as_plain_text(conn, my_prices):
@@ -940,19 +958,19 @@ def test_portfolio_prints_your_positions_as_plain_text(conn, my_prices):
 def test_portfolio_says_when_you_have_no_positions(conn):
     out = analyst.portfolio(conn, scored=[])
     assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): нет"
-    assert "НАБЛЮДЕНИЕ: нет" in out                                   # the model part is as before
+    assert "НАБЛЮДЕНИЕ: нет" in out                                   # the rest is as it is
 
 
 @pytest.mark.parametrize("broken", [(positions, "portfolio_rows"),
                                     (analyst.telegram_notify, "my_position_blocks")])
-def test_portfolio_keeps_the_model_when_your_positions_cannot_be_shown(conn, my_prices, monkeypatch, broken):
+def test_portfolio_keeps_the_rest_when_your_positions_cannot_be_shown(conn, my_prices, monkeypatch, broken):
     def boom(*a, **k):
         raise RuntimeError("offline")
     _bought(conn, "GME")
     monkeypatch.setattr(*broken, boom)
     out = analyst.portfolio(conn, scored=[])
     assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): не посчитаны: RuntimeError"
-    assert "НАБЛЮДЕНИЕ: нет" in out and "ПОКУПКИ СЕГОДНЯ: нет" in out
+    assert "НАБЛЮДЕНИЕ: нет" in out and "СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ: нет" in out
 
 
 # ---- the Trading 212 account in the analyst's portfolio (stored data: no live call)
@@ -1001,7 +1019,6 @@ _SNAPSHOT_LINE = "Счёт Trading 212 на 01.10: €12 346 · вложено �
 
 
 def test_portfolio_shows_the_trading_212_account_from_what_the_sync_stored(conn, yahoo_price, no_live_call):
-    model.create_books(conn, dt.date(2026, 9, 1))
     _t212_held(conn, insiders='["Ryan Cohen"]')
     _t212_held(conn, "DE0007164600", source="T212", entry=120.0, qty=2.5, t212_ticker="SAPd_EQ",
                currency="EUR", opened="2026-09-29")
@@ -1023,7 +1040,7 @@ def test_portfolio_shows_the_trading_212_account_from_what_the_sync_stored(conn,
     assert lines[7].startswith("   стоп ")
     assert lines[8] == "Вне Trading 212 (/bought):"
     assert lines[9].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
-    assert lines[11] == "" and lines[12].startswith("Модельный портфель")     # then the model, as before
+    assert lines[11] == "" and lines[12] == "СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ: нет"     # then the signals
     assert "GME: вход" not in "\n".join(lines)                       # a holding is not listed twice
 
 
@@ -1073,14 +1090,14 @@ def test_portfolio_prints_the_trading_212_part_as_plain_text(conn, yahoo_price, 
     assert "<b>" not in out and "&amp;" not in out and "💼" not in out
 
 
-def test_portfolio_keeps_the_model_when_the_trading_212_part_cannot_be_shown(conn, my_prices, monkeypatch):
+def test_portfolio_keeps_the_rest_when_the_trading_212_part_cannot_be_shown(conn, my_prices, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("offline")
     _t212_held(conn)
     monkeypatch.setattr(analyst.t212_account, "stored_holdings", boom)
     out = analyst.portfolio(conn, scored=[])
     assert out.splitlines()[0] == "ВАШИ ПОЗИЦИИ (/bought): не посчитаны: RuntimeError"
-    assert "НАБЛЮДЕНИЕ: нет" in out and "ПОКУПКИ СЕГОДНЯ: нет" in out
+    assert "НАБЛЮДЕНИЕ: нет" in out and "СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ: нет" in out
 
 
 def test_context_says_where_your_position_is_tracked_from(conn):
@@ -1198,14 +1215,32 @@ def test_the_method_names_every_allowed_tradingview_tool():
         assert tool in method, tool
 
 
-def test_the_method_says_the_portfolio_command_covers_your_positions_and_the_model():
+def test_the_method_says_the_portfolio_command_covers_your_positions_the_buy_signals_and_the_watchlist():
     text = _text("analyst_method.txt")
     method = " ".join(text.split())
     [listed] = [ln for ln in text.splitlines() if ln.lstrip().startswith("`{ANALYST_CMD} portfolio`")]
     assert "/bought" in listed
-    assert "the owner's own positions (what they bought and recorded with /bought)" in method
-    assert "run `{ANALYST_CMD} portfolio`: its output covers both" in method
-    assert "«ВАШИ ПОЗИЦИИ (/bought):»" in method and "then the model" in method
+    assert "the owner's own positions (the Trading 212 account and what they recorded with /bought)" in method
+    assert "run `{ANALYST_CMD} portfolio`: its output has the owner's own positions first" in method
+    assert "«ВАШИ ПОЗИЦИИ (/bought):»" in method
+    assert "«СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ»" in method and "«НАБЛЮДЕНИЕ»" in method
+    assert method.index("«ВАШИ ПОЗИЦИИ (/bought):»") < method.index("«СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ»") \
+        < method.index("«НАБЛЮДЕНИЕ»")
+
+
+def test_the_method_says_the_bot_scores_signals_and_holds_no_portfolio():
+    method = " ".join(_text("analyst_method.txt").split())
+    assert "The bot holds no portfolio of its own" in method and "«оценивает сигналы»" in method
+    assert "the owner's Trading 212 account is the only portfolio" in method
+    assert "Never say that the bot or a \"model\" holds, bought or sold anything" in method
+
+
+def test_no_prompt_or_method_text_mentions_a_model_portfolio():
+    for name in ("analyst_method.txt", "claude_analysis_prompt.txt", "claude_ask_prompt.txt"):
+        flat = " ".join(_text(name).split()).lower()
+        for gone in ("model portfolio", "модельн", "model summary", "today's buys", "model's position",
+                     "the model holds", "модель держит", "ПОКУПКИ СЕГОДНЯ".lower(), "paper"):
+            assert gone not in flat, (name, gone)
 
 
 def test_the_method_forbids_study_values_and_restores_the_chart():
@@ -1816,17 +1851,13 @@ def test_a_venue_suffix_finds_the_bare_signal_of_that_source_only(conn, dossier)
 
 
 def test_a_venue_suffix_finds_the_positions_of_that_source_only(conn, dossier):
-    model.create_books(conn, dt.date(2026, 9, 1))
-    _paper_position(conn, S, "EQNR", source="NORWAY", fill="2026-09-25")
-    _paper_position(conn, S, "EQNR", source="SEC", fill="2026-09-26")
     for source, day in (("NORWAY", "2026-09-27"), ("SEC", "2026-09-28")):
         conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, "
                      "stop_pct) VALUES ('EQNR', ?, ?, 100.0, '[]', 0.15)", (source, day))
     conn.commit()
     out = analyst.context(conn, "EQNR.OL", scored=[])
-    assert "с 2026-09-25" in out and "с 2026-09-26" not in out
     assert "с 2026-09-27" in out and "с 2026-09-28" not in out
-    assert "с 2026-09-26" in analyst.context(conn, "$EQNR", scored=[])
+    assert "с 2026-09-28" in analyst.context(conn, "$EQNR", scored=[])      # a bare key: any source
 
 
 def test_the_signals_of_a_venue_key_are_asked_for_by_the_bare_name(conn, dossier, monkeypatch):
