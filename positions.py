@@ -9,8 +9,9 @@ looked starts its clock when tracking starts, and its stop is measured from its 
 (stop_base), not from the average price it was bought at: see _stop_and_peak. A Trading 212 holding with a US listing is keyed and
 priced like a /bought one -- from Yahoo, and from the day prices the sync stores (t212_prices)
 where Yahoo has nothing or another instrument's series: _pricing; any other is keyed by its ISIN
-with source T212_SOURCE and priced from those day prices. Every position leaves on the model's own
-exits (model.py), and a close alert fires once per position, on the first of:
+with source T212_SOURCE and priced from those day prices. Every position leaves on the exit rules
+below -- their constants (the stop fallback, dead money, the year) and the news seam are model.py's --
+and a close alert fires once per position, on the first of:
 
   insider_sell   one of the insiders behind the signal it came from sells
                  after the open date -- Form 4 (not a 10b5-1 planned sale), a Form 144
@@ -22,9 +23,9 @@ exits (model.py), and a close alert fires once per position, on the first of:
   trailing_stop  the price is `stop_pct` or more below the highest close since the open
                  (the entry price counts as one). The stop is fixed when the position is
                  recorded, from the price history then; a position without one takes it
-                 from the closes before its open date, else the model's fallback;
+                 from the closes before its open date, else model.FALLBACK_STOP;
   activist_cut   (a position bought on a 13D/G stake) one of its filers has since reported
-                 a smaller stake -- model._activist_cut, the model's own rule;
+                 a smaller stake -- model._activist_cut;
   trend_down     (coins) below the 100-day average and down over 20 days;
   dead_money     (stocks) 60 business days held and a return under 5%;
   time           a year held;
@@ -538,28 +539,18 @@ _VENUE_SOURCES = ("NORWAY", "SWEDEN")
 
 
 def _asset_key(ticker: str, source: str | None = None) -> tuple[str, str, str]:
-    """A name as the model's books and the user's positions share it: a coin by its symbol, a
-    stock by its ticker (the stock BTC and the coin BTC stay two assets), and an Oslo or
-    Stockholm listing with its venue (Oslo's NRC is not the US NRC)."""
+    """A name as a signal's score and the user's positions share it: a coin by its symbol, a stock by
+    its ticker (the stock BTC and the coin BTC stay two assets), and an Oslo or Stockholm listing
+    with its venue (Oslo's NRC is not the US NRC)."""
     if crypto.is_crypto(ticker):
         return "coin", crypto.symbol_of(ticker).upper(), ""
     return "stock", ticker.upper(), source if source in _VENUE_SOURCES else ""
 
 
-def _model_names(conn) -> set[tuple[str, str, str]]:
-    """What MODEL-S and MODEL-C hold now (_asset_key)."""
-    import model
-    import paper
-    return {_asset_key(p["ticker"], p["source"])
-            for code in model.BOOKS for p in paper.open_positions(conn, code)}
-
-
-def portfolio_rows(conn, today: dt.date, *, origin: str | None = None) -> list[tuple[Position, dict, bool]]:
-    """What /portfolio shows: (position, position_status, model_holds) for each open position
-    (of `origin` only, when given), oldest first. `model_holds`: MODEL-S or MODEL-C has an open
-    position in the same name."""
-    held = _model_names(conn)
-    return [(pos, position_status(pos, today, conn=conn), _asset_key(pos.ticker, pos.source) in held)
+def portfolio_rows(conn, today: dt.date, *, origin: str | None = None) -> list[tuple[Position, dict]]:
+    """What /portfolio shows: (position, position_status) for each open position (of `origin` only,
+    when given), oldest first."""
+    return [(pos, position_status(pos, today, conn=conn))
             for pos in open_positions(conn) if origin is None or pos.origin == origin]
 
 

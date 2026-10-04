@@ -1046,7 +1046,6 @@ class Holding:
     pnl_currency: str | None = None
     position: positions.Position | None = None
     status: dict | None = None
-    model_holds: bool = False
     opened: str = ""
     days: int | None = None
     price_date: str | None = None       # the day of a stored price too old to be one («цена на DD.MM»)
@@ -1070,15 +1069,6 @@ def _status(conn, pos: positions.Position, today: dt.date, price: float | None) 
     return positions.position_status(pos, today, price_fn=lambda ticker, source=None: price, conn=conn)
 
 
-def _model_holds(conn, ticker: str, source: str | None, held: set) -> bool:
-    """MODEL-S or MODEL-C holds the same name: the same key, or -- for a holding keyed by the ISIN
-    of an Oslo listing -- that listing, which is how the model holds a Norwegian company."""
-    if positions._asset_key(ticker, source) in held:
-        return True
-    oslo = positions.oslo_ticker(conn, ticker) if source == positions.T212_SOURCE else None
-    return bool(oslo) and positions._asset_key(oslo, "NORWAY") in held
-
-
 def _days_held(created: str | None, today: dt.date) -> int | None:
     """Days since Trading 212's purchase date, or None when it isn't known."""
     try:
@@ -1092,7 +1082,6 @@ def stored_holdings(conn, today: dt.date) -> list[Holding]:
     average from the positions, the price from the last stored day price, the profit or loss in
     the instrument's own currency (the account's is only known live). A stored price older than
     STALE_DAYS is not a price: it is shown with its date, and the status has none."""
-    held = positions._model_names(conn)
     rows = []
     for pos in positions.open_positions(conn):
         if pos.origin != positions.T212:
@@ -1107,7 +1096,6 @@ def stored_holdings(conn, today: dt.date) -> list[Holding]:
             pnl=(price - pos.entry_price) * pos.quantity if known else None,
             pnl_currency=pos.currency if known else None, position=pos,
             status=_status(conn, pos, today, None if stale else price),
-            model_holds=_model_holds(conn, pos.ticker, pos.source, held),
             opened=pos.t212_created or pos.opened_at, days=_days_held(pos.t212_created, today),
             price_date=price_day if stale else None))
     return rows
@@ -1174,24 +1162,31 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
     except BaseException:
         conn.rollback()
         raise
-    held = positions._model_names(conn)
     rows = []
     for h, key, pos in found:
         created = _created_date(h.created_at) or (pos.t212_created if pos else None)
         if pos is not None:
-            name, where = positions.display_name(pos), (pos.ticker, pos.source)
+            name = positions.display_name(pos)
         else:
             name = positions.name_of(key[0], key[1], h.t212_ticker) if key else _untracked_name(h)
-            where = key
         price = h.current_price if h.current_price is not None and h.current_price > 0 else None
         rows.append(Holding(
             name=name, quantity=h.quantity, avg_price=h.avg_price, price=price,
             currency=h.currency, pnl=h.pnl_eur,
             pnl_currency=h.account_currency or (summary.currency if summary else None),
             position=pos, status=_status(conn, pos, today, price) if pos else None,
-            model_holds=bool(where) and _model_holds(conn, where[0], where[1], held),
             opened=created or (pos.opened_at if pos else ""), days=_days_held(created, today)))
     return PortfolioView(rows, summary=summary)
+
+
+def portfolio_text(conn, today: dt.date, *, html: bool = True) -> str:
+    """What /portfolio says, and the menu's «Мой портфель»: «💼 Trading 212» -- the account, asked live
+    (portfolio_view; or what the last sync stored, with why) -- then the positions recorded with /bought
+    (positions.portfolio_rows), as telegram_notify.format_my_portfolio writes them. Plain text with
+    html=False. The bot holds no portfolio of its own: this is the whole of it."""
+    view = portfolio_view(conn, today)
+    rows = positions.portfolio_rows(conn, today, origin=positions.MANUAL)
+    return telegram_notify.format_my_portfolio(rows, html=html, t212=view)
 
 
 # ------------------------------------------------------------------ command line

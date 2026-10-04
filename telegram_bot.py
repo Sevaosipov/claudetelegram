@@ -19,12 +19,13 @@ silence, and the queued row stays pending for the next scheduled or triggered ru
 Any other text -- several words, or one word that is not an asset -- and /ask TEXT is a
 question for the analyst: it is queued (db.enqueue_question, at most 2000 characters), the same
 run answers it, and the analyst sends the answer itself. If it is still unanswered after the
-run, the user is told the question stays queued. /model sends the model portfolio's summary
-(paper_report.format_summary) at once, without Claude. A ticker lookup and a question share one
+run, the user is told the question stays queued. A ticker lookup and a question share one
 runner, _run_analysis: a process group of its own, RUN_ANALYSIS_TIMEOUT seconds, SIGTERM first
 (analyst.py stops its Claude on it) and SIGKILL after a grace period; it succeeds when the row
 it was run for is marked processed, whatever the run's exit code (the pass also covers other
-rows). Only new messages are handled: an edited message is not a second request.
+rows). Only new messages are handled: an edited message is not a second request. The bot holds
+no portfolio of its own: your Trading 212 account is the one it tracks, and a command it does not
+know gets the help text.
 
 /backtest TICKER answers a different question: how did this ticker trade
 after its OWN past SEC insider purchases (backtest.backtest_ticker(), a
@@ -86,7 +87,6 @@ import assets
 import backtest
 import crypto
 import db
-import paper_report
 import positions
 import research
 import sources
@@ -126,8 +126,8 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
-             "/portfolio — ваш счёт Trading 212 и позиции /bought, /model — модельный портфель.\n"
-             "Сводка модельного портфеля приходит по пятницам.\n"
+             "/portfolio — ваш счёт Trading 212 и позиции /bought.\n"
+             "Сигналы на покупку приходят по пятницам, сигнал на продажу по вашим позициям — сразу.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
              "что-то значить на уровне одного тикера).\n"
@@ -199,10 +199,7 @@ def _handle_my_portfolio(conn) -> None:
     sync stored, with why) -- then the positions recorded with /bought, each with how it stands
     now."""
     try:
-        today = dt.date.today()
-        view = t212_account.portfolio_view(conn, today)
-        rows = positions.portfolio_rows(conn, today, origin=positions.MANUAL)
-        telegram_notify.send_text(telegram_notify.format_my_portfolio(rows, t212=view))
+        telegram_notify.send_text(t212_account.portfolio_text(conn, dt.date.today()))
     except Exception as e:
         print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось собрать список позиций ({type(e).__name__}). "
@@ -424,20 +421,10 @@ def _handle_ticker(conn, asset) -> None:
         telegram_notify.send_text(f"Не удалось получить данные по {ticker}. Попробуйте позже.")
 
 
-def _handle_model(conn) -> None:
-    """/model: the model portfolio's summary."""
-    try:
-        telegram_notify.send_text(paper_report.format_summary(conn, dt.date.today(), html=True))
-    except Exception as e:
-        print(f"[telegram_bot] /model failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось собрать сводку портфеля ({type(e).__name__}). "
-                                  "Попробуйте позже.")
-
-
 def _handle_message(conn, text: str) -> None:
-    """Routing: the positions commands (/portfolio, /positions, /bought, /sold), /backtest, /model,
-    /ask, any other /command (help); then a single token that is an asset with a price -- the
-    ticker analysis; anything else -- a question for the analyst."""
+    """Routing: the positions commands (/portfolio, /positions, /bought, /sold), /backtest, /ask,
+    any other /command (help, /model included); then a single token that is an asset with a price --
+    the ticker analysis; anything else -- a question for the analyst."""
     text = (text or "").strip()
     if _handle_positions_command(conn, text):
         return
@@ -449,9 +436,7 @@ def _handle_message(conn, text: str) -> None:
         return
     if text.startswith("/"):
         command = text.split()[0].lower().split("@")[0]
-        if command == "/model":
-            _handle_model(conn)
-        elif command == "/ask":
+        if command == "/ask":
             question = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
             if question:
                 _handle_ask(conn, question)

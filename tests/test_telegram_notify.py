@@ -651,64 +651,61 @@ def _status(last=24.05, *, entry=23.10, days=3, peak=24.05, stop_pct=0.10, stop_
             "to_stop": None if last is None else to_stop}
 
 
-_SELL_LINE = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть, /model — модельный портфель."
+_SELL_LINE = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть."
 
 
 def test_my_portfolio_shows_a_position_in_full():
-    rows = [(_held(insiders=["Ryan Cohen", "Alice Smith"]), _status(), True)]
+    rows = [(_held(insiders=["Ryan Cohen", "Alice Smith"]), _status())]
     assert tn.format_my_portfolio(rows) == "\n\n".join([
         "<b>💼 Ваш портфель — 1 позиция</b>",
         "\n".join(["• GME: вход 23,10 (01.10), сейчас 24,05 (+4,1%), 3 дн.",
                    "   стоп 21,65 (−10% от максимума 24,05), до стопа 10,0%",
-                   "   слежу за продажами: Ryan Cohen, Alice Smith",
-                   "   модель тоже держит"]),
+                   "   слежу за продажами: Ryan Cohen, Alice Smith"]),
         "Средний результат: +4,1% по 1 позиции\n" + _SELL_LINE])
 
 
 @pytest.mark.parametrize("n, word", [(1, "позиция"), (2, "позиции"), (4, "позиции"), (5, "позиций"),
                                      (11, "позиций"), (21, "позиция"), (22, "позиции")])
 def test_my_portfolio_header_counts_the_positions_in_russian(n, word):
-    rows = [(_held(f"T{i}", pid=i), _status(), False) for i in range(n)]
+    rows = [(_held(f"T{i}", pid=i), _status()) for i in range(n)]
     assert tn.format_my_portfolio(rows).startswith(f"<b>💼 Ваш портфель — {n} {word}</b>\n\n")
 
 
 @pytest.mark.parametrize("n, word", [(1, "позиции"), (2, "позициям"), (5, "позициям"),
                                      (11, "позициям"), (21, "позиции")])
 def test_the_average_line_counts_the_positions_in_russian(n, word):
-    rows = [(_held(f"T{i}", pid=i), _status(), False) for i in range(n)]
+    rows = [(_held(f"T{i}", pid=i), _status()) for i in range(n)]
     assert f"Средний результат: +4,1% по {n} {word}\n" + _SELL_LINE in tn.format_my_portfolio(rows)
 
 
 def test_the_insiders_line_is_only_there_when_there_are_insiders():
-    with_ = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(), False)])
-    without = tn.format_my_portfolio([(_held(), _status(), False)])
+    with_ = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status())])
+    without = tn.format_my_portfolio([(_held(), _status())])
     assert "\n   слежу за продажами: Ryan Cohen" in with_
     assert "слежу" not in without
 
 
-def test_the_model_line_is_only_there_when_the_model_holds_it_too():
-    text = tn.format_my_portfolio([(_held("GME"), _status(), True),
-                                   (_held("BBB", pid=2, opened="2026-10-02"), _status(), False)])
-    assert text.count("модель тоже держит") == 1
-    gme, bbb = text.split("\n\n")[1:3]
-    assert gme.endswith("\n   модель тоже держит") and "модель" not in bbb
+def test_there_is_no_model_line_under_any_position():
+    """The bot holds no portfolio of its own: there is nothing to say a «model» holds too."""
+    text = tn.format_my_portfolio([(_held("GME", insiders=["Ryan Cohen"]), _status()),
+                                   (_held("BBB", pid=2, opened="2026-10-02"), _status())])
+    assert "модел" not in text.lower() and "/model" not in text
 
 
-def test_a_coin_is_shown_by_its_symbol_with_thousands_and_the_model_line():
+def test_a_coin_is_shown_by_its_symbol_with_thousands():
     coin = _held("CRYPTO:BTC", entry=60_000.0, opened="2026-09-28", stop_pct=0.15, source="CRYPTO")
     st = _status(61_200.0, entry=60_000.0, peak=61_200.0, stop_pct=0.15, stop_level=52_020.0,
                  to_stop=0.176)
-    text = tn.format_my_portfolio([(coin, st, True)])
+    text = tn.format_my_portfolio([(coin, st)])
     assert ("• BTC: вход 60 000,00 (28.09), сейчас 61 200,00 (+2,0%), 3 дн.\n"
-            "   стоп 52 020,00 (−15% от максимума 61 200,00), до стопа 17,6%\n"
-            "   модель тоже держит") in text
+            "   стоп 52 020,00 (−15% от максимума 61 200,00), до стопа 17,6%") in text
     assert "CRYPTO" not in text
 
 
 def test_a_position_with_no_price_says_so_and_has_no_stop_line():
-    text = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(None), True)])
+    text = tn.format_my_portfolio([(_held(insiders=["Ryan Cohen"]), _status(None))])
     assert ("• GME: вход 23,10 (01.10), сейчас — цена недоступна, 3 дн.\n"
-            "   слежу за продажами: Ryan Cohen\n   модель тоже держит") in text
+            "   слежу за продажами: Ryan Cohen") in text
     assert "стоп" not in text and "Средний результат" not in text      # nothing to average either
     assert text.endswith(_SELL_LINE)
 
@@ -717,45 +714,44 @@ def test_a_price_below_the_stop_is_said_so():
     """to_stop is how far the price can still fall (a share of the price now): below the stop it is
     negative, and «ниже стопа на» shows the same quantity without its sign."""
     st = _status(90.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=1 - 117.0 / 90.0)
-    text = tn.format_my_portfolio([(_held(entry=100.0), st, False)])
+    text = tn.format_my_portfolio([(_held(entry=100.0), st)])
     assert "   стоп 117,00 (−10% от максимума 130,00), ниже стопа на 30,0%" in text
     assert "до стопа" not in text
 
 
 def test_at_the_stop_level_there_is_nothing_left_to_fall():
     st = _status(117.0, entry=100.0, peak=130.0, stop_level=117.0, to_stop=0.0)
-    assert "), до стопа 0,0%" in tn.format_my_portfolio([(_held(entry=100.0), st, False)])
+    assert "), до стопа 0,0%" in tn.format_my_portfolio([(_held(entry=100.0), st)])
 
 
 def test_the_average_is_the_equal_weighted_mean_of_the_known_results():
-    rows = [(_held("AAA", pid=1, entry=100.0), _status(110.0, entry=100.0), False),      # +10%
-            (_held("BBB", pid=2, entry=100.0), _status(95.0, entry=100.0), False),       # -5%
-            (_held("CCC", pid=3, entry=100.0), _status(None, entry=100.0), False)]       # no price: left out
+    rows = [(_held("AAA", pid=1, entry=100.0), _status(110.0, entry=100.0)),      # +10%
+            (_held("BBB", pid=2, entry=100.0), _status(95.0, entry=100.0)),       # -5%
+            (_held("CCC", pid=3, entry=100.0), _status(None, entry=100.0))]       # no price: left out
     text = tn.format_my_portfolio(rows)
     assert "Средний результат: +2,5% по 2 позициям\n" + _SELL_LINE in text
     assert text.startswith("<b>💼 Ваш портфель — 3 позиции</b>")                          # all three are held
 
 
 def test_a_loss_has_a_real_minus_sign():
-    text = tn.format_my_portfolio([(_held(entry=100.0), _status(95.0, entry=100.0), False)])
+    text = tn.format_my_portfolio([(_held(entry=100.0), _status(95.0, entry=100.0))])
     assert "сейчас 95,00 (−5,0%)" in text and "Средний результат: −5,0% по 1 позиции" in text
 
 
 def test_the_oldest_position_comes_first():
-    rows = [(_held("NEW", opened="2026-10-01", pid=2), _status(), False),
-            (_held("OLD", opened="2026-09-20", pid=1), _status(), False)]
+    rows = [(_held("NEW", opened="2026-10-01", pid=2), _status()),
+            (_held("OLD", opened="2026-09-20", pid=1), _status())]
     text = tn.format_my_portfolio(rows)
     assert text.index("• OLD") < text.index("• NEW")
 
 
 def test_no_positions_say_how_to_add_one():
     assert tn.format_my_portfolio([]) == (
-        "Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
-        "Модельный портфель: /model.")
+        "Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10.")
 
 
 def test_my_portfolio_escapes_every_dynamic_string():
-    rows = [(_held("A&B<C>", insiders=["X & <Y>", "Q>R"]), _status(), False)]
+    rows = [(_held("A&B<C>", insiders=["X & <Y>", "Q>R"]), _status())]
     text = tn.format_my_portfolio(rows)
     assert "• A&amp;B&lt;C&gt;:" in text and "слежу за продажами: X &amp; &lt;Y&gt;, Q&gt;R" in text
     assert "<" not in text.replace("<b>", "").replace("</b>", "")      # only the header's bold is markup
@@ -763,7 +759,7 @@ def test_my_portfolio_escapes_every_dynamic_string():
 
 
 def test_my_portfolio_in_plain_text_has_no_markup_and_no_escaping():
-    rows = [(_held("A&B", insiders=["X & <Y>"]), _status(), False)]
+    rows = [(_held("A&B", insiders=["X & <Y>"]), _status())]
     text = tn.format_my_portfolio(rows, html=False)
     assert text.startswith("💼 Ваш портфель — 1 позиция\n\n• A&B:")
     assert "<b>" not in text and "&amp;" not in text and "слежу за продажами: X & <Y>" in text
@@ -772,8 +768,8 @@ def test_my_portfolio_in_plain_text_has_no_markup_and_no_escaping():
 
 def test_my_position_blocks_are_the_positions_alone():
     """The analyst prints these under its own heading: no header, no average, no hint."""
-    rows = [(_held("GME", insiders=["Ryan Cohen"]), _status(), True),
-            (_held("BBB", pid=2, opened="2026-10-02"), _status(None), False)]
+    rows = [(_held("GME", insiders=["Ryan Cohen"]), _status()),
+            (_held("BBB", pid=2, opened="2026-10-02"), _status(None))]
     blocks = tn.my_position_blocks(rows, html=False)
     assert len(blocks) == 2 and blocks[0].startswith("• GME: вход 23,10 (01.10)")
     assert blocks[1] == "• BBB: вход 23,10 (02.10), сейчас — цена недоступна, 3 дн."
@@ -788,7 +784,7 @@ def test_a_quantity_is_shown_the_russian_way_without_needless_decimals(x, text):
 
 
 def _t212_holding(name="GME", *, qty=10.0, avg=23.10, price=24.05, currency="USD", pnl=8.30,
-                  pnl_currency="EUR", tracked=True, insiders=(), held=False, opened="2026-10-01", days=None,
+                  pnl_currency="EUR", tracked=True, insiders=(), opened="2026-10-01", days=None,
                   price_date=None, **status):
     """A line of «💼 Trading 212» as t212_account builds it; `tracked`: it has a position (and so a
     status); `days`: since it was bought in Trading 212, when that is known; `price_date`: the day
@@ -796,7 +792,7 @@ def _t212_holding(name="GME", *, qty=10.0, avg=23.10, price=24.05, currency="USD
     pos = _held(name, entry=avg or 1.0, opened=opened, insiders=insiders) if tracked else None
     st = _status(None if price_date else price, entry=avg or 1.0, **status) if tracked else None
     return ta.Holding(name=name, quantity=qty, avg_price=avg, price=price, currency=currency, pnl=pnl,
-                      pnl_currency=pnl_currency, position=pos, status=st, model_holds=held, opened=opened,
+                      pnl_currency=pnl_currency, position=pos, status=st, opened=opened,
                       days=days, price_date=price_date)
 
 
@@ -809,14 +805,13 @@ def _view(*holdings, summary=_LIVE, **kw):
 
 
 def test_the_portfolio_opens_with_trading_212_then_what_is_outside_it():
-    manual = [(_held("AAA", entry=100.0), _status(110.0, entry=100.0, peak=110.0, stop_level=99.0), False)]
-    view = _view(_t212_holding(insiders=["Ryan Cohen"], held=True))
+    manual = [(_held("AAA", entry=100.0), _status(110.0, entry=100.0, peak=110.0, stop_level=99.0))]
+    view = _view(_t212_holding(insiders=["Ryan Cohen"]))
     assert tn.format_my_portfolio(manual, t212=view) == "\n\n".join([
         "<b>💼 Trading 212</b>\n" + _ACCOUNT_LINE,
         "\n".join(["• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), €+8,30",
                    "   стоп 21,65 (−10% от максимума 24,05), до стопа 10,0%",
-                   "   слежу за продажами: Ryan Cohen",
-                   "   модель тоже держит"]),
+                   "   слежу за продажами: Ryan Cohen"]),
         "<b>✍️ Вне Trading 212</b>",
         "\n".join(["• AAA: вход 100,00 (01.10), сейчас 110,00 (+10,0%), 3 дн.",
                    "   стоп 99,00 (−10% от максимума 110,00), до стопа 10,0%"]),
@@ -888,9 +883,9 @@ def test_a_missing_or_powerless_key_shows_the_reason_and_the_hint():
     no_key = tn.format_my_portfolio([], t212=_view(error="ключ Trading 212 не задан", hint=_HINT))
     assert no_key == "\n\n".join(["<b>💼 Trading 212</b>\n⚠️ Ключ Trading 212 не задан\n" + _HINT,
                                   "Ваших позиций нет. Купили? /bought TICKER [цена] — например "
-                                  "/bought GME 23.10. Модельный портфель: /model."])
+                                  "/bought GME 23.10."])
     forbidden = tn.format_my_portfolio(
-        [(_held("AAA"), _status(), False)],
+        [(_held("AAA"), _status())],
         t212=_view(_t212_holding(), error="ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта",
                    hint=_HINT, as_of="30.09 14:05"))
     assert forbidden.split("\n\n")[0] == (
@@ -914,7 +909,7 @@ def test_the_trading_212_section_escapes_every_dynamic_string_and_uses_only_bold
 
 
 def test_the_trading_212_section_in_plain_text_has_no_markup():
-    text = tn.format_my_portfolio([(_held("A&B"), _status(), False)], html=False,
+    text = tn.format_my_portfolio([(_held("A&B"), _status())], html=False,
                                   t212=_view(_t212_holding("C&D")))
     assert text.startswith("💼 Trading 212\nСчёт: €12 346") and "\n\n✍️ Вне Trading 212\n\n• A&B: вход" in text
     assert "<b>" not in text and "&amp;" not in text and "• C&D — 10 шт." in text

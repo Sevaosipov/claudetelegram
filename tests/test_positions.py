@@ -722,8 +722,8 @@ def test_the_stop_comes_before_the_activist_cut_and_the_cut_before_dead_money(co
     assert [a.trigger for a in _check(conn, price=102.0, bars=bars)] == ["activist_cut"]
 
 
-def test_the_model_and_the_positions_read_the_same_cut(conn):
-    """One rule, model._activist_cut, for a paper position and a /bought one."""
+def test_the_cut_rule_is_model_activist_cut_and_the_positions_read_it(conn):
+    """One rule, model._activist_cut: the /bought and Trading 212 positions' activist_cut alert reads it."""
     add_stake(conn, "AAA", "Fund LP", 9.0, event_date=_day(30))
     add_stake(conn, "AAA", "Fund LP", 6.0, event_date=_day(3))
     assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(10)) == (9.0, 6.0)
@@ -731,29 +731,33 @@ def test_the_model_and_the_positions_read_the_same_cut(conn):
     assert model._activist_cut(conn, "AAA", [], _day(10)) is None
 
 
+@pytest.mark.parametrize("before,after,expected", [
+    (9.0, 6.0, (9.0, 6.0)),
+    (9.0, 11.0, None),                # raised
+    (9.0, 9.0, None),                 # unchanged
+    (9.0, None, None),                # nothing filed since
+])
+def test_an_activist_cutting_the_stake_is_found_by_its_filers_only(conn, before, after, expected):
+    add_stake(conn, "AAA", "Fund LP", before, event_date=_day(30))
+    if after is not None:
+        add_stake(conn, "AAA", "Fund LP", after, event_date=_day(3))
+    add_stake(conn, "AAA", "Someone Else", 1.0, event_date=_day(2))     # another holder: ignored
+    assert model._activist_cut(conn, "AAA", ["Fund LP"], _day(10)) == expected
+
+
 # ------------------------------------------------------ one set of exit constants, the model's
-def _paper_pos(days_ago, *, value=10_000.0):
-    return {"ticker": "AAA", "source": "SEC", "fill_date": _day(days_ago), "stop_pct": None,
-            "insiders": "[]", "last_value": value, "net_eur": 10_000.0}
-
-
-def test_the_position_exits_and_the_models_share_their_constants(conn, monkeypatch):
-    """Both read model's stop fallback, dead-money and year constants when they run: change
-    one and both move together."""
+def test_the_position_exits_read_the_models_constants_when_they_run(conn, monkeypatch):
+    """The stop fallback, dead-money and year constants live in model.py and are read when an exit runs:
+    change one and the exits move with it."""
     for name in ("FALLBACK_STOP", "DEAD_MONEY_BDAYS", "DEAD_MONEY_MIN_RETURN", "MAX_HOLD_DAYS"):
         assert not hasattr(positions, name), name
-    flat = [(d, 100.0) for d, _c in _days(TODAY - dt.timedelta(days=40), [100.0] * 40)]
 
     # the stop fallback: -20% with no stop and no history before the buy
     _open(conn, "AAA", 100.0, days_ago=5)
     fall = _held_bars([], [100.0, 80.0], days_ago=5)
     assert [a.trigger for a in _check(conn, price=80.0, bars=fall)] == ["trailing_stop"]
-    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
-                                   TODAY, []) is not None
     monkeypatch.setattr(model, "FALLBACK_STOP", {"stock": 0.40, "crypto": 0.50})
     assert _check(conn, price=80.0, bars=fall) == []
-    assert model.stock_exit_reason(conn, _paper_pos(1), [(_day(1), 100.0), (_day(0), 80.0)],
-                                   TODAY, []) is None
     positions.close_position(conn, "AAA")
 
     # dead money and the year, moved to a few days
@@ -761,14 +765,12 @@ def test_the_position_exits_and_the_models_share_their_constants(conn, monkeypat
     _open(conn, "BBB", 100.0, days_ago=7, stop=0.10)
     [alert] = _check(conn, price=101.0, bars=_held_bars([], [100.0, 101.0], days_ago=7))
     assert alert.trigger == "dead_money"
-    assert model.stock_exit_reason(conn, _paper_pos(7, value=10_100.0), flat, TODAY, []) == "стоит на месте"
     positions.close_position(conn, "BBB")
     monkeypatch.setattr(model, "DEAD_MONEY_BDAYS", 10_000)
     monkeypatch.setattr(model, "MAX_HOLD_DAYS", 7)
     _open(conn, "CCC", 100.0, days_ago=7, stop=0.10)
     [alert] = _check(conn, price=130.0, bars=_held_bars([], [100.0, 130.0], days_ago=7))
     assert alert.trigger == "time"
-    assert model.stock_exit_reason(conn, _paper_pos(7, value=13_000.0), flat, TODAY, []) == "год в позиции"
 
 
 def test_an_older_positions_table_gains_the_stop_column(tmp_path):
@@ -929,14 +931,6 @@ def test_position_status_reads_the_price_and_the_history_the_way_check_exits_doe
 
 
 # ------------------------------------------------------------------ portfolio_rows
-def _model_position(conn, book, ticker, closed=None, source="SEC"):
-    conn.execute(
-        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-        "net_eur, entry_close, entry_fx, closed_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (book, ticker, source, ticker, "USD", "2026-09-20", 1_000.0, 998.0, 10.0, 1.16, closed))
-    conn.commit()
-
-
 @pytest.fixture
 def priced(monkeypatch):
     """Every position is priced at 110 and has no price history: the seams portfolio_rows reads
@@ -955,7 +949,7 @@ def test_portfolio_rows_are_the_open_positions_oldest_first_with_their_status(co
     closed = _open(conn, "CCC", 10.0, days_ago=20, stop=0.10)
     positions.close_position(conn, closed.ticker, today=TODAY)
     rows = _rows(conn)
-    assert [(p.ticker, st["days"], holds) for p, st, holds in rows] == [("AAA", 9, False), ("BBB", 2, False)]
+    assert [(p.ticker, st["days"]) for p, st in rows] == [("AAA", 9), ("BBB", 2)]
     assert rows[0][1]["last"] == 110.0 and rows[0][1]["result"] == pytest.approx(0.10)
 
 
@@ -963,39 +957,27 @@ def test_portfolio_rows_of_no_positions_is_empty(conn, priced):
     assert _rows(conn) == []
 
 
-def test_portfolio_rows_say_when_the_model_holds_the_same_name(conn, priced):
-    _model_position(conn, model.STOCK_BOOK, "AAA")
-    _model_position(conn, model.CRYPTO_BOOK, "CRYPTO:BTC")
-    _model_position(conn, model.STOCK_BOOK, "OLD", closed="2026-09-25")      # sold: not held
-    _model_position(conn, "R1-E1", "ZZZ")                                    # an archived book is not the model
-    for ticker in ("AAA", "CRYPTO:BTC", "BBB", "OLD", "ZZZ"):
-        _open(conn, ticker, 100.0, stop=0.10)
-    holds = {p.ticker: held for p, _st, held in _rows(conn)}
-    assert holds == {"AAA": True, "CRYPTO:BTC": True, "BBB": False, "OLD": False, "ZZZ": False}
+def test_a_row_is_a_position_and_its_status_and_nothing_about_a_model(conn, priced):
+    """The old virtual books' rows stay in the database as an archive; no row says anything about them."""
+    conn.execute(
+        "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
+        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', 'AAA', 'SEC', 'AAA', 'USD', '2026-09-20', "
+        "1000, 998, 10, 1.16)")
+    conn.commit()
+    _open(conn, "AAA", 100.0, stop=0.10)
+    [row] = _rows(conn)
+    assert len(row) == 2 and row[0].ticker == "AAA"
+    assert not hasattr(positions, "_model_names")
 
 
-def test_a_stock_named_like_a_coin_is_not_the_coin_the_model_holds(conn, priced):
-    """The stock BTC (Grayscale's ETF) and the coin CRYPTO:BTC are two assets."""
-    _model_position(conn, model.CRYPTO_BOOK, "CRYPTO:BTC")
-    _open(conn, "BTC", 100.0, stop=0.10)
-    assert [held for _p, _st, held in _rows(conn)] == [False]
-
-
-def test_an_oslo_listing_is_not_the_us_stock_of_the_same_name_the_model_holds(conn, priced):
-    """Oslo's NRC and the US NRC are two companies: only a match on the venue too counts."""
-    _model_position(conn, model.STOCK_BOOK, "NRC")                       # the US NRC
-    oslo = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY",
-                                   closes_fn=lambda t, s=None: [])
-    us = positions.open_position(conn, "AAA", 100.0, today=TODAY, closes_fn=lambda t, s=None: [])
-    _model_position(conn, model.STOCK_BOOK, "AAA")
-    holds = {p.ticker: held for p, _st, held in _rows(conn)}
-    assert holds == {"NRC": False, "AAA": True} and oslo.source == "NORWAY" and us.source is None
-
-
-def test_an_oslo_listing_the_model_holds_on_oslo_too_counts(conn, priced):
-    _model_position(conn, model.STOCK_BOOK, "NRC", source="NORWAY")
-    positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY", closes_fn=lambda t, s=None: [])
-    assert [held for _p, _st, held in _rows(conn)] == [True]
+def test_asset_key_tells_a_coin_a_stock_and_a_venue_listing_apart():
+    """The one key a score and a position are compared by (signals_weekly.held_names)."""
+    key = positions._asset_key
+    assert key("CRYPTO:BTC", "CRYPTO") == ("coin", "BTC", "")
+    assert key("BTC", "SEC") == ("stock", "BTC", "") != key("CRYPTO:BTC", "CRYPTO")    # the ETF is not the coin
+    assert key("NRC", "NORWAY") == ("stock", "NRC", "NORWAY") != key("NRC", "SEC")      # Oslo's NRC is not the US NRC
+    assert key("VOLV-B", "SWEDEN") == ("stock", "VOLV-B", "SWEDEN")
+    assert key("aaa") == key("AAA", "HOUSE") == ("stock", "AAA", "")
 
 
 # ------------------------------------------------------- Trading 212 holdings (t212_account.py)
@@ -1187,8 +1169,8 @@ def test_portfolio_rows_can_keep_to_the_manual_positions(conn, monkeypatch):
     monkeypatch.setattr(positions, "daily_closes", lambda t, s=None: [])
     _t212(conn, "GME", source=None, t212_ticker="GME_US_EQ")
     _open(conn, "AAA", 100.0, stop=0.10)
-    assert [p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY, origin="manual")] == ["AAA"]
-    assert {p.ticker for p, _st, _h in positions.portfolio_rows(conn, TODAY)} == {"AAA", "GME"}
+    assert [p.ticker for p, _st in positions.portfolio_rows(conn, TODAY, origin="manual")] == ["AAA"]
+    assert {p.ticker for p, _st in positions.portfolio_rows(conn, TODAY)} == {"AAA", "GME"}
 
 
 def test_find_holding_is_the_trading_212_holding_meant_by_its_ticker_or_its_us_code(conn):

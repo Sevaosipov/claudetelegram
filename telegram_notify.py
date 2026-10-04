@@ -648,8 +648,7 @@ def position_result(entry: float, last: float, qty: float | None = None,
     return signed_pct(pct), None, round(pct * 100, 1) >= 0
 
 
-# What a close alert says happened, by its trigger (positions.py). A model sale (paper_report) words
-# its own reasons with the same phrases.
+# What a close alert says happened, by its trigger (positions.py).
 CLOSE_EVENT = {"trailing_stop": "сработал стоп", "insider_sell": "продаёт инсайдер",
                "caution": "отток по монете", "trend_down": "тренд развернулся вниз",
                "dead_money": "стоит на месте", "time": "год в позиции", "news": "плохие новости",
@@ -755,7 +754,7 @@ def format_positions(positions: list, price_fn) -> str:
     return "\n".join(lines)
 
 
-# ------------------------------------------------------------------ the model portfolio
+# ------------------------------------------------------- numbers, and the model's scores
 _MAX_OTHER_STOCKS = 15
 
 
@@ -838,9 +837,8 @@ def format_scored(scored: list, *, html: bool = False) -> str:
 
 
 # ------------------------------------------------------- your own positions (/portfolio)
-_NO_POSITIONS = ("Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
-                 "Модельный портфель: /model.")
-_SELL_HINT = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть, /model — модельный портфель."
+_NO_POSITIONS = "Ваших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10."
+_SELL_HINT = "Сигнал на продажу придёт сразу. /sold TICKER — закрыть."
 
 
 def _price(x: float) -> str:
@@ -854,11 +852,10 @@ def quantity(x: float) -> str:
     return text.replace(",", " ").replace(".", ",")
 
 
-def _status_lines(pos, st: dict, model_holds: bool) -> list[str]:
-    """What stands under a position's own line: the stop (when there is a price), who it watches,
-    and whether the model holds it too. `st` is positions.position_status; its to_stop is how far
-    the price can still fall before the stop, and below the stop (negative) «ниже стопа на» shows
-    the same figure without its sign."""
+def _status_lines(pos, st: dict) -> list[str]:
+    """What stands under a position's own line: the stop (when there is a price) and who it watches.
+    `st` is positions.position_status; its to_stop is how far the price can still fall before the
+    stop, and below the stop (negative) «ниже стопа на» shows the same figure without its sign."""
     lines = []
     if st["last"] is not None:
         gap = (f"до стопа {share_pct(st['to_stop'])}" if st["to_stop"] >= 0
@@ -867,25 +864,23 @@ def _status_lines(pos, st: dict, model_holds: bool) -> list[str]:
                      f"{_price(st['peak'])}), {gap}")
     if pos.insiders:
         lines.append(f"   слежу за продажами: {', '.join(pos.insiders)}")
-    if model_holds:
-        lines.append("   модель тоже держит")
     return lines
 
 
-def _my_block(pos, st: dict, model_holds: bool, html: bool) -> str:
+def _my_block(pos, st: dict, html: bool) -> str:
     """One position: how it stands now, then its status lines (_status_lines)."""
     now = (f"сейчас {_price(st['last'])} ({signed_pct(st['result'])})" if st["last"] is not None
            else "сейчас — цена недоступна")
     lines = [f"• {crypto.symbol_of(pos.ticker)}: вход {_price(pos.entry_price)} "
              f"({dt.date.fromisoformat(pos.opened_at):%d.%m}), {now}, {st['days']} дн."]
-    return "\n".join(_e(line, html) for line in lines + _status_lines(pos, st, model_holds))
+    return "\n".join(_e(line, html) for line in lines + _status_lines(pos, st))
 
 
 def my_position_blocks(rows: list, *, html: bool = True) -> list[str]:
-    """The positions of `rows` -- (Position, positions.position_status, model_holds) -- oldest
-    first, one block each (its lines joined by a newline)."""
+    """The positions of `rows` -- (Position, positions.position_status) -- oldest first, one block
+    each (its lines joined by a newline)."""
     ordered = sorted(rows, key=lambda r: (r[0].opened_at, r[0].id))
-    return [_my_block(pos, st, held, html) for pos, st, held in ordered]
+    return [_my_block(pos, st, html) for pos, st in ordered]
 
 
 # ---- the Trading 212 account in /portfolio (t212_account.portfolio_view builds what is shown)
@@ -969,9 +964,7 @@ def _t212_block(h, html: bool) -> str:
         parts.append(f"{h.days} дн.")
     lines = [f"• {h.name} — " + ", ".join(parts)]
     if h.position is not None and h.status is not None:
-        lines += _status_lines(h.position, h.status, h.model_holds)
-    elif h.model_holds:
-        lines.append("   модель тоже держит")
+        lines += _status_lines(h.position, h.status)
     return "\n".join(_e(line, html) for line in lines)
 
 
@@ -1005,7 +998,7 @@ def format_my_portfolio(rows: list, *, html: bool = True, t212=None) -> str:
     account line and a block per holding, or why Trading 212 gave no answer -- and `rows`, the
     positions that are not in the account, follow under «✍️ Вне Trading 212». The average is
     then over both."""
-    results = [st["result"] for _pos, st, _held in rows if st["result"] is not None]
+    results = [st["result"] for _pos, st in rows if st["result"] is not None]
     if t212 is None:
         if not rows:
             return _NO_POSITIONS

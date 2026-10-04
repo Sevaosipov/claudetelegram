@@ -2161,7 +2161,7 @@ def test_the_live_view_is_what_the_account_holds_now_with_each_tracked_holdings_
         ("GME", 12.0, 23.50, 25.00, "USD", 15.5, "EUR", "2026-09-28")     # the account's own figures, now
     assert h.position.ticker == "GME" and h.position.insiders == ["Ryan Cohen"]
     assert h.status["last"] == 25.00 and h.status["stop_pct"] == 0.10     # the stop the sync fixed
-    assert h.model_holds is False and h.days == 3                   # bought 28.09, today is 01.10
+    assert h.days == 3                                              # bought 28.09, today is 01.10
 
 
 def test_a_legacy_holding_is_shown_with_its_real_result_and_its_days_since_the_purchase(conn, run, no_yahoo):
@@ -2310,31 +2310,41 @@ def test_a_key_problem_carries_the_hint_and_a_bad_answer_a_fixed_reason(conn, er
     assert (view.error, view.hint, view.holdings) == (reason, hint, [])
 
 
+def test_the_portfolio_text_is_the_account_then_what_was_bought_by_hand(conn, monkeypatch):
+    """What /portfolio says (and the menu's «Мой портфель»): the live account view, then the /bought positions."""
+    import telegram_notify
+    seen = []
+    view = ta.PortfolioView([], error="ключ Trading 212 не задан", hint=ta.KEY_HINT)
+    monkeypatch.setattr(ta, "portfolio_view", lambda c, today, **k: seen.append(("view", today)) or view)
+    monkeypatch.setattr(ta.positions, "portfolio_rows",
+                        lambda c, today, **k: seen.append(("rows", today, k)) or [])
+    html = ta.portfolio_text(conn, TODAY)
+    assert html == telegram_notify.format_my_portfolio([], t212=view) and html.startswith("<b>💼 Trading 212</b>")
+    plain = ta.portfolio_text(conn, TODAY, html=False)
+    assert plain == telegram_notify.format_my_portfolio([], html=False, t212=view) and "<b>" not in plain
+    assert seen[:2] == [("view", TODAY), ("rows", TODAY, {"origin": "manual"})]
+
+
 def test_with_no_key_the_view_asks_nothing_and_says_so(conn):
     view = ta.portfolio_view(conn, TODAY, now=NOW)                  # the real client: no key in the tests
     assert (view.error, view.hint) == (ta.NO_KEY, ta.KEY_HINT)
 
 
-def _model_holds(conn, ticker, source="SEC"):
+def test_a_holding_has_no_model_flag_and_the_old_virtual_books_change_nothing_in_the_view(conn, run, no_yahoo):
+    """The paper_* rows of the removed portfolio stay in the database as an archive; the view does not read them."""
+    _synced_before(conn)
     conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', ?, ?, ?, 'USD', '2026-09-25', 1000, 998, 40, 1.16)",
-        (ticker, source, ticker))
+        "net_eur, entry_close, entry_fx) VALUES ('MODEL-S', 'GME', 'SEC', 'GME', 'USD', '2026-09-25', 1000, 998, "
+        "40, 1.16)")
     conn.commit()
-
-
-def test_the_view_says_when_the_model_holds_the_same_name(conn, run, no_yahoo):
-    _synced_before(conn)
-    conn.execute("INSERT INTO oslo_isins (ticker, isin, fetched_at) VALUES ('EQNR', 'NO0010096985', "
-                 "'2026-09-01T00:00:00')")
-    _model_holds(conn, "GME")
-    _model_holds(conn, "EQNR", source="NORWAY")                     # the model holds Equinor in Oslo
-    held = [_holding(), _holding(**SAP), _holding("EQNRd_EQ", "NO0010096985", currency="EUR")]
+    held = [_holding(), _holding(**SAP)]
     run(*held)
-    assert {h.name: h.model_holds for h in _view(conn, *held).holdings} == \
-        {"GME": True, "SAP": False, "EQNR": True}
-    stored = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status")))
-    assert {h.name: h.model_holds for h in stored.holdings} == {"GME": True, "SAP": False, "EQNR": True}
+    live = _view(conn, *held).holdings
+    stored = _view(conn, fetch=_fails(ta.T212Error("HTTP 500", "status"))).holdings
+    assert {h.name for h in live} == {h.name for h in stored} == {"GME", "SAP"}
+    assert not any(hasattr(h, "model_holds") for h in live + stored)
+    assert not hasattr(ta, "_model_holds") and not hasattr(ta.positions, "_model_names")
 
 
 def test_the_view_shows_a_holding_it_cannot_key_by_whatever_names_it(conn, no_yahoo):

@@ -915,19 +915,17 @@ def test_portfolio_opens_with_your_positions_then_the_model(conn, my_prices):
     model.create_books(conn, dt.date(2026, 9, 1))
     _bought(conn, "GME", insiders='["Ryan Cohen"]')
     _bought(conn, "BBB", opened="2026-09-30", entry=10.0)
-    _paper_position(conn, S, "GME")                                  # the model holds it too
     out = analyst.portfolio(conn, scored=[])
     lines = out.splitlines()
     days = (dt.date.today() - dt.date(2026, 9, 28)).days
-    assert lines[:5] == [
+    assert lines[:4] == [
         "ВАШИ ПОЗИЦИИ (/bought):",
         f"• GME: вход 23,10 (28.09), сейчас 24,05 (+4,1%), {days} дн.",
         "   стоп 20,79 (−10% от максимума 23,10), до стопа 13,6%",
-        "   слежу за продажами: Ryan Cohen",
-        "   модель тоже держит"]
-    assert lines[5].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
-    assert lines[6].startswith("   стоп ")
-    assert lines[7] == "" and lines[8].startswith("Модельный портфель")        # then the model, as before
+        "   слежу за продажами: Ryan Cohen"]
+    assert lines[4].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
+    assert lines[5].startswith("   стоп ")
+    assert lines[6] == "" and lines[7].startswith("Модельный портфель")        # then the model, as before
     assert out.index("ВАШИ ПОЗИЦИИ") < out.index("Модельный портфель") < out.index("НАБЛЮДЕНИЕ:") \
         < out.index("ПОКУПКИ СЕГОДНЯ:")
 
@@ -1013,21 +1011,19 @@ def test_portfolio_shows_the_trading_212_account_from_what_the_sync_stored(conn,
     _t212_snapshot(conn, "2026-09-30", total=1.0)
     _t212_snapshot(conn)                                             # the latest snapshot
     _bought(conn, "BBB", opened="2026-09-30", entry=10.0)
-    _paper_position(conn, S, "GME")                                  # the model holds it too
     lines = analyst.portfolio(conn, scored=[]).splitlines()
-    assert lines[:7] == [
+    assert lines[:6] == [
         "ВАШИ ПОЗИЦИИ (Trading 212 и /bought):",
         _SNAPSHOT_LINE,
         "В Trading 212:",
         "• GME — 10 шт., средняя 23,10, сейчас 24,05 USD (+4,1%), $+9,50",      # 10 x (24,05 - 23,10)
         "   стоп 20,79 (−10% от максимума 23,10), до стопа 13,6%",
-        "   слежу за продажами: Ryan Cohen",
-        "   модель тоже держит"]
-    assert lines[7] == "• SAP — 2,5 шт., средняя 120,00, сейчас 126,00 EUR (+5,0%), €+15,00"
-    assert lines[8].startswith("   стоп ")
-    assert lines[9] == "Вне Trading 212 (/bought):"
-    assert lines[10].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
-    assert lines[12] == "" and lines[13].startswith("Модельный портфель")     # then the model, as before
+        "   слежу за продажами: Ryan Cohen"]
+    assert lines[6] == "• SAP — 2,5 шт., средняя 120,00, сейчас 126,00 EUR (+5,0%), €+15,00"
+    assert lines[7].startswith("   стоп ")
+    assert lines[8] == "Вне Trading 212 (/bought):"
+    assert lines[9].startswith("• BBB: вход 10,00 (30.09), сейчас 24,05 (+140,5%), ")
+    assert lines[11] == "" and lines[12].startswith("Модельный портфель")     # then the model, as before
     assert "GME: вход" not in "\n".join(lines)                       # a holding is not listed twice
 
 

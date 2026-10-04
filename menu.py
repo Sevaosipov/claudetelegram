@@ -12,9 +12,9 @@ from pathlib import Path
 import analyst
 import db
 import model
-import paper_report
 import positions
 import research
+import t212_account
 import telegram_notify
 import termstyle
 
@@ -61,11 +61,15 @@ def show_research(conn) -> None:
         print(f"Ошибка: {type(e).__name__}: {e}")
 
 
-def show_paper(conn) -> None:
-    """The model portfolio against the 70/30 mix. Details of one book: python paper.py MODEL-S."""
+def show_portfolio(conn) -> None:
+    """Your portfolio: what /portfolio sends in Telegram, as plain text -- your Trading 212 account
+    (asked now, read only; or what the last sync stored, with why) and the positions you recorded with
+    /bought. The bot holds no portfolio of its own."""
     print()
-    print(paper_report.format_summary(conn, dt.date.today()))
-    print("\nПодробно: python paper.py MODEL-S (или MODEL-C, R1-E1 …)")
+    try:
+        print(t212_account.portfolio_text(conn, dt.date.today(), html=False))
+    except Exception as e:  # a failed call must not end the menu
+        print(f"Ошибка: {type(e).__name__}: {e}")
 
 
 def ask_analyst() -> None:
@@ -88,7 +92,7 @@ def main() -> None:
         print(termstyle.header("disclosure-bot"))
         print("1) Сигналы")
         print("2) Досье по тикеру или монете")
-        print("3) Модельный портфель")
+        print("3) Мой портфель")
         print("4) Спросить аналитика")
         print("0) Выход")
         choice = input("Выбор: ").strip()
@@ -98,7 +102,7 @@ def main() -> None:
         elif choice == "2":
             show_research(conn)
         elif choice == "3":
-            show_paper(conn)
+            show_portfolio(conn)
         elif choice == "4":
             ask_analyst()
         elif choice == "0":

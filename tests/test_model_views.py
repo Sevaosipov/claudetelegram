@@ -941,13 +941,56 @@ def test_menu_signals_score_afresh_when_only_another_days_scores_are_kept(conn, 
     assert "NEW 61" in out and "OLD" not in out and "Считаю оценки" in out
 
 
-def test_menu_shows_the_model_summary_and_where_to_look_further(conn, capsys):
+def test_menu_option_3_shows_your_portfolio_as_plain_text(conn, capsys, monkeypatch):
+    """«3) Мой портфель» is the /portfolio text -- your Trading 212 account and what you recorded with /bought --
+    without markup."""
     import menu
-    model.create_books(conn, dt.date.today() - dt.timedelta(days=10))     # the menu reads the clock
-    menu.show_paper(conn)
+    import t212_account
+
+    monkeypatch.setattr(t212_account, "portfolio_view", lambda c, today, **k: t212_account.PortfolioView(
+        [], error="ключ Trading 212 не задан", hint="положите ключ в .env"))
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
+    monkeypatch.setattr("prices._closes", lambda symbol, days: [])
+    positions.open_position(conn, "GRAB", 40.0)
+    menu.show_portfolio(conn)
     out = capsys.readouterr().out
-    assert "Модельный портфель — день 10" in out
-    assert "Подробно: python paper.py MODEL-S (или MODEL-C, R1-E1 …)" in out
+    assert "💼 Trading 212\n⚠️ Ключ Trading 212 не задан\nположите ключ в .env" in out
+    assert "✍️ Вне Trading 212" in out and "• GRAB: вход 40,00" in out and "сейчас 50,00 (+25,0%)" in out
+    assert "<b>" not in out and "&amp;" not in out
+    assert "Сигнал на продажу придёт сразу. /sold TICKER — закрыть." in out
+    assert "модел" not in out.lower() and "paper.py" not in out
+
+
+def test_menu_option_3_with_nothing_held_says_how_to_add_a_position(conn, capsys, monkeypatch):
+    import menu
+    import t212_account
+
+    monkeypatch.setattr(t212_account, "portfolio_view", lambda c, today, **k: t212_account.PortfolioView([]))
+    menu.show_portfolio(conn)
+    assert "Ваших позиций нет. Купили? /bought TICKER [цена]" in capsys.readouterr().out
+
+
+def test_menu_option_3_survives_a_failure(conn, capsys, monkeypatch):
+    import menu
+    import t212_account
+
+    def boom(c, today, **k):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(t212_account, "portfolio_view", boom)
+    menu.show_portfolio(conn)
+    assert "Ошибка: RuntimeError: offline" in capsys.readouterr().out
+
+
+def test_the_menu_dispatches_3_to_the_portfolio(conn, capsys, monkeypatch):
+    import menu
+
+    answers = iter(["3", "0"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(menu.db, "connect", lambda path: conn)
+    shown = []
+    monkeypatch.setattr(menu, "show_portfolio", lambda c: shown.append(c))
+    menu.main()
+    assert shown == [conn] and "3) Мой портфель" in capsys.readouterr().out
 
 
 def test_menu_labels():
@@ -955,6 +998,6 @@ def test_menu_labels():
 
     import menu
     src = inspect.getsource(menu.main)
-    assert '"1) Сигналы"' in src and '"3) Модельный портфель"' in src
-    assert "Бумажный портфель" not in src
-
+    assert '"1) Сигналы"' in src and '"3) Мой портфель"' in src and '"4) Спросить аналитика"' in src
+    assert "Модельный портфель" not in src and "Бумажный портфель" not in src
+    assert not hasattr(menu, "show_paper") and not hasattr(menu, "paper_report")

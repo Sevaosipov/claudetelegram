@@ -316,7 +316,7 @@ def test_bought_names_the_insiders_it_watches_escaped(conn, replies, monkeypatch
 # time.
 
 def _norway_journal(conn, ticker):
-    """A row as the tiered design wrote it (tier "strong"); the model's own rows are covered
+    """A row as the tiered design wrote it (tier "strong"); the scoring's own rows are covered
     in test_bot_model.py."""
     import db
     db.journal_signal(conn, {"source": "NORWAY", "kind": "cluster", "ticker": ticker,
@@ -625,40 +625,20 @@ def test_two_identical_questions_are_two_rows(conn, analysis):
 
 
 # ------------------------------------------------------------ /model, /portfolio, help
-def test_model_sends_the_model_summary_without_claude(conn, analysis, sent, monkeypatch):
-    import datetime as dt
-    import paper_report
-    seen = []
-    monkeypatch.setattr(paper_report, "format_summary",
-                        lambda c, today, **kw: seen.append((c, today, kw)) or "СВОДКА <b>x</b>")
-    tb._handle_message(conn, "/model")
-    assert sent == ["СВОДКА <b>x</b>"] and analysis.labels == []
-    assert seen == [(conn, dt.date.today(), {"html": True})]
+@pytest.mark.parametrize("text", ["/model", "/model@my_bot", "/Model", "/MODEL extra words"])
+def test_model_is_no_command_any_more_it_answers_with_the_help(conn, analysis, sent, text):
+    """The virtual portfolio is gone: /model is an unknown command, which gets the help text -- no summary, no
+    Claude, no queued row."""
+    import db
+    tb._handle_message(conn, text)
+    assert sent == [tb.HELP_TEXT] and analysis.labels == [] and db.pending_analysis(conn) == []
 
 
-def test_model_before_any_run_says_so(conn, analysis, sent):
-    tb._handle_message(conn, "/model@my_bot")
-    assert len(sent) == 1 and "ещё не запущен" in sent[0]
-
-
-def test_model_failure_is_a_reply_not_a_crash(conn, analysis, sent, monkeypatch):
-    import paper_report
-
-    def boom(*a, **k):
-        raise ValueError("bad row")
-    monkeypatch.setattr(paper_report, "format_summary", boom)
-    tb._handle_message(conn, "/model")
-    assert len(sent) == 1 and "ValueError" in sent[0]
-
-
-def _never_the_model_summary(monkeypatch):
-    import paper_report
-    monkeypatch.setattr(paper_report, "format_summary",
-                        lambda *a, **k: pytest.fail("the model summary is /model's, not /portfolio's"))
+def test_the_bot_has_no_model_handler_and_does_not_import_the_old_report():
+    assert not hasattr(tb, "_handle_model") and not hasattr(tb, "paper_report")
 
 
 def test_portfolio_shows_your_own_positions_with_their_status(conn, replies, monkeypatch):
-    _never_the_model_summary(monkeypatch)
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
     tb._handle_message(conn, "/bought GRAB 40")
     replies.clear()
@@ -669,7 +649,7 @@ def test_portfolio_shows_your_own_positions_with_their_status(conn, replies, mon
     assert text.startswith("<b>💼 Trading 212</b>\n") and "Ваш портфель" not in text
     assert "сейчас 50,00 (+25,0%)" in text
     assert "   стоп 34,00 (−15% от максимума 40,00), до стопа 32,0%" in text      # no history: the fallback
-    assert text.endswith("/sold TICKER — закрыть, /model — модельный портфель.")
+    assert text.endswith("Сигнал на продажу придёт сразу. /sold TICKER — закрыть.")
 
 
 def test_a_price_at_the_peak_can_fall_by_the_stop_before_it_fires(conn, replies, monkeypatch):
@@ -694,11 +674,12 @@ def test_portfolio_and_positions_send_format_my_portfolio_of_the_rows(conn, sent
     for text in ("/portfolio", "/positions", "/Portfolio@my_bot"):
         tb._handle_message(conn, text)
     assert sent == ["MINE"] * 3
-    [(pos, st, held)] = seen[0]
-    assert (pos.ticker, st, held) == ("GRAB", {"last": 1.0, "d": "GRAB"}, False)
+    [(pos, st)] = seen[0]
+    assert (pos.ticker, st) == ("GRAB", {"last": 1.0, "d": "GRAB"})
 
 
-def test_portfolio_says_when_the_model_holds_the_same_name(conn, replies, monkeypatch):
+def test_portfolio_has_no_model_line_even_when_the_old_virtual_books_hold_the_name(conn, replies, monkeypatch):
+    """The paper_* rows of the removed portfolio stay in the database as an archive; nothing reads them."""
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
     conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
@@ -706,21 +687,16 @@ def test_portfolio_says_when_the_model_holds_the_same_name(conn, replies, monkey
         "1000, 998, 40, 1.16)")
     conn.commit()
     tb._handle_message(conn, "/bought GRAB 40")
-    tb._handle_message(conn, "/bought ORK 12")
     replies.clear()
     tb._handle_message(conn, "/portfolio")
     [text] = replies
-    assert text.count("модель тоже держит") == 1
-    grab = next(block for block in text.split("\n\n") if block.startswith("• GRAB"))
-    assert grab.endswith("модель тоже держит")
+    assert "• GRAB: вход 40,00" in text and "модел" not in text.lower()
 
 
 def test_portfolio_with_nothing_bought_says_how_to_add_one(conn, sent, monkeypatch):
-    _never_the_model_summary(monkeypatch)
     tb._handle_message(conn, "/portfolio")
     [text] = sent
-    assert text.endswith("\n\nВаших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10. "
-                         "Модельный портфель: /model.")
+    assert text.endswith("\n\nВаших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10.")
     assert text.startswith("<b>💼 Trading 212</b>\n")              # and why it shows no account: no key
 
 
@@ -742,14 +718,18 @@ def test_help_for_start_help_unknown_commands_and_empty(conn, analysis, sent, te
 def test_help_text_lists_questions_and_the_portfolio():
     assert "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком TradingView " \
            "и данными бота." in tb.HELP_TEXT
-    assert "/portfolio — ваш счёт Trading 212 и позиции /bought, /model — модельный портфель." \
-        in tb.HELP_TEXT.splitlines()
+    assert "/portfolio — ваш счёт Trading 212 и позиции /bought." in tb.HELP_TEXT.splitlines()
     assert "/backtest" in tb.HELP_TEXT and "/bought" in tb.HELP_TEXT
 
 
-def test_help_text_says_the_summary_comes_on_fridays():
-    assert "Сводка модельного портфеля приходит по пятницам." in tb.HELP_TEXT.splitlines()
+def test_help_text_says_when_the_signals_come():
+    assert ("Сигналы на покупку приходят по пятницам, сигнал на продажу по вашим позициям — сразу."
+            in tb.HELP_TEXT.splitlines())
     assert "в любой момент" not in tb.HELP_TEXT
+
+
+def test_help_text_has_no_model_lines():
+    assert "/model" not in tb.HELP_TEXT and "модел" not in tb.HELP_TEXT.lower()
 
 
 def test_the_positions_usage_says_how_to_record_a_buy_and_a_sale():
@@ -765,11 +745,10 @@ def test_the_module_docstring_mentions_questions():
     assert "/ask" in tb.__doc__ and "question" in tb.__doc__.lower()
 
 
-def test_the_module_docstring_says_what_portfolio_and_model_show():
+def test_the_module_docstring_says_what_portfolio_shows():
     doc = " ".join(tb.__doc__.split())
-    assert "/model sends the model portfolio's summary" in doc
     assert "/portfolio" in doc and "/positions" in doc and "own positions" in doc
-    assert "/portfolio sends the model portfolio" not in doc
+    assert "/model" not in doc and "model portfolio" not in doc
 
 
 def test_the_positions_commands_and_backtest_come_first(conn, analysis, sent, monkeypatch):
@@ -899,7 +878,7 @@ def test_portfolio_asks_trading_212_live_and_shows_the_account_then_the_rest(con
         "   стоп 19,55 (−15% от максимума 23,00), до стопа 18,7%"]
     assert blocks[2] == "<b>✍️ Вне Trading 212</b>" and blocks[3].startswith("• GRAB: вход 40,00 (")
     assert blocks[4].startswith("Средний результат: +14,6% по 2 позициям\n")     # (+4,1% and +25,0%) / 2
-    assert text.endswith("/sold TICKER — закрыть, /model — модельный портфель.")
+    assert text.endswith("Сигнал на продажу придёт сразу. /sold TICKER — закрыть.")
     # the live answer is kept like a sync's
     assert conn.execute("SELECT price FROM t212_prices WHERE ticker = 'GME'").fetchall() == [(24.05,)]
 
