@@ -1,0 +1,84 @@
+"""signals_weekly.py: which buy signals the weekly run sends (spec 2026-10-04-remove-model-portfolio.md).
+
+The bot holds no portfolio: it scores every fresh signal and, once a week, tells the user which of
+the scores say BUY. The user's own Trading 212 account is the only portfolio, so a signal is worth
+sending only for a name that is not in it, and only once a month for any one ticker. pick_buys makes
+that choice from the day's scores; the weekly run (bot.py) keeps the picks, sends one message each
+(weekly.py words them) and writes a buy_signals row for every message that went out (record_signal).
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+
+import model_score
+import positions
+
+RESIGNAL_DAYS = 30          # a ticker signalled in the last this many days is not signalled again
+WEEKLY_BUY_LIMIT = 5        # at most this many new buy signals a week
+MAX_REASONS = 3             # the reasons kept with a signal (its message shows the first two)
+
+
+def held_names(conn) -> set[tuple[str, str, str]]:
+    """What the user holds now, as positions._asset_key names it: every open position of either origin
+    (/bought or the Trading 212 account) -- a coin by its symbol, a stock by its ticker, an Oslo or
+    Stockholm listing with its venue (Oslo's NRC is not the US NRC). A Trading 212 holding keyed by the
+    ISIN of an Oslo listing holds that listing too: Oslo's insider signals name the company by its
+    Oslo ticker."""
+    held = set()
+    for pos in positions.open_positions(conn):
+        held.add(positions._asset_key(pos.ticker, pos.source))
+        oslo = positions.oslo_ticker(conn, pos.ticker) if pos.source == positions.T212_SOURCE else None
+        if oslo:
+            held.add(positions._asset_key(oslo, "NORWAY"))
+    return held
+
+
+def recently_signalled(conn, today: dt.date) -> set[str]:
+    """The tickers with a buy_signals row sent in the last RESIGNAL_DAYS days (the day itself and the
+    day RESIGNAL_DAYS ago included)."""
+    since = (today - dt.timedelta(days=RESIGNAL_DAYS)).isoformat()
+    return {r[0] for r in conn.execute("SELECT DISTINCT ticker FROM buy_signals WHERE sent_at >= ?", (since,))}
+
+
+def pick_buys(conn, today: dt.date, scored: list) -> list:
+    """The scores to signal this week: only a BUY, the highest total first (equal totals as they came),
+    not a name the user holds (held_names), not a ticker signalled in the last RESIGNAL_DAYS days
+    (recently_signalled), at most WEEKLY_BUY_LIMIT. The scores themselves are returned -- StockScore,
+    CoinScore or the kept-score objects model.cached_scores gives. Reads the database, writes nothing."""
+    held, recent = held_names(conn), recently_signalled(conn, today)
+    picks: list = []
+    for s in sorted((s for s in scored if s.decision == model_score.BUY), key=lambda s: s.total, reverse=True):
+        key = positions._asset_key(s.ticker, getattr(s, "source", None))
+        if key in held or s.ticker in recent or any(p.ticker == s.ticker for p in picks):
+            continue
+        picks.append(s)
+        if len(picks) == WEEKLY_BUY_LIMIT:
+            break
+    return picks
+
+
+def pick_record(s) -> dict:
+    """A pick as what its message and its buy_signals row need -- plain JSON, so the week's picks can be
+    kept in kv and sent again by a retry without scoring again. A coin has its symbol for a company and
+    CRYPTO for a source."""
+    crypto_kind = s.kind == "crypto"
+    return {"ticker": s.ticker,
+            "source": getattr(s, "source", None) or ("CRYPTO" if crypto_kind else None),
+            "company": getattr(s, "company", None) or getattr(s, "coin", None),
+            "kind": s.kind, "score": s.total, "stop_pct": s.stop_pct,
+            "reasons": list(s.reasons)[:MAX_REASONS], "t212": getattr(s, "t212", None)}
+
+
+def record_signal(conn, pick: dict, today: dt.date, *, commit: bool = True) -> None:
+    """Write the buy_signals row of a pick whose message went out today. `commit=False` leaves it in the
+    caller's open transaction (bot.py commits it together with the week's sent list)."""
+    t212 = pick.get("t212")
+    conn.execute(
+        "INSERT INTO buy_signals (ticker, source, company, kind, score, stop_pct, reasons, t212, sent_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (pick["ticker"], pick.get("source"), pick.get("company"), pick.get("kind"), pick.get("score"),
+         pick.get("stop_pct"), json.dumps(pick.get("reasons") or [], ensure_ascii=False),
+         None if t212 is None else int(bool(t212)), today.isoformat()))
+    if commit:
+        conn.commit()

@@ -759,6 +759,85 @@ def test_a_failing_sleeve_is_logged_and_the_other_one_carries_on(conn, monkeypat
     assert report.bench is None and len(report.buys) == 1
 
 
+# --------------------------------------------------------------- score_day
+PAPER_TABLES = ("paper_books", "paper_orders", "paper_positions", "paper_equity")
+
+
+def _score_day(conn, signals=(), series=None, today=TODAY, **seams):
+    seams = _seams(**seams)
+    del seams["sector_fn"]
+    return model.score_day(conn, today, fetch=Fetch(series or {}), signals=list(signals), **seams)
+
+
+def _paper_rows(conn) -> int:
+    return sum(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in PAPER_TABLES)
+
+
+def test_score_day_scores_stores_the_days_scores_and_reports_them(conn):
+    report = _score_day(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],
+                  {"AAA": _stock_bars(), "BBB": _stock_bars(), "BTC-USD": _rising()})
+    assert isinstance(report, model.ScoreReport) and report.complete is True
+    assert [(s.ticker, s.total, s.decision) for s in report.scored] == [
+        ("AAA", 65.0, "buy"), ("CRYPTO:BTC", 60, "buy"), ("BBB", 34.0, "skip"), ("CRYPTO:ETH", 0, "watch")]
+    assert report.decisions == {"AAA": "buy", "CRYPTO:BTC": "buy", "BBB": "skip", "CRYPTO:ETH": "watch"}
+    assert [(s.ticker, s.total) for s in model.cached_scores(conn, TODAY)] == [
+        (s.ticker, s.total) for s in report.scored]
+
+
+def test_score_day_trades_nothing_and_writes_no_paper_row(conn):
+    """The virtual books are gone: scoring places no order, opens no book, stamps no equity."""
+    _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars(), "BTC-USD": _rising()})
+    assert _paper_rows(conn) == 0
+
+
+def test_score_day_hands_every_seam_to_the_scoring(conn, monkeypatch):
+    seen = {}
+
+    def score_today(conn_, today, **kw):
+        seen.update(kw, today=today)
+        return []
+    monkeypatch.setattr(model, "score_today", score_today)
+    fetch, news, trend, signals = Fetch({}), lambda t, s: [], lambda c, s: None, [_sig("AAA")]
+    model.score_day(conn, TODAY, fetch=fetch, news_fn=news, trend_fn=trend, signals=signals, t212=T212)
+    assert seen == {"today": TODAY, "fetch": fetch, "news_fn": news, "trend_fn": trend,
+                    "signals": signals, "t212": T212}
+
+
+def test_score_day_scores_for_today_when_no_day_is_given(conn):
+    report = model.score_day(conn, fetch=Fetch({}), signals=[], **{k: v for k, v in _seams().items()
+                                                                  if k != "sector_fn"})
+    assert report.complete is True
+    assert model.cached_scores(conn) is not None and model.cached_scores(conn, dt.date.today()) is not None
+
+
+def test_score_day_without_scores_is_incomplete_and_keeps_nothing(conn, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("finders down")
+    monkeypatch.setattr(model, "score_today", boom)
+    report = _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert (report.complete, report.scored, report.decisions) == (False, [], {})
+    assert model.cached_scores(conn, TODAY) is None
+    assert "[model] scoring failed: RuntimeError: finders down" in capsys.readouterr().err
+
+
+def test_score_day_undoes_what_a_failed_scoring_left_in_the_open_transaction(conn, monkeypatch):
+    def half_done(*a, **k):
+        conn.execute("INSERT INTO kv_cache (key, value, computed_at) VALUES ('half', 1, '2026-10-05T00:00:00')")
+        raise RuntimeError("down")
+    monkeypatch.setattr(model, "score_today", half_done)
+    assert _score_day(conn).complete is False
+    assert conn.execute("SELECT COUNT(*) FROM kv_cache WHERE key = 'half'").fetchone() == (0,)
+
+
+def test_scores_that_could_not_be_kept_do_not_make_the_day_incomplete(conn, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("cache")
+    monkeypatch.setattr(model, "keep_scores", boom)
+    report = _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert report.complete is True and [s.ticker for s in report.scored][:1] == ["AAA"]
+    assert "[model] scores not kept: RuntimeError: cache" in capsys.readouterr().err
+
+
 # -------------------------------------------------------------- score_today
 def test_score_today_scores_and_places_nothing(conn):
     scored = _score(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],

@@ -529,8 +529,10 @@ CREATE TABLE IF NOT EXISTS outlook_table (
     PRIMARY KEY (table_name, situation)
 );
 
--- The paper portfolio (paper.py): virtual books that trade the bot's own signals
--- on fixed rules. Nothing here is a real position -- see positions for those.
+-- The old virtual portfolio (the MODEL-S / MODEL-C books and the 2026-09-28 books before them): imaginary
+-- money that traded the bot's own signals. It is gone -- nothing reads or writes these tables any more,
+-- and their rows stay as an archive (the CREATE statements stay so old databases and tests keep working).
+-- Nothing here is a real position -- see positions for those.
 CREATE TABLE IF NOT EXISTS paper_books (
     code            TEXT PRIMARY KEY,   -- R1-E1 … R2-E4, R1-E1-AN, C-A, C-B
     sleeve          TEXT NOT NULL,      -- stock | crypto
@@ -586,6 +588,23 @@ CREATE TABLE IF NOT EXISTS paper_equity (
     bench  REAL,
     PRIMARY KEY (book, date)
 );
+
+-- The weekly buy signals the bot sent (signals_weekly.py): one row per signal, written once its Telegram
+-- message went out. It is what keeps a ticker from being signalled again within RESIGNAL_DAYS, what the
+-- weekly summary counts and what the analyst lists. Not a position: the user's account is the portfolio.
+CREATE TABLE IF NOT EXISTS buy_signals (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker    TEXT NOT NULL,             -- a coin as CRYPTO:BTC
+    source    TEXT,                      -- the source of the signal behind it; CRYPTO for a coin
+    company   TEXT,                      -- a coin: its symbol
+    kind      TEXT,                      -- stock | crypto
+    score     REAL,
+    stop_pct  REAL,
+    reasons   TEXT,                      -- JSON list of the score's reasons, as the message gave them
+    t212      INTEGER,                   -- 1 Trading 212 lists it, 0 it does not, NULL not checked
+    sent_at   TEXT NOT NULL              -- ISO date of the message
+);
+CREATE INDEX IF NOT EXISTS buy_signals_ticker ON buy_signals(ticker, sent_at);
 """
 
 
@@ -609,7 +628,7 @@ _ADDED_COLUMNS = [
     ("outlook_table", "assets", "INTEGER"),
     ("outlook_table", "oos_folds", "INTEGER"),
     ("outlook_table", "oos_fold_wins", "INTEGER"),
-    # The model portfolio (model.py): the stop distance and score a buy was sized and ranked by.
+    # The old virtual portfolio's stop distance and score (the tables are an archive now).
     ("paper_orders", "stop_pct", "REAL"),
     ("paper_orders", "score", "REAL"),
     ("paper_positions", "stop_pct", "REAL"),

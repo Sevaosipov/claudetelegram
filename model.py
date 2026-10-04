@@ -86,6 +86,15 @@ class Trade:
 
 
 @dataclass
+class ScoreReport:
+    """What score_day gives back: the day's scores, the decision per ticker (for the journal) and whether
+    scoring got through. bot.py picks the week's buy signals only from a complete report."""
+    scored: list              # StockScore and CoinScore, highest total first
+    decisions: dict[str, str]  # ticker -> decision, for the journal
+    complete: bool = True     # False when scoring raised (caught and logged): there are no scores then
+
+
+@dataclass
 class DayReport:
     buys: list[Trade]
     sells: list[Trade]
@@ -317,6 +326,28 @@ def score_today(conn, today: dt.date | None = None, *, fetch=None, news_fn=None,
     scored = (_score_stocks(conn, candidates, prices, today, news_fn, t212, prune)
               + _score_coins(conn, candidates, prices, today, news_fn, trend_fn))
     return sorted(scored, key=lambda s: s.total, reverse=True)
+
+
+def score_day(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_fn=None,
+              signals=None, t212=None) -> ScoreReport:
+    """The daily scoring pass: score every fresh stock signal and both coins (score_today), keep the day's
+    scores for the menu and the analyst (keep_scores) and report them. It trades nothing -- there is no
+    virtual portfolio -- and touches no table but the kv cache. A scoring that raises is logged and undone:
+    the report is then empty and not `complete`. Scores that could not be kept are logged and the pass is
+    still complete (the menu and the analyst then score for themselves). The seams are score_today's."""
+    today = today or dt.date.today()
+    try:
+        scored = score_today(conn, today, fetch=fetch, news_fn=news_fn, trend_fn=trend_fn,
+                             signals=signals, t212=t212)
+    except Exception as e:
+        conn.rollback()
+        print(f"[model] scoring failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return ScoreReport(scored=[], decisions={}, complete=False)
+    try:
+        keep_scores(conn, today, scored)
+    except Exception as e:
+        print(f"[model] scores not kept: {type(e).__name__}: {e}", file=sys.stderr)
+    return ScoreReport(scored=scored, decisions={s.ticker: s.decision for s in scored})
 
 
 # ---------------------------------------------------------------- exits
