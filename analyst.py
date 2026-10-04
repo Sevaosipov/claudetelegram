@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 
 import assets
+import crypto
 import db
 import model
 import model_score
@@ -623,16 +624,27 @@ def _kept_scores(conn) -> list | None:
         return None
 
 
+def _coins_asked(ticker: str) -> set[str]:
+    """The scored coins a question about `ticker` is about: the one coin it names ("SOL", "crypto:sol",
+    "CRYPTO:SOL"), or none -- a stock, however it is spelled ("$BTC" is the stock), an Oslo listing or a coin
+    the bot does not score (ADA)."""
+    keys = _Spellings(ticker)
+    if keys.stock_only:
+        return set()
+    return {coin for coin in model.COINS if coin in keys.names or crypto.ticker(coin) in keys.names}
+
+
 def _score_today(conn, ticker: str | None = None) -> tuple[list | None, str | None]:
     """(the model's scores, None), or (None, the error's type name): scoring reaches for the
     network and the finders, and what the analyst has besides it is still worth having. With a
-    `ticker`, only that name's signals are looked at and enriched (the coins are always scored)."""
+    `ticker`, only that name's signals are looked at and enriched, and only the coin it names is
+    scored (_coins_asked: none for a stock; bitcoin is still read for an alt's gate)."""
     try:
         if ticker is None:
             return model.score_today(conn), None
         today = dt.date.today()
         signals = model.candidate_signals(conn, today, tickers=_Spellings(ticker).names)
-        return model.score_today(conn, today, signals=signals, prune=False), None
+        return model.score_today(conn, today, signals=signals, prune=False, coins=_coins_asked(ticker)), None
     except Exception as e:
         return None, type(e).__name__
 

@@ -245,3 +245,17 @@ average). `score_coin` gets a second keyword, `btc_known: bool = True`, next to 
 `btc_known = coin_trend(...) is not None`. As before the reason is added only when the gate turned a would-be BUY into WATCH;
 BTC and ETH are not gated. Tests: no bitcoin at all, and bitcoin with 100 and 120 closes, give the no-data reason; bitcoin
 known down gives the old one; 121 closes can be read; ETH is not gated; `score_coin` cases. README and the analyst method say it.
+
+### R5. The analyst's single-ticker context scores only what it needs
+
+- `model.score_today(..., coins=None)` takes an optional set of coin symbols to score: None -- the daily pass, the menu, the
+  analyst's `portfolio` -- is all thirteen; an empty set scores none (no coin price, no coin headlines is fetched); a symbol that
+  is not one of the thirteen is ignored. `score_day` is unchanged (it scores everything).
+- Bitcoin's closes are fetched for the alts' gate only when an alt is among the coins asked for, and bitcoin is returned only
+  when it is itself among them: a SOL question fetches BTC and SOL prices and SOL's headlines and returns SOL's score alone,
+  with the gate (and the R4 no-data reason) working; an ETH or BTC question fetches that coin only.
+- `analyst._score_today(conn, ticker)` passes `coins=` `_coins_asked(ticker)`: the one scored coin the ticker names (`SOL`,
+  `crypto:sol`, `CRYPTO:SOL`), none for a stock however it is spelled (`$BTC` is the stock, `EQNR.OL`, `NVDA`) and none for a coin
+  the bot does not score (`ADA`). The context still reads today's kept scores first.
+- Tests: a stock context fetches no coin price and asks no coin headline; a SOL context fetches SOL and BTC only; the gate still
+  works there; ETH and BTC contexts fetch that coin only; `portfolio` and `score_day` still score all thirteen.

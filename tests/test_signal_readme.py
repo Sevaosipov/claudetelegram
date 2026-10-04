@@ -219,6 +219,15 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
+def test_the_readme_says_the_analysts_context_scores_only_what_it_needs():
+    text = " ".join(_text().split())
+    for phrase in ("`context 'ТИКЕР'`", "считает заново и **только то, что нужно** (`model.score_today(…, coins=…)`)",
+                   "для акции — без монет (ни цен, ни новостей по монетам), для монеты — её одну",
+                   "для альта ещё читаются цены биткоина, но только для фильтра биткоина",
+                   "`$BTC` — это акция, монеты он не считает", "Меню и `portfolio` считают все тринадцать монет (`coins=None`)"):
+        assert phrase in text, phrase
+
+
 def test_the_readme_says_a_coins_good_headlines_add_no_points():
     text = " ".join(_text().split()).lower()
     for phrase in ("| Новости | −30…0 |", "Хорошие заголовки монете баллов не дают",
