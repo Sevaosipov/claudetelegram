@@ -139,11 +139,18 @@ def test_journal_writes_the_decision_and_the_alert_state_for_real(conn, monkeypa
 
 
 # ---------------------------------------------------------------- _send_closes
-def _closes(conn):
-    positions.open_position(conn, "ZZZ", 10.0, today=TODAY - dt.timedelta(days=400))
+def _closes(conn, tickers=("ZZZ",)):
+    """The close alerts of positions opened more than a year ago (the year rule fires), in the
+    order of `tickers`."""
+    for i, ticker in enumerate(tickers):
+        positions.open_position(conn, ticker, 10.0, today=TODAY - dt.timedelta(days=400 - i))
     closes = positions.check_exits(conn, price_fn=lambda t, s=None: None)
-    assert closes
+    assert [a.position.ticker for a in closes] == list(tickers)
     return closes
+
+
+def _pending(conn):
+    return [a.position.ticker for a in positions.check_exits(conn, price_fn=lambda t, s=None: None)]
 
 
 def test_send_closes_sends_nothing_when_there_are_none(conn, monkeypatch):
@@ -153,28 +160,62 @@ def test_send_closes_sends_nothing_when_there_are_none(conn, monkeypatch):
     assert sent == []
 
 
-def test_send_closes_marks_close_alerts_only_after_a_successful_send(conn, monkeypatch):
+def test_send_closes_marks_a_close_alert_only_after_its_own_successful_send(conn, monkeypatch):
     closes = _closes(conn)
 
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: False)
     assert bot._send_closes(conn, closes) is False
-    assert positions.check_exits(conn, price_fn=lambda t, s=None: None)        # still pending
+    assert _pending(conn) == ["ZZZ"]                                           # still pending
 
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     assert bot._send_closes(conn, closes) is True
-    assert positions.check_exits(conn, price_fn=lambda t, s=None: None) == []
+    assert _pending(conn) == []
 
 
-def test_send_closes_message_is_the_header_and_each_alert_in_html(conn, monkeypatch):
-    closes = _closes(conn)
+def test_send_closes_sends_each_alert_as_its_own_message_in_html_with_no_header(conn, monkeypatch):
+    closes = _closes(conn, ("ZZZ", "YYY"))
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    assert bot._send_closes(conn, closes) is True
+    assert sent == [telegram_notify.format_close_alert(a) for a in closes] and len(sent) == 2
+    assert all(t.startswith("🔴 <b>") for t in sent) and "ZZZ!" in sent[0] and "YYY!" in sent[1]
+    assert not any("Ваши позиции" in t or "🚪" in t for t in sent)
+    assert _pending(conn) == []
+
+
+def test_send_closes_marks_each_alert_right_after_its_own_send(conn, monkeypatch):
+    closes = _closes(conn, ("ZZZ", "YYY"))
+    seen = []
+
+    def send(msg):
+        seen.append(_pending(conn))              # what is still unmarked when this message goes out
+        return True
+    monkeypatch.setattr("telegram_notify.send_text", send)
     bot._send_closes(conn, closes)
-    [text] = sent
-    assert text == "\n".join(["<b>🚪 Ваши позиции</b>"]
-                             + [telegram_notify.format_close_alert(a) for a in closes])
-    assert "ZZZ" in text and "Модельный портфель" not in text
+    assert seen == [["ZZZ", "YYY"], ["YYY"]]
+
+
+def test_send_closes_when_the_second_fails_marks_only_the_first(conn, monkeypatch, capsys):
+    closes = _closes(conn, ("ZZZ", "YYY"))
+    answers = iter([True, False])
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or next(answers))
+    assert bot._send_closes(conn, closes) is False
+    assert len(sent) == 2 and _pending(conn) == ["YYY"]
+    assert "[telegram] send failed -- leaving 1 close alert(s) for the next run" in capsys.readouterr().err
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    assert bot._send_closes(conn, [a for a in closes if a.position.ticker in _pending(conn)]) is True
+    assert _pending(conn) == []
+
+
+def test_send_closes_stops_at_the_first_failure_and_leaves_the_rest(conn, monkeypatch, capsys):
+    closes = _closes(conn, ("ZZZ", "YYY", "XXX"))
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or False)
+    assert bot._send_closes(conn, closes) is False
+    assert len(sent) == 1 and _pending(conn) == ["ZZZ", "YYY", "XXX"]          # nothing marked, the others not tried
+    assert "leaving 3 close alert(s) for the next run" in capsys.readouterr().err
 
 
 def test_send_closes_says_a_failed_send_on_stderr(conn, monkeypatch, capsys):

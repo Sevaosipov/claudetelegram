@@ -577,14 +577,65 @@ def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
     return "\n\n".join(parts) if len(parts) > 1 else parts[0]
 
 
-_CLOSE_REASON = {"insider_sell": "инсайдеры продают", "caution": "сигнал осторожности",
-                 "trailing_stop": "стоп от максимума", "activist_cut": "активист сократил долю",
-                 "dead_money": "стоит на месте",
-                 "time": "год в позиции", "trend_down": "тренд вниз", "news": "плохие новости"}
+# ------------------------------------------------------------------ the signal line
+# Every automatic signal is one short message in the same shape (spec 2026-10-04-signal-message-style.md):
+# «🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, итог <b>−$24,00</b> (−10,4%)».
+DOT_GREEN, DOT_RED, DOT_NEUTRAL = "🟢", "🔴", "⚪"   # a buy or a gain / a loss or an unknown result / a neutral event
+
+
+def signal_line(dot: str, name: str, event: str, details: str | None = None, *,
+                result: str | None = None, extra: str | None = None, html: bool = True,
+                label: str = "итог") -> str:
+    """`{dot} <b>{name}!</b>: {event} — {details}`, and for a close `, итог <b>{result}</b>{extra}`.
+
+    `extra` follows the bold result as it is (a leading space and its brackets are the caller's:
+    « (−10,4%)»). `label` is what the result is called -- «итог», «итог ≈» (a result on the last
+    price known), «сейчас» (a sale still waiting). A part that is None or empty is left out, and
+    `extra` goes with the result alone. Every part is escaped; with html=False there are no tags
+    and nothing is escaped (the log, the menu)."""
+    text = f"{_e(dot, html)} {_b(f'{name}!', html)}: {_e(event, html)}"
+    if details:
+        text += f" — {_e(details, html)}"
+    if result:
+        text += f", {_e(label, html)} {_b(result, html)}{_e(extra or '', html)}"
+    return text
+
+
+def money_cents(x: float, currency: str | None = "EUR") -> str:
+    """A profit or loss to the cent, its sign before the currency: «+€8,30», «−$26,40», «+8,30 CHF»
+    for a currency with no sign of its own. No currency told is the euro, as money() has it."""
+    cents = round(abs(x), 2)
+    sign = "−" if x < 0 and cents else "+"
+    mark = _CURRENCY_SIGN.get(currency or "EUR")
+    return f"{sign}{mark}{_price(cents)}" if mark else f"{sign}{_price(cents)} {currency}"
+
+
+def position_result(entry: float, last: float, qty: float | None = None,
+                    currency: str | None = "EUR") -> tuple[str, str | None, bool]:
+    """How a real position stands, as signal_line shows it: (result, extra, gain).
+
+    With a quantity (a Trading 212 holding) the result is the money, in the position's own
+    currency -- no euro value is known here -- and `extra` the percent in brackets: «−$24,00»,
+    « (−10,4%)». Without one it is the percent alone: «−10,4%», None. `gain` is whether the
+    result, as shown, is zero or more (a green dot): it follows the rounded figure, so «+0,0%» is
+    never a loss."""
+    pct = last / entry - 1
+    if qty:
+        money = (last - entry) * qty
+        return money_cents(money, currency), f" ({signed_pct(pct)})", round(money, 2) >= 0
+    return signed_pct(pct), None, round(pct * 100, 1) >= 0
+
+
+# What a close alert says happened, by its trigger (positions.py). A model sale (paper_report) words
+# its own reasons with the same phrases.
+CLOSE_EVENT = {"trailing_stop": "сработал стоп", "insider_sell": "продаёт инсайдер",
+               "caution": "отток по монете", "trend_down": "тренд развернулся вниз",
+               "dead_money": "стоит на месте", "time": "год в позиции", "news": "плохие новости",
+               "activist_cut": "активист сократил долю"}
 
 
 def _position_name(pos) -> str:
-    """What a close alert and the menu's list call a position: its ticker -- but a Trading 212
+    """What the menu's list calls a position: its ticker -- but a Trading 212
     holding keyed by its ISIN by its Trading 212 symbol (SAP, not DE0007164600), the name its
     owner knows."""
     import positions        # light, and positions never imports this module
@@ -593,16 +644,34 @@ def _position_name(pos) -> str:
     return pos.ticker
 
 
+def _signal_name(pos) -> str:
+    """What a signal calls a position of the user's: a coin by its symbol (BTC), a Trading 212
+    holding by the name its owner knows (positions.name_of), anything else by its ticker."""
+    import positions
+    return positions.display_name(pos)
+
+
 def format_close_alert(alert, *, html: bool = True) -> str:
+    """The sell alert on a position of the user's (/bought or the Trading 212 account), one message:
+
+        🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, итог <b>−$24,00</b> (−10,4%)
+           −10% от максимума 25.80
+
+    The dot is green when the result is zero or more and red when it is a loss or there is no
+    price to tell it by (then «пора продавать: вход X» stands alone). A position with a quantity
+    gets its money result first (position_result), any other the percent. The alert's own detail
+    -- the insider and the date, the headline, the stop level -- is the second line, plain."""
     pos = alert.position
-    reason = _CLOSE_REASON.get(alert.trigger, alert.trigger)
-    price = ""
-    if alert.last_price:
-        change = (alert.last_price / pos.entry_price - 1) * 100
-        price = f" · вход {pos.entry_price:,.2f} → {alert.last_price:,.2f} ({change:+.1f}%)"
-    head = f"🚪 {_position_name(pos)} — {reason}"
-    detail = f"{alert.detail}{price} · открыта {datefmt.fmt(pos.opened_at)}"
-    return f"{_b(head, html)}\n   {_esc(detail) if html else detail}"
+    event = CLOSE_EVENT.get(alert.trigger, alert.trigger)
+    details = f"пора продавать: вход {_price(pos.entry_price)}"
+    shown = None
+    if alert.last_price and pos.entry_price:
+        details += f" → сейчас {_price(alert.last_price)}"
+        shown = position_result(pos.entry_price, alert.last_price, pos.quantity, pos.currency)
+    dot = DOT_GREEN if shown and shown[2] else DOT_RED
+    line = signal_line(dot, _signal_name(pos), event, details, html=html,
+                       result=shown[0] if shown else None, extra=shown[1] if shown else None)
+    return f"{line}\n   {_e(alert.detail, html)}" if alert.detail else line
 
 
 def format_positions(positions: list, price_fn) -> str:

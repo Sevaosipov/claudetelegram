@@ -809,7 +809,7 @@ def test_menu_signals_print_the_scored_list(conn, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "СИГНАЛЫ — оценка модели (покупка от 60, наблюдение 45–59)" in out
     assert "🟢 AAA" in out and "CRYPTO:BTC" in out
-    assert "CCC" in out and "стоп от максимума" in out         # the pending close alert
+    assert "🔴 CCC!: сработал стоп — пора продавать" in out     # the pending close alert
     assert "Открытые позиции" in out                            # the /bought positions
 
 

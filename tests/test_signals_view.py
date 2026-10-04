@@ -207,4 +207,5 @@ def test_view_shows_pending_close_alerts(conn, keyed, scored, capsys, monkeypatc
     conn.execute("UPDATE positions SET opened_at = ?", ((TODAY - dt.timedelta(days=5)).isoformat(),))
     menu.show_signals(conn)
     out = _shown(capsys)
-    assert "🚪 AAPL — стоп от максимума" in out
+    assert "🔴 AAPL!: сработал стоп — пора продавать: вход 100,00 → сейчас 84,00, итог −16,0%" in out
+    assert "🚪" not in out

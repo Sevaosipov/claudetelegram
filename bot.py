@@ -367,19 +367,19 @@ def _sync_t212(conn, args) -> None:
 
 
 def _send_closes(conn, closes: list) -> bool:
-    """The daily Telegram message: «🚪 Ваши позиции» and a close alert for each /bought position
-    that fired, as soon as it fires (it is real money, so it does not wait for the week). They
-    are marked alerted only if the send went through, so a failed send retries them next run.
-    Nothing fired -> nothing sent, returns False."""
+    """The daily Telegram signals: one message per close alert on a /bought or Trading 212 position
+    that fired, as soon as it fires (it is real money, so it does not wait for the week). Each alert
+    is marked alerted right after its own send went through; a failed send stops there and leaves
+    that alert and the ones after it for the next run. Nothing fired -> nothing sent, returns False;
+    True only when every alert went out."""
     if not closes:
         return False
-    text = "\n".join([telegram_notify._b("🚪 Ваши позиции", True)]
-                     + [telegram_notify.format_close_alert(a) for a in closes])
-    if not telegram_notify.send_text(text):
-        print(f"[telegram] send failed -- leaving {len(closes)} close alert(s) for the next run",
-              file=sys.stderr)
-        return False
-    positions.mark_alerted(conn, closes)
+    for i, alert in enumerate(closes):
+        if not telegram_notify.send_text(telegram_notify.format_close_alert(alert)):
+            print(f"[telegram] send failed -- leaving {len(closes) - i} close alert(s) for the next run",
+                  file=sys.stderr)
+            return False
+        positions.mark_alerted(conn, [alert])
     return True
 
 
