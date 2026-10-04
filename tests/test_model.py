@@ -726,7 +726,7 @@ def test_a_sol_etf_inflow_goes_through_the_whole_chain_to_a_high_risk_buy_line(c
     sol = _coin(scored, "SOL")
     assert (sol.flows, sol.total, sol.decision) == (15, 75, "buy")
     picks = signals_weekly.pick_buys(conn, TODAY, scored)
-    assert [p.ticker for p in picks] == ["CRYPTO:SOL", "CRYPTO:BTC"]                           # 75 before 60
+    assert [p.ticker for p in picks] == ["CRYPTO:BTC", "CRYPTO:SOL"]                           # the coins: BTC first, then the alt
     texts = dict(weekly.week_signals(conn, TODAY, [signals_weekly.pick_record(p) for p in picks]))
     assert texts["buy:CRYPTO:SOL"] == ("🟢 <b>SOL!</b>: покупка — выше 100-дн. средней; 20 дн. +4%; "
                                        "балл 75, стоп −15%, высокий риск")

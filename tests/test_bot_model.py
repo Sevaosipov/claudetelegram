@@ -500,7 +500,7 @@ def test_the_week_keeps_bitcoin_and_ether_as_the_two_coins_before_higher_scoring
         _score("S0", 66.0), _score("S1", 64.0), _score("S2", 62.0)]
     bot._pick_week(conn, FRI, _report(scored=scored))
     kept = db.get_cached_json(conn, PICKS_KEY)
-    assert [p["ticker"] for p in kept] == ["CRYPTO:BTC", "CRYPTO:ETH", "S0", "S1", "S2"]
+    assert [p["ticker"] for p in kept] == ["S0", "S1", "S2", "CRYPTO:BTC", "CRYPTO:ETH"]     # stocks first, then the coins
     assert [p.get("risk") for p in kept] == [None] * 5                           # no alt among them: no tag
 
 
@@ -511,8 +511,8 @@ def test_the_week_keeps_two_coins_at_most_and_marks_the_alts_high_risk(conn):
         _score("S0", 66.0), _score("S1", 64.0), _score("S2", 62.0)]
     bot._pick_week(conn, FRI, _report(scored=scored))
     kept = db.get_cached_json(conn, PICKS_KEY)
-    assert [p["ticker"] for p in kept] == ["CRYPTO:SOL", "CRYPTO:BTC", "S0", "S1", "S2"]
-    assert [p.get("risk") for p in kept] == [True, None, None, None, None]
+    assert [p["ticker"] for p in kept] == ["S0", "S1", "S2", "CRYPTO:BTC", "CRYPTO:SOL"]
+    assert [p.get("risk") for p in kept] == [None, None, None, None, True]
     # ... and what a retry sends is read back from the kept records
     texts = dict(weekly.week_signals(conn, FRI, bot._week_picks(conn, FRI)))
     assert texts["buy:CRYPTO:SOL"] == ("🟢 <b>SOL!</b>: покупка — выше 100-дн. средней; покупают крупные игроки; "

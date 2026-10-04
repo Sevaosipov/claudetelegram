@@ -4,9 +4,10 @@ the coin limit, which coins and the high-risk flag: 2026-10-04-more-coins.md and
 The bot holds no portfolio: it scores every fresh signal and, once a week, tells the user which of
 the scores say BUY. The user's own Trading 212 account is the only portfolio, so a signal is worth
 sending only for a name that is not in it, and only once a month for any one ticker; and of the five
-a week at most two are coins -- BTC and ETH first, then the alts by score and, at equal scores, by their
-60-day return (coin_priority). pick_buys makes that choice from the day's scores; the weekly run
-(bot.py) keeps the picks, sends one message each (weekly.py words them) and writes a buy_signals row
+a week at most two are coins, whose places are reserved -- BTC and ETH first, then the alts by score
+and, at equal scores, by their 60-day return (coin_priority) -- the stocks filling the rest. pick_buys
+makes that choice from the day's scores; the weekly run (bot.py) keeps the picks, sends one message
+each (weekly.py words them: the stocks by score first, then the coins) and writes a buy_signals row
 for every message that went out (record_signal).
 """
 from __future__ import annotations
@@ -83,18 +84,19 @@ def coin_priority(s) -> tuple:
 
 def pick_buys(conn, today: dt.date, scored: list) -> list:
     """The scores to signal this week: only a BUY, not a name the user holds (held_names), not a ticker
-    signalled in the last RESIGNAL_DAYS days (recently_signalled), at most WEEKLY_BUY_LIMIT -- of which
-    at most WEEKLY_COIN_LIMIT coins.
+    signalled in the last RESIGNAL_DAYS days (recently_signalled), at most WEEKLY_BUY_LIMIT.
 
-    The coin places are chosen first, among the coins left (coin_priority): BTC and ETH when they are
-    free and a BUY -- whatever the alts score -- then the alts by score, equal scores by the 60-day
-    return. A coin that is skipped (held, signalled lately, not a BUY) does not use up a place: BTC
-    out, the place goes to ETH, and the other to the best alt. The coins chosen then compete with the
-    stocks for the WEEKLY_BUY_LIMIT places by score as before: the picks come highest score first,
-    equal scores as they came for stocks, stocks before coins and coins by coin_priority; a week with
-    few stocks has fewer picks rather than a third coin. The scores themselves are returned --
-    StockScore, CoinScore or the kept-score objects model.cached_scores gives. Reads the database,
-    writes nothing."""
+    Coin and stock scores are on different scales, so the coin places are reserved: first up to
+    WEEKLY_COIN_LIMIT of the eligible coin BUYs, in coin_priority order -- BTC and ETH when they are
+    free, whatever the alts score, then the alts by score, equal scores by the 60-day return -- and then
+    the remaining places (WEEKLY_BUY_LIMIT less the coins picked) go to the stock BUYs by score (equal
+    scores as they came). With no eligible coin the stocks take all five; with few stocks there are
+    fewer picks, never a third coin. A coin that is skipped (held, signalled lately, not a BUY) uses up
+    no place: BTC out, the place goes to ETH, and the other to the best alt.
+
+    One order for sending: the stocks, best score first, then the coins in coin_priority order. The
+    scores themselves are returned -- StockScore, CoinScore or the kept-score objects
+    model.cached_scores gives. Reads the database, writes nothing."""
     held, recent = held_names(conn), recently_signalled(conn, today)
     free: list = []
     seen: set[str] = set()
@@ -104,9 +106,9 @@ def pick_buys(conn, today: dt.date, scored: list) -> list:
             continue
         seen.add(s.ticker)
         free.append(s)
-    stocks = [s for s in free if s.kind != "crypto"]
     coins = sorted((s for s in free if s.kind == "crypto"), key=coin_priority)[:WEEKLY_COIN_LIMIT]
-    return sorted(stocks + coins, key=lambda s: s.total, reverse=True)[:WEEKLY_BUY_LIMIT]
+    stocks = [s for s in free if s.kind != "crypto"][:WEEKLY_BUY_LIMIT - len(coins)]
+    return stocks + coins
 
 
 def pick_record(s) -> dict:

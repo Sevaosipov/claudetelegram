@@ -4,7 +4,8 @@ user's own Trading 212 account (spec 2026-10-04-remove-model-portfolio.md, which
 
 The bot holds no portfolio. What it sends once a week is:
 
-  * each buy signal it picked (signals_weekly.pick_buys; buy_text words one), in the order picked;
+  * each buy signal it picked (signals_weekly.pick_buys; buy_text words one), in the order picked -- the
+    stocks by score first, then the coins;
   * each group of insiders that bought a ticker together and started selling it this week (week_exits);
   * last, the summary (format_summary): the account, what is held and how the held names stand, and how
     many signals the week had. The summary is made from the database alone -- no network call.
@@ -80,7 +81,8 @@ def exit_text(ticker: str, names: list[str]) -> str:
 
 def week_signals(conn, today: dt.date, picks: list[dict]) -> list[tuple[str, str]]:
     """The week's signals, one Telegram message each, as (key, html text) in the order they go out: the
-    picked buys as given (best score first), then the group exits (by journal id). The key is
+    picked buys as given (the stocks by score, then the coins: signals_weekly.pick_buys), then the group
+    exits (by journal id). The key is
     `buy:<ticker>` or `exit:<journal id>` and names the signal for good. Nothing in a quiet week."""
     start = (today - dt.timedelta(days=WEEK_DAYS)).isoformat()
     signals = [(f"buy:{p['ticker']}", buy_text(p)) for p in picks]

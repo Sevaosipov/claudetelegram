@@ -202,9 +202,16 @@ def test_the_readme_says_how_the_alts_are_held_back():
     for phrase in ("`signals_weekly.coin_priority`", "сначала BTC и ETH (`model.MAJOR_COINS`)",
                    "какие бы баллы ни были у альтов", "затем альты по баллу, а при равных баллах — у кого выше "
                    "доходность за 60 дней", "`ret60`", "нет значения — в конец",
-                   "нет BTC — место получает ETH, а второе — лучший альт",
-                   "при равных — сперва акции, потом монеты"):
+                   "нет BTC — место получает ETH, а второе — лучший альт"):
         assert phrase in text, phrase
+    for phrase in ("места для монет зарезервированы", "Баллы монет и акций лежат на разных шкалах",
+                   "Остальные места (пять минус взятые монеты) занимают акции",
+                   "нет ни одной подходящей монеты — все пять мест у акций",
+                   "акций мало — выбранных меньше пяти, а не третья монета",
+                   "Порядок отправки один: сначала акции по убыванию балла, затем монеты (BTC и ETH, потом альты)",
+                   "сначала акции по убыванию балла, затем монеты: BTC и ETH, потом альты"):
+        assert phrase in text, phrase
+    assert "соревнуются с акциями" not in text
     from model_score import ALT_GATE_REASON
     from weekly import RISK_TAG
     assert ALT_GATE_REASON in text and RISK_TAG in text

@@ -220,3 +220,18 @@ rest of the spec stands.
   alts are the two picked; BTC held, or signalled within 30 days, gives its place to ETH and then the best alt; a major
   that is not a BUY takes no place; a missing `ret60` sorts last; the return reaches the kept scores; the week's kept
   picks (`weekly_buys_<week>`) follow the same rule. The README and the analyst method say it.
+
+### R3. The coin places are reserved (supersedes R2's last two bullets on competition and order)
+
+Coin and stock scores are on different scales (a coin is 0-100 from trend, flows and news; a stock from insiders, triggers,
+momentum and news), so they no longer compete for the places:
+
+- `pick_buys` first takes up to `WEEKLY_COIN_LIMIT` (2) eligible coin BUYs in the R2 order (BTC, ETH, then alts by score and
+  `ret60`), then fills the remaining places, `WEEKLY_BUY_LIMIT - coins picked`, with stock BUYs by score (equal scores as they
+  came). With no eligible coin the stocks take all five; with few stocks there are fewer picks, never a third coin. A coin
+  that is held, signalled in the last 30 days or not a BUY takes no place (BTC out: ETH, then the best alt).
+- One order for sending: the stocks by score first, then the coins (BTC and ETH, then the alts). (R2 said the picks were
+  listed by score; this replaces it.) The kept picks (`weekly_buys_<week>`) and the messages follow that order.
+- Tests: five stock BUYs at 70+ and BTC and ETH BUY at 60 give three stocks, BTC and ETH; one eligible coin gives four stocks and
+  it; none gives five stocks; an alt scoring 99 does not take a major's place; the alts take the places the majors leave.
+  README, analyst method and `weekly.py` say it.
