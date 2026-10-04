@@ -756,6 +756,120 @@ def test_a_sol_etf_inflow_goes_through_the_whole_chain_to_a_high_risk_buy_line(c
     assert texts["buy:CRYPTO:BTC"] == "🟢 <b>BTC!</b>: покупка — выше 100-дн. средней; 20 дн. +4%; балл 60, стоп −15%"
 
 
+# ------------------------------------------------- review V2: one bad price must not cancel the week
+def _with_closes(bars, **bad):
+    """`bars` with the closes at the given negative indexes replaced: _with_closes(bars, **{"61": 0.0})."""
+    out = list(bars)
+    for index, close in bad.items():
+        out[-int(index)] = (out[-int(index)][0], close)
+    return out
+
+
+@pytest.mark.parametrize("bad", [0.0, -3.0, float("nan"), None])
+def test_a_close_that_is_not_a_positive_number_is_dropped_and_the_coin_is_still_scored(conn, bad):
+    """A 0.0 at the 60-day mark and another among the last 20 days: they divided by zero in the trend and in the stop."""
+    series = {f"{c}-USD": _rising() for c in model.COINS}
+    series["SOL-USD"] = _with_closes(_rising(), **{"61": bad, "5": bad})
+    report = _score_day(conn, [], series)
+    assert report.complete is True and sorted(s.coin for s in report.scored) == sorted(model.COINS)
+    sol = _coin(report.scored, "SOL")
+    assert (sol.decision, sol.total) == ("buy", 60) and sol.stop_pct is not None and sol.ret60 is not None
+    assert sol.last_close > 0
+
+
+def test_a_series_that_is_all_bad_closes_is_a_coin_with_no_history(conn):
+    series = {"BTC-USD": _rising(), "SOL-USD": [(d, 0.0) for d, _c in _rising()]}
+    sol = _coin(_score(conn, [], series), "SOL")
+    assert sol.reasons == ["мало истории"] and sol.last_close is None and sol.stop_pct is None
+
+
+def test_a_bad_bitcoin_close_does_not_stop_the_alts_or_their_gate(conn):
+    series = {"BTC-USD": _with_closes(_rising(), **{"61": 0.0, "3": 0.0}), "SOL-USD": _rising()}
+    scored = _score(conn, [], series)
+    assert _coin(scored, "BTC").decision == "buy" and _coin(scored, "SOL").decision == "buy"
+
+
+class _BrokenPrices:
+    """A prices seam whose series for `broken` symbols raises, the way a source's bug would."""
+    def __init__(self, series, broken):
+        self.series, self.broken = series, set(broken)
+
+    def bars(self, symbol, days=None):
+        if symbol in self.broken:
+            raise RuntimeError(f"{symbol}: boom")
+        return self.series.get(symbol, [])
+
+
+def _score_with(conn, prices, **seams):
+    return model.score_today(conn, TODAY, prices=prices, signals=[], **_seams(**seams))
+
+
+def test_a_coin_that_raises_is_logged_and_left_out_and_the_others_are_scored(conn, capsys):
+    prices = _BrokenPrices({f"{c}-USD": _rising() for c in model.COINS}, broken={"SOL-USD"})
+    scored = _score_with(conn, prices)
+    assert sorted(s.coin for s in scored) == sorted(c for c in model.COINS if c != "SOL")
+    assert "[model] SOL not scored: RuntimeError: SOL-USD: boom" in capsys.readouterr().err
+    assert {s.decision for s in scored} == {"buy"}
+
+
+def test_a_coin_whose_headlines_raise_is_left_out_too(conn, capsys):
+    def news(ticker, source):
+        if ticker == "CRYPTO:XRP":
+            raise ValueError("feed down")
+        return []
+    scored = _score(conn, [], {f"{c}-USD": _rising() for c in model.COINS}, news_fn=news)
+    assert "XRP" not in {s.coin for s in scored} and len(scored) == 12
+    assert "[model] XRP not scored: ValueError: feed down" in capsys.readouterr().err
+
+
+def test_a_coin_whose_caution_check_raises_is_left_out(conn, capsys):
+    def trend(c, symbol):
+        raise OSError("no cache")
+    scored = _score(conn, [_flow("LINK", bullish=False)], {f"{c}-USD": _rising() for c in model.COINS}, trend_fn=trend)
+    assert "LINK" not in {s.coin for s in scored} and len(scored) == 12
+    assert "LINK not scored: OSError" in capsys.readouterr().err
+
+
+def test_a_fetch_that_raises_is_a_coin_with_no_history_not_a_lost_week(conn, capsys):
+    def fetch(symbol, days=None):
+        if symbol == "XRP-USD":
+            raise ConnectionError("exchange down")
+        return _rising()
+    report = model.score_day(conn, TODAY, fetch=fetch, signals=[], **_seams())
+    assert report.complete is True and len(report.scored) == 13
+    xrp = _coin(report.scored, "XRP")
+    assert xrp.reasons == ["мало истории"] and xrp.decision == "watch"
+    assert {s.decision for s in report.scored if s.coin != "XRP"} == {"buy"}
+
+
+def test_the_day_stays_complete_and_keeps_the_other_scores_when_a_coin_raises(conn, capsys):
+    def news(ticker, source):
+        if ticker in ("CRYPTO:SOL", "CRYPTO:DOGE"):
+            raise RuntimeError("feed bug")
+        return []
+    report = _score_day(conn, [], {f"{c}-USD": _rising() for c in model.COINS}, news_fn=news)
+    left = sorted(c for c in model.COINS if c not in ("SOL", "DOGE"))
+    assert report.complete is True and sorted(s.coin for s in report.scored) == left
+    assert sorted(t.removeprefix("CRYPTO:") for t in report.decisions) == left
+    assert sorted(s.coin for s in model.cached_scores(conn, TODAY)) == left
+
+
+def test_bitcoins_own_failure_leaves_it_out_and_the_alts_wait_for_a_reading(conn, capsys):
+    prices = _BrokenPrices({f"{c}-USD": _rising() for c in model.COINS}, broken={"BTC-USD"})
+    scored = _score_with(conn, prices)
+    assert "BTC" not in {s.coin for s in scored}
+    sol, eth = _coin(scored, "SOL"), _coin(scored, "ETH")
+    assert (sol.decision, sol.reasons[-1]) == ("watch", "нет данных по биткоину — альты не покупаем")
+    assert eth.decision == "buy"                                          # ether is not gated
+    err = capsys.readouterr().err
+    assert "bitcoin's trend not read" in err and "BTC not scored" in err
+
+
+def test_a_coin_that_raises_is_left_out_of_the_single_coin_look_too(conn):
+    prices = _BrokenPrices({"BTC-USD": _rising()}, broken={"SOL-USD"})
+    assert model.score_today(conn, TODAY, prices=prices, signals=[], coins={"SOL"}, **_seams()) == []
+
+
 # ------------------------------------------------- amendment R5: score only the coins asked for
 def _recorder(series=None):
     """A fetch seam that remembers the symbols it is asked for, answering from `series`."""

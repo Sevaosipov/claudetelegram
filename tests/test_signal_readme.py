@@ -219,6 +219,13 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
+def test_the_readme_says_one_bad_price_does_not_cancel_the_week():
+    text = " ".join(_text().split())
+    for phrase in ("Одна плохая цена не отменяет неделю", "закрытие, которое не положительное число (0, отрицательное, пустое), "
+                   "выбрасывается из ряда", "монета, чья оценка упала с ошибкой, пишется в stderr и пропускается"):
+        assert phrase in text, phrase
+
+
 def test_the_readme_names_reread_for_the_first_backfill_after_the_alts():
     text = " ".join(_text().split()).lower()
     for phrase in ("`python crypto_treasury.py --backfill 365 --reread`", "В первый раз после перехода на тринадцать монет",

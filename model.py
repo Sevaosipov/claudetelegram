@@ -17,6 +17,7 @@ hands each its own stub.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import sys
 import types
 from dataclasses import dataclass
@@ -179,8 +180,15 @@ def _score_stocks(conn, candidates, prices, today, news_fn, t212, prune: bool = 
     return list(best.values())
 
 
+def _usable_close(close) -> bool:
+    return isinstance(close, (int, float)) and math.isfinite(close) and close > 0
+
+
 def _coin_closes(prices, coin: str) -> list[float]:
-    return [c for _d, c in prices.bars(listing(crypto.ticker(coin), "CRYPTO")[0])]
+    """The coin's completed daily closes, oldest first. A close that is not a positive number -- a 0.0 from a
+    bad tick, a negative or missing value -- is dropped: left in, it divides by zero in the trend and in the stop
+    and takes the whole day's scoring down with it."""
+    return [c for _d, c in prices.bars(listing(crypto.ticker(coin), "CRYPTO")[0]) if _usable_close(c)]
 
 
 def _score_coins(conn, candidates, prices, today, news_fn, trend_fn, coins=None) -> list:
@@ -190,28 +198,40 @@ def _score_coins(conn, candidates, prices, today, news_fn, trend_fn, coins=None)
     with model_score.ALT_GATE_REASON. BTC and ETH are not gated. Bitcoin with no usable history (under
     121 completed closes, so no trend to read) is not "up" either: the alts wait, for
     model_score.ALT_GATE_NO_DATA_REASON. Bitcoin's closes are fetched for the gate only when an alt is
-    among the coins scored, and bitcoin itself is returned only when it is."""
+    among the coins scored, and bitcoin itself is returned only when it is.
+
+    Each coin is scored on its own: one that raises is logged and left out, the others are scored and
+    the pass stays complete (a bad close, a failing headline source or a bug in one coin must not cancel
+    the week's picks); a close that is not a positive number is dropped (_coin_closes)."""
     wanted = [coin for coin in COINS if coins is None or coin in coins]
     if not wanted:
         return []
     since = (today - dt.timedelta(days=CAUTION_DAYS)).isoformat()
     flows = [c for c in candidates if hasattr(c, "crypto_kind") and _flow_is_fresh(c, since)]
     needs_regime = any(coin not in MAJOR_COINS for coin in wanted)
-    btc_trend = model_score.coin_trend(_coin_closes(prices, "BTC")) if needs_regime else None
+    btc_trend = None
+    if needs_regime:
+        try:
+            btc_trend = model_score.coin_trend(_coin_closes(prices, "BTC"))
+        except Exception as e:         # no reading is no data: the alts wait, the week goes on
+            print(f"[model] bitcoin's trend not read: {type(e).__name__}: {e}", file=sys.stderr)
     btc_up = bool(btc_trend and btc_trend["above_ma100"])
     btc_known = btc_trend is not None
     scored = []
     for coin in wanted:
-        ticker = crypto.ticker(coin)
-        mine = [c for c in flows if c.ticker == ticker]
-        bearish = next((c for c in mine if not c.bullish), None)
-        caution = None
-        if bearish is not None and crypto.trend_confirms_down(trend_fn(conn, coin)):
-            caution = f"{bearish.company} — цена подтверждает"
-        scored.append(model_score.score_coin(
-            coin, _coin_closes(prices, coin), bullish_flow=any(c.bullish for c in mine), caution=caution,
-            headlines=news_fn(ticker, "CRYPTO"), btc_up=None if coin in MAJOR_COINS else btc_up,
-            btc_known=btc_known))
+        try:
+            ticker = crypto.ticker(coin)
+            mine = [c for c in flows if c.ticker == ticker]
+            bearish = next((c for c in mine if not c.bullish), None)
+            caution = None
+            if bearish is not None and crypto.trend_confirms_down(trend_fn(conn, coin)):
+                caution = f"{bearish.company} — цена подтверждает"
+            scored.append(model_score.score_coin(
+                coin, _coin_closes(prices, coin), bullish_flow=any(c.bullish for c in mine), caution=caution,
+                headlines=news_fn(ticker, "CRYPTO"), btc_up=None if coin in MAJOR_COINS else btc_up,
+                btc_known=btc_known))
+        except Exception as e:         # one coin's bug must not cancel the others, nor the week's picks
+            print(f"[model] {coin} not scored: {type(e).__name__}: {e}", file=sys.stderr)
     return scored
 
 

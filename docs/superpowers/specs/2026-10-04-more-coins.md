@@ -273,3 +273,16 @@ deleted from `crypto_treasury_seen`. The daily pass is unchanged: it still skips
 calls `backfill` exactly as before. Tests: a seen document with "purchased 1,355 bitcoin ... and 1,250,000 SOL" stores the SOL
 trade with `reread` and not without, a second reread duplicates nothing, the seen set loses nothing, the daily pass still skips
 the document, the command passes the flag only when given. The README names `--reread` for the first run after this change.
+
+### V2. One bad price must not cancel the week
+
+In the coin scoring (`model._score_coins`): a close that is not a positive number (0.0, negative, NaN, missing) is dropped
+from the series before anything is computed -- it divided by zero in `coin_trend` and in the stop, which raised out of
+`score_today`, made `score_day` incomplete and so cancelled the week's picks. And each coin is scored inside its own
+try/except: a coin that raises (a source bug, a failing headline feed, a failing caution check) is logged to stderr
+("[model] SOL not scored: ...") and left out; the others are scored and the report stays `complete`. Bitcoin's reading for the
+alts' gate is guarded the same way: if it raises it counts as no data (R4's reason). A fetch that raises was already a coin with
+no history (`Prices.bars`). Tests: a 0.0 / negative / NaN / missing close (at the 60-day mark and among the last 20 days) is
+dropped and the coin scores normally; an all-bad series is a coin with no history; a coin whose prices, headlines or caution
+check raise is left out and logged while the others and `complete` are unaffected; bitcoin's own failure leaves it out and the
+alts wait; the single-coin look returns nothing instead of raising.
