@@ -76,14 +76,23 @@ _COIN_WORDS = {"bitcoin": "BTC", "bitcoins": "BTC", "btc": "BTC",
                "trx": "TRX", "tron": "TRX", "sui": "SUI"}
 _ALT_NAMES = "solana|dogecoin|litecoin|avalanche|chainlink|hyperliquid|ethena"
 _ALT_TICKERS = "SOL|XRP|BNB|DOGE|AVAX|HYPE|LTC|ENA|LINK|TRX|TRON|SUI"
+_ALT_TICKER_SET = frozenset(_ALT_TICKERS.split("|"))
 # Scoped flags: the patterns below are compiled with IGNORECASE (the verbs), `(?-i:...)` turns it off.
 _COIN_PATTERN = rf"(?i:bitcoins?|BTC|ether|ETH|ethereum|{_ALT_NAMES})|(?-i:{_ALT_TICKERS})"
 _TABLE_COIN_PATTERN = rf"(?i:BTC|ETH|{_ALT_NAMES})|(?-i:{_ALT_TICKERS})"
 _NUM = r"\d[\d,]*(?:\.\d+)?"
+_MULT = {"thousand": 1e3, "million": 1e6, "m": 1e6, "mn": 1e6, "billion": 1e9, "b": 1e9, "bn": 1e9}
+# The unit count may carry a multiplier -- "12.6 million HYPE", "1.5 billion DOGE", "300 thousand LINK", "4 mn XRP" --
+# as a word (or the two-letter mn/bn) after a space, or as an abbreviation stuck to the number ("2.2m SOL", "1.5bn
+# DOGE"). Nothing else counts: "12 more bitcoin" and "1,355 bitcoin" have a word that merely starts with m or b
+# after a space, and a lone "m" or "b" after a space is not a multiplier.
+_MULT_SPACED = "|".join(sorted((k for k in _MULT if len(k) > 1), key=len, reverse=True))
+_MULT_ATTACHED = "|".join(sorted(_MULT, key=len, reverse=True))
+_UNIT_MULT = rf"(?:\s+(?P<umw>{_MULT_SPACED})\b|(?P<uma>{_MULT_ATTACHED})\b)"
 _PROSE_RE = re.compile(
     rf"\b(?P<verb>purchased|acquired|bought|sold)\s+"
     rf"(?:an?\s+(?:aggregate|total)\s+(?:of\s+)?)?(?:approximately\s+|about\s+|roughly\s+)?"
-    rf"(?P<units>{_NUM})\s+(?:(?:additional|more)\s+)?"
+    rf"(?P<units>{_NUM})(?:{_UNIT_MULT})?\s+(?:(?:additional|more)\s+)?"
     rf"(?P<coin>{_COIN_PATTERN})\b(?:\s+(?:tokens?|coins?)\b)?"
     # "1,000 bitcoin mining machines" is hardware, not bitcoin.
     rf"(?!\s*(?:mining|miners?|machines?|rigs?|ATMs?|hash|-denominated|treasury\s+compan))",
@@ -99,7 +108,11 @@ _TOTAL_RE = re.compile(
 # Strategy's weekly table, flattened to text: header row, then "units $ agg $ avg".
 _TABLE_HEAD_RE = re.compile(rf"\b(?P<coin>{_TABLE_COIN_PATTERN})\s+(?:Purchased|Acquired)\b", re.IGNORECASE)
 _TABLE_ROW_RE = re.compile(rf"(?P<units>{_NUM})\s+\$\s*(?P<agg>{_NUM})\s+\$\s*(?P<avg>{_NUM})")
-_MULT = {"thousand": 1e3, "million": 1e6, "m": 1e6, "mn": 1e6, "billion": 1e9, "b": 1e9, "bn": 1e9}
+# An alt's upper-case ticker followed by a company or security noun -- "SOL Strategies common shares",
+# "LTC properties", "TRON Inc shares" -- or by any capitalised word names a company or a security, not the coin.
+_COMPANY_AFTER_TICKER_RE = re.compile(
+    r"\s+(?:[A-Z][A-Za-z]*\b|(?i:inc|corp|corporation|ltd|llc|holdings|strategies|group|shares|common|stock|"
+    r"properties|warrants|notes|units)\b)")
 _MINED_RE = re.compile(r"\b(?:mined|produced|production)\b", re.IGNORECASE)
 _DISPLAY_RE = re.compile(r"^(?P<name>.*?)\s+\((?P<tickers>[^)]*)\)\s+\(CIK")
 
@@ -159,10 +172,15 @@ def parse_text(text: str) -> list[dict]:
     """Every (coin, side, units, avg, total) trade stated in a filing's text."""
     out: list[dict] = []
     for m in _PROSE_RE.finditer(text):
-        coin = _COIN_WORDS[m.group("coin").lower()]
+        word = m.group("coin")
+        # Only the alt tickers can be a company's name too (BTC, ETH and the full names parse as they always did).
+        if word in _ALT_TICKER_SET and _COMPANY_AFTER_TICKER_RE.match(text, m.end()):
+            continue
+        coin = _COIN_WORDS[word.lower()]
         units = _num(m.group("units"))
         if not units:
             continue
+        units *= _MULT.get((m.group("umw") or m.group("uma") or "").lower(), 1.0)
         side = "S" if m.group("verb").lower() == "sold" else "P"
         # A miner selling what it mined ("mined 291.53 BTC ... sold 207.32 BTC") is
         # running its business, not making a treasury decision.

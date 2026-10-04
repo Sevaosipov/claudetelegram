@@ -298,3 +298,21 @@ earlier rule "unknown is not small: kept and valued later by `enrich_signals`" f
 `total_value` is now always known. The price is asked once per coin per call, and never for a priced sale. Tests: "sold 400 LINK"
 unpriced gives no caution; an unpriced alt sale worth EUR 6M gives one (valued), EUR 4M none; no price available drops the sale;
 BTC and ETH must clear EUR 10M; a mixed filing; the real helper's cache path; the offline guard drops instead of raising.
+
+### V4. Parser precision: a ticker followed by a company or security noun
+
+An alt's upper-case ticker (SOL, XRP, BNB, DOGE, AVAX, HYPE, LTC, ENA, LINK, TRX, TRON, SUI) is not a coin when what follows it
+-- after the optional «tokens»/«coins» word -- is a capitalised word, or one of Inc, Corp, Corporation, Ltd, LLC, Holdings,
+Strategies, Group, shares, common, stock, properties, warrants, notes, units (those words in any case). So "500,000 SOL Strategies
+common shares", "10 LTC properties" and "100 TRON Inc shares" yield nothing, while "5,000,000 HYPE tokens", "1,250,000 SOL at an
+average price of $182.40" and "acquired 2,000 SOL, bringing its total holdings to" are matched. The rule is for the alt tickers
+only: BTC, ETH and the full names (Solana, ...) parse as before. A rejected mention does not hide a real trade after it.
+
+### V5. Parser recall: a multiplier in the unit count
+
+The unit count accepts a multiplier from the existing `_MULT` table: a word after a space (`million`, `billion`, `thousand`, and the
+two-letter `mn`, `bn`) or an abbreviation stuck to the number (`2.2m`, `1.5bn`): "12.6 million HYPE tokens" is 12,600,000 HYPE,
+"1.5 billion DOGE", "300 thousand LINK", "2.2 million SOL". It applies to every coin; sentences with plain numbers before BTC and
+ETH parse exactly as before (the saved filings pass unchanged; a word that merely starts with m or b -- "more", "bitcoin", "BTC" --
+is not a multiplier, and neither is a lone "m" or "b" after a space). The price, total and every other safeguard are read as before.
+Tests: both rules, the three README-promised positives and negatives, plain numbers unchanged.

@@ -300,6 +300,94 @@ def test_a_table_that_disagrees_with_itself_is_rejected_for_an_alt_too():
     assert ct.parse_text(_SOL_TABLE.replace("$ 21.9", "$ 90.0")) == []
 
 
+# ---- V4: an upper-case ticker followed by a company or security noun is not a coin
+@pytest.mark.parametrize("text", [
+    "The Company purchased 500,000 SOL Strategies common shares.",
+    "The Company purchased 10 LTC properties.",
+    "The Company acquired 100 TRON Inc shares.",
+    "acquired 1,000 SOL Inc", "acquired 1,000 SOL Corp", "acquired 1,000 SOL Corporation", "acquired 1,000 SOL Ltd",
+    "acquired 1,000 SOL LLC", "acquired 1,000 SOL Holdings", "acquired 1,000 SOL Group",
+    "bought 1,000 SUI shares", "bought 1,000 SUI common stock", "bought 1,000 SUI stock", "bought 1,000 AVAX warrants",
+    "bought 1,000 LINK notes", "bought 1,000 XRP units", "bought 1,000 HYPE common shares",
+    "purchased 1,000 BNB Network Company shares",             # a capitalised word after the ticker
+    "purchased 1,000 ENA Foundation tokens", "purchased 1,000 DOGE Labs",
+    "purchased 1,000 SOL tokens Inc",                        # after the optional «tokens» word too
+])
+def test_an_upper_case_ticker_followed_by_a_company_or_security_noun_is_not_a_coin(text):
+    assert ct.parse_text(text) == []
+
+
+@pytest.mark.parametrize("text,coin,units", [
+    ("Acme acquired 5,000,000 HYPE tokens", "HYPE", 5_000_000),
+    ("Acme purchased 1,250,000 SOL at an average price of $182.40", "SOL", 1_250_000),
+    ("Acme acquired 2,000 SOL, bringing its total holdings to 2,170,000 SOL.", "SOL", 2_000),
+    ("Acme acquired 2,000 SOL. The Company now holds more.", "SOL", 2_000),
+    ("Acme acquired 2,000 SOL (as defined below) for cash.", "SOL", 2_000),
+    ("Acme acquired 2,000 SOL tokens for approximately $380,000.", "SOL", 2_000),
+    ("Acme purchased 7,000 LINK coins and staked them.", "LINK", 7_000),
+])
+def test_a_ticker_followed_by_anything_else_is_still_a_coin(text, coin, units):
+    [t] = ct.parse_text(text)
+    assert (t["coin"], t["units"]) == (coin, units)
+
+
+def test_the_noun_rule_is_for_the_alt_tickers_bitcoin_ether_and_the_full_names_parse_as_before():
+    assert [t["coin"] for t in ct.parse_text("Acme purchased 50 BTC Holdings units.")] == ["BTC"]
+    assert [t["coin"] for t in ct.parse_text("Acme purchased 50 ETH Group shares.")] == ["ETH"]
+    assert [t["coin"] for t in ct.parse_text("Acme purchased 50 Solana Group shares.")] == ["SOL"]
+
+
+def test_a_rejected_mention_does_not_hide_a_real_trade_after_it():
+    text = "Acme acquired 100 TRON Inc shares and purchased 1,250,000 SOL at an average price of $182.40."
+    assert [(t["coin"], t["units"]) for t in ct.parse_text(text)] == [("SOL", 1_250_000)]
+
+
+# ---- V5: the unit count accepts a multiplier word
+@pytest.mark.parametrize("text,coin,units", [
+    ("Acme acquired 12.6 million HYPE tokens", "HYPE", 12_600_000),
+    ("Acme purchased 2.2 million SOL", "SOL", 2_200_000),
+    ("Acme purchased 1.5 billion DOGE", "DOGE", 1_500_000_000),
+    ("Acme purchased 300 thousand LINK", "LINK", 300_000),
+    ("Acme purchased 2.2m SOL", "SOL", 2_200_000),
+    ("Acme purchased 1.5bn DOGE", "DOGE", 1_500_000_000),
+    ("Acme purchased 4 mn XRP", "XRP", 4_000_000),
+    ("Acme purchased approximately 12.6 million additional HYPE tokens", "HYPE", 12_600_000),
+    ("Acme purchased an aggregate of 3.1 million Solana", "SOL", 3_100_000),
+    ("Acme acquired 2.5 million ETH", "ETH", 2_500_000),
+    ("Acme acquired 1.2 Million bitcoin", "BTC", 1_200_000),
+])
+def test_the_unit_count_accepts_a_multiplier_word(text, coin, units):
+    [t] = ct.parse_text(text)
+    assert (t["coin"], t["units"]) == (coin, units)
+
+
+def test_a_multiplier_scales_the_units_the_price_is_read_after_it():
+    [t] = ct.parse_text("Acme acquired 12.6 million HYPE tokens at an average price of $38.20 per HYPE.")
+    assert (t["units"], t["avg"]) == (12_600_000, 38.20)
+    [t] = ct.parse_text("Acme purchased 2.2 million SOL for approximately $400 million.")
+    assert t["total"] == 400e6 and t["units"] == 2_200_000       # $182 a coin: plausible, so the total is kept
+    assert ct.parse_text("Acme purchased 2.2 million SOL for approximately $4 million.")[0]["total"] is None   # $1.8 a coin
+
+
+def test_a_multiplier_still_obeys_the_other_safeguards():
+    assert ct.parse_text("Acme purchased 2.2 million SOL at an average price of $18,240.") == []      # a price out of bounds
+    assert ct.parse_text("Acme may purchase up to 2.2 million SOL.") == []
+    assert ct.parse_text("Acme purchased 2.2 million sol.") == []                                      # a ticker in lower case
+    assert ct.parse_text("Acme purchased 2.2 million SOL Strategies shares.") == []                    # a company, not a coin
+    assert ct.parse_text("Acme acquired 1.2 million bitcoin mining machines.") == []
+
+
+@pytest.mark.parametrize("text,units", [
+    ("Acme purchased 1,355 bitcoin at an average price of $79,475.", 1355),
+    ("Acme purchased 12 more bitcoin.", 12), ("Acme purchased 12 additional bitcoin.", 12),
+    ("Acme bought 3 BTC.", 3), ("Acme bought 3 BTC at an average price of $79,475.", 3),
+    ("Acme acquired 27,562 ETH.", 27_562), ("Acme bought 1,000 million shares of stock and purchased 5 bitcoin.", 5),
+])
+def test_plain_numbers_before_bitcoin_and_ether_parse_exactly_as_before(text, units):
+    """No word that merely starts with m or b (more, bitcoin, BTC) is read as a multiplier."""
+    assert [t["units"] for t in ct.parse_text(text)] == [units]
+
+
 def test_total_with_a_multiplier():
     [t] = ct.parse_text("Acme bought approximately 120 BTC for approximately $9.6 million.")
     assert t["total"] == pytest.approx(9_600_000)

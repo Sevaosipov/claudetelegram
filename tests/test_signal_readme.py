@@ -219,6 +219,15 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
+def test_the_readme_says_what_the_parser_rejects_and_what_multipliers_it_reads():
+    text = " ".join(_text().split())
+    for phrase in ("Заглавный тикер альта, за которым идёт название компании или ценной бумаги",
+                   "«500,000 SOL Strategies common shares», «100 TRON Inc shares»", "Inc, Corp, Corporation, Ltd, LLC, Holdings",
+                   "Количество может быть со словом-множителем", "«12.6 million HYPE tokens», «1.5 billion DOGE», «300 thousand LINK»",
+                   "простые числа перед BTC и ETH читаются, как читались"):
+        assert phrase in text, phrase
+
+
 def test_the_readme_says_an_unpriced_sale_is_valued_at_the_current_price_before_the_floor():
     text = " ".join(_text().split())
     for phrase in ("Продажа без суммы", "количество × текущая цена монеты", "должна пройти тот же порог",

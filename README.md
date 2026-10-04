@@ -127,7 +127,12 @@ BNB, DOGE, AVAX, HYPE, LTC, ENA, LINK, TRX, SUI** (`model.COINS`; BTC и ETH —
   альта (solana, dogecoin, litecoin, avalanche, chainlink, hyperliquid, ethena) читается в
   любом регистре, как bitcoin; его тикер (SOL, XRP, BNB, DOGE, AVAX, HYPE, LTC, ENA, LINK, TRX,
   TRON, SUI) — только заглавными, с необязательным «tokens»/«coins» после: «link», «hype»,
-  «sol» и «sui» в отчётах — обычные слова. Цена в сделке проверяется по границам
+  «sol» и «sui» в отчётах — обычные слова. Заглавный тикер альта, за которым идёт название компании
+  или ценной бумаги — слово с заглавной буквы либо Inc, Corp, Corporation, Ltd, LLC, Holdings,
+  Strategies, Group, shares, common, stock, properties, warrants, notes, units («500,000 SOL Strategies
+  common shares», «100 TRON Inc shares»), — не монета (для BTC, ETH и полных имён правило не
+  действует). Количество может быть со словом-множителем — «12.6 million HYPE tokens», «1.5 billion
+  DOGE», «300 thousand LINK», «2.2m SOL»; простые числа перед BTC и ETH читаются, как читались. Цена в сделке проверяется по границам
   правдоподобия для каждой монеты (`PLAUSIBLE_PRICE_USD`: например SOL — $5–5 000,
   DOGE — $0,005–20): потерянный разделитель тысяч не превращается в сделку. Тикер
   компании — основной, из карты CIK (EDGAR перечисляет классы по алфавиту, и у
