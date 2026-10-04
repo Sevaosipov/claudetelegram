@@ -48,6 +48,30 @@ def _b(text: str, html: bool) -> str:
     return f"<b>{_esc(text)}</b>" if html else text
 
 
+# ------------------------------------------------------------------ the signal line
+# Every automatic signal is one short message in the same shape (spec 2026-10-04-signal-message-style.md):
+# «🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, итог <b>−$24,00</b> (−10,4%)».
+DOT_GREEN, DOT_RED, DOT_NEUTRAL = "🟢", "🔴", "⚪"   # a buy or a gain / a loss or an unknown result / a neutral event
+
+
+def signal_line(dot: str, name: str, event: str, details: str | None = None, *,
+                result: str | None = None, extra: str | None = None, html: bool = True,
+                label: str = "итог") -> str:
+    """`{dot} <b>{name}!</b>: {event} — {details}`, and for a close `, итог <b>{result}</b>{extra}`.
+
+    `extra` follows the bold result as it is (a leading space and its brackets are the caller's:
+    « (−10,4%)»). `label` is what the result is called -- «итог», «итог ≈» (a result on the last
+    price known), «сейчас» (a sale still waiting). A part that is None or empty is left out, and
+    `extra` goes with the result alone. Every part is escaped; with html=False there are no tags
+    and nothing is escaped (the log, the menu)."""
+    text = f"{_e(dot, html)} {_b(f'{name}!', html)}: {_e(event, html)}"
+    if details:
+        text += f" — {_e(details, html)}"
+    if result:
+        text += f", {_e(label, html)} {_b(result, html)}{_e(extra or '', html)}"
+    return text
+
+
 def _chunk(text: str, size: int) -> list[str]:
     """Split a digest for Telegram's message limit, preferring signal boundaries.
 
@@ -330,29 +354,50 @@ def format_ticker_backtest(result: dict) -> str:
     return "\n".join(L)
 
 
+_CARRY_DOT = {"LONG": DOT_GREEN, "SHORT": DOT_RED, "FLAT": DOT_NEUTRAL}
+_CARRY_SIDE = {"LONG": "лонг", "SHORT": "шорт"}
+# carry_strategy.step's reasons, in words
+_CARRY_REASON = {"entry": "новый сигнал", "trailing stop": "сработал стоп", "signal off": "сигнал снят"}
+
+
+def _rate(x: float) -> str:
+    """An EURUSD rate to four places, a comma decimal: «1,1327»."""
+    return f"{x:.4f}".replace(".", ",")
+
+
+def _spread(x: float) -> str:
+    """A yield spread in percentage points, signed: «+0,35 п.п.», «−1,68 п.п.»."""
+    return f"{round(x, 2) or 0.0:+.2f}".replace(".", ",").replace("-", "−") + " п.п."
+
+
 def format_carry_signal(from_state: str, to_state: str, s: dict, *, reason: str,
                          level: float | None) -> str:
-    """A EURUSD carry-gated-strategy state change, from carry_strategy.py.
+    """An EURUSD carry-gated-strategy state change, from carry_strategy.py, as one signal line:
 
-    Deliberately not styled like the disclosure signals above (no score, no
-    buyer list) -- this is a different kind of thing, a price/rate-driven
-    trading rule rather than a disclosed transaction. States facts (today's
-    price, MA, rate spread, and the stop level) and says explicitly that
-    execution is manual, matching this project's stance everywhere else: no
-    verdict, no advice, no order placed on the user's behalf.
-    """
-    icon = {"LONG": "📈", "SHORT": "📉", "FLAT": "⚪️"}[to_state]
-    lines = [f"{icon} EURUSD carry-gated: {from_state} → {to_state} ({reason})"]
-    lines.append(f"   price {s['close']:.4f} · 200d MA {s['ma']:.4f} · "
-                 f"DE-US 2y spread {s['diff']:+.2f}pp")
-    if to_state in ("LONG", "SHORT") and level is not None:
-        lines.append(f"   initial stop ~{level:.4f} (6×ATR={s['atr']:.4f}) — set a "
-                      f"broker-side ATR trailing stop at this distance if you take it")
-    elif level is not None:
-        lines.append(f"   exit ~{level:.4f}")
-    lines.append("   Manual execution — backtested OOS PF 1.92 on 15 trades "
-                 "(small sample, see ~/forex-daytrader)")
-    return "\n".join(lines)
+        🟢 EURUSD!: вход в лонг (новый сигнал) — цена 1,2000, 200-дн. средняя 1,1500, спред DE-US 2 г.
+                    +0,35 п.п., стоп ~1,1520 (6×ATR)
+        🔴 EURUSD!: вход в шорт (новый сигнал) — ...
+        ⚪ EURUSD!: выход во флэт (сработал стоп) — цена 1,1600, выход ~1,1670
+
+    A price/rate-driven trading rule rather than a disclosed transaction, so it states facts only --
+    today's price, the average, the rate spread (DE 2y less US 2y), the stop level and where the
+    exit is -- with no verdict and no advice; execution is the user's. `reason` is carry_strategy's
+    own («entry», «trailing stop», «signal off»), put into words; one nobody translated is shown as
+    it is. What is not known (the average, the spread, the level) is left out. `from_state` is
+    only for the caller's own reading: the line is about where the strategy is now."""
+    why = _CARRY_REASON.get(reason, reason)
+    if to_state == "FLAT":
+        details = f"цена {_rate(s['close'])}" + (f", выход ~{_rate(level)}" if level is not None else "")
+        return signal_line(DOT_NEUTRAL, "EURUSD", f"выход во флэт ({why})", details)
+    facts = [f"цена {_rate(s['close'])}"]
+    if s.get("ma") is not None:
+        facts.append(f"200-дн. средняя {_rate(s['ma'])}")
+    if s.get("diff") is not None:
+        facts.append(f"спред DE-US 2 г. {_spread(s['diff'])}")
+    if level is not None:
+        facts.append(f"стоп ~{_rate(level)} (6×ATR)")
+    return signal_line(_CARRY_DOT[to_state], "EURUSD", f"вход в {_CARRY_SIDE[to_state]} ({why})",
+                       ", ".join(facts))
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -577,30 +622,7 @@ def format_digest(sec_lines: list[str], house_lines: list[str]) -> str:
     return "\n\n".join(parts) if len(parts) > 1 else parts[0]
 
 
-# ------------------------------------------------------------------ the signal line
-# Every automatic signal is one short message in the same shape (spec 2026-10-04-signal-message-style.md):
-# «🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, итог <b>−$24,00</b> (−10,4%)».
-DOT_GREEN, DOT_RED, DOT_NEUTRAL = "🟢", "🔴", "⚪"   # a buy or a gain / a loss or an unknown result / a neutral event
-
-
-def signal_line(dot: str, name: str, event: str, details: str | None = None, *,
-                result: str | None = None, extra: str | None = None, html: bool = True,
-                label: str = "итог") -> str:
-    """`{dot} <b>{name}!</b>: {event} — {details}`, and for a close `, итог <b>{result}</b>{extra}`.
-
-    `extra` follows the bold result as it is (a leading space and its brackets are the caller's:
-    « (−10,4%)»). `label` is what the result is called -- «итог», «итог ≈» (a result on the last
-    price known), «сейчас» (a sale still waiting). A part that is None or empty is left out, and
-    `extra` goes with the result alone. Every part is escaped; with html=False there are no tags
-    and nothing is escaped (the log, the menu)."""
-    text = f"{_e(dot, html)} {_b(f'{name}!', html)}: {_e(event, html)}"
-    if details:
-        text += f" — {_e(details, html)}"
-    if result:
-        text += f", {_e(label, html)} {_b(result, html)}{_e(extra or '', html)}"
-    return text
-
-
+# ------------------------------------------- the signals on the user's own positions (positions.py)
 def money_cents(x: float, currency: str | None = "EUR") -> str:
     """A profit or loss to the cent, its sign before the currency: «+€8,30», «−$26,40», «+8,30 CHF»
     for a currency with no sign of its own. No currency told is the euro, as money() has it."""
