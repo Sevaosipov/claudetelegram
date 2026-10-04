@@ -879,7 +879,7 @@ def test_menu_signals_print_the_scored_list(conn, capsys, monkeypatch):
     monkeypatch.setattr(model, "score_today", lambda c, *a, **k: [_stock("AAA", 64.0), _coin()])
     monkeypatch.setattr("positions.check_exits", lambda c, *a, **k: [_close("CCC")])
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 110.0)
-    monkeypatch.setattr("paper._closes", lambda symbol, days: [])        # no history to size a stop from
+    monkeypatch.setattr("prices._closes", lambda symbol, days: [])        # no history to size a stop from
     positions.open_position(conn, "AAA", 100.0)
     menu.show_signals(conn)
     out = capsys.readouterr().out

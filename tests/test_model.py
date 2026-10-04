@@ -14,6 +14,7 @@ import db
 import model
 import model_score
 import paper
+import prices
 from cluster.roles import Buyer
 from conftest import add_sec_purchase, add_sec_sale, add_stake
 
@@ -117,7 +118,7 @@ def _position(conn, ticker="AAA", *, book=S, source="SEC", fill_days_ago=10, net
     """A position written straight into the book (its cost comes out of the book's cash)."""
     _books(conn)
     closed = _day(closed_days_ago) if closed_days_ago is not None else None
-    symbol = paper.listing(ticker, source)[0]
+    symbol = prices.listing(ticker, source)[0]
     cur = conn.execute(
         "INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
         "net_eur, entry_close, entry_fx, insiders, reason, last_value, stop_pct, score, closed_date, "
@@ -544,7 +545,7 @@ def test_an_activist_cutting_the_stake_sells(conn, before, after, source, expect
 ])
 def test_a_position_that_goes_nowhere_for_60_business_days_sells(conn, days_ago, bdays, value, expected):
     pos = _position(conn, fill_days_ago=days_ago, value=value, net=8_000.0)
-    assert paper.business_days_between(pos["fill_date"], TODAY) == bdays
+    assert prices.business_days_between(pos["fill_date"], TODAY) == bdays
     assert _exit(conn, pos, [100.0] * days_ago) == expected
 
 

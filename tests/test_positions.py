@@ -9,7 +9,7 @@ import pytest
 import db
 import model
 import model_score
-import paper
+import prices
 import positions
 from conftest import add_bafin_txn, add_form_144, add_sec_sale, add_stake, add_sweden_txn
 
@@ -21,7 +21,7 @@ def _no_network_seams(monkeypatch):
     """The two seams a position's exits reach the network through: with no history and no
     headlines the exit rules that need them simply don't fire. Tests that care hand their own
     closes_fn / news_fn, or override these."""
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
     monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
 
 
@@ -368,7 +368,7 @@ def _check(conn, price=None, bars=(), *, news=(), trend=None):
 def _days_ago_for_bdays(n):
     """How many calendar days ago a position was opened to have been held `n` business days."""
     days = 0
-    while paper.business_days_between((TODAY - dt.timedelta(days=days)).isoformat(), TODAY) < n:
+    while prices.business_days_between((TODAY - dt.timedelta(days=days)).isoformat(), TODAY) < n:
         days += 1
     return days
 
@@ -410,19 +410,19 @@ def test_no_price_history_stores_no_stop(conn):
 def test_the_default_history_is_the_yahoo_series_of_the_listing_the_position_is_on(conn, monkeypatch):
     seen = []
     flat = _days(TODAY - dt.timedelta(days=60), [100.0] * 40)
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: seen.append((symbol, days)) or flat)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: seen.append((symbol, days)) or flat)
     pos = positions.open_position(conn, "NRC", 100.0, today=TODAY, source="NORWAY")
-    assert seen == [("NRC.OL", paper.PRICE_DAYS)] and pos.stop_pct == 0.10
+    assert seen == [("NRC.OL", prices.PRICE_DAYS)] and pos.stop_pct == 0.10
 
 
 def test_the_default_history_is_empty_without_a_symbol_or_when_the_fetch_fails(monkeypatch):
     calls = []
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: calls.append(symbol) or [("2026-09-01", 1.0)])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: calls.append(symbol) or [("2026-09-01", 1.0)])
     assert positions.daily_closes("DE0007164600", "BAFIN") == [] and calls == []      # an ISIN has none
 
     def boom(symbol, days):
         raise RuntimeError("offline")
-    monkeypatch.setattr(paper, "_closes", boom)
+    monkeypatch.setattr(prices, "_closes", boom)
     assert positions.daily_closes("AAA", None) == []
 
 
@@ -1023,7 +1023,7 @@ def _no_yahoo(monkeypatch):
     def refuse(*a, **k):
         raise AssertionError("a Trading 212 holding with no Yahoo listing must not reach Yahoo")
     monkeypatch.setattr(positions, "_yahoo_close", refuse)
-    monkeypatch.setattr(paper, "_closes", refuse)
+    monkeypatch.setattr(prices, "_closes", refuse)
 
 
 def test_a_position_built_the_old_way_is_a_manual_one():
@@ -1105,7 +1105,7 @@ def test_above_its_stop_a_trading_212_holding_stays(conn, monkeypatch):
 def test_a_us_trading_212_holding_is_priced_from_yahoo_like_a_bought_one(conn, monkeypatch):
     seen = []
     bars = _held_bars([], [100.0, 130.0, 125.0])
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: seen.append(symbol) or bars)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: seen.append(symbol) or bars)
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: seen.append(symbol) or 116.0)
     _t212(conn, "GME", source=None, entry=100.0, stop=0.10, t212_ticker="GME_US_EQ", currency="USD")
     _snapshots(conn, "GME", [(0, 129.0)])                       # the snapshot is not what the exits read
@@ -1314,7 +1314,7 @@ def test_a_us_keyed_holding_yahoo_has_nothing_for_is_priced_from_its_day_prices(
 def test_the_price_and_the_history_fall_back_each_on_its_own(conn, monkeypatch):
     """Yahoo has the history but no last close just now: the history is Yahoo's, the price the sync's."""
     _yahoo_has_nothing(monkeypatch)
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: _held_bars([], [100.0, 130.0, 125.0]))
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: _held_bars([], [100.0, 130.0, 125.0]))
     _us_holding(conn)
     _snapshots(conn, "GME", [(3, 999.0), (0, 116.0)])              # the stored history is not read: Yahoo has one
     [alert] = positions.check_exits(conn, today=TODAY, news_fn=lambda t, s=None: [])
@@ -1375,7 +1375,7 @@ def _yahoo_answers(monkeypatch, closes, last=None):
     def history(symbol, days):
         asked.append(symbol)
         return list(closes)
-    monkeypatch.setattr(paper, "_closes", history)
+    monkeypatch.setattr(prices, "_closes", history)
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: closes[-1][1] if last is None else last)
     return asked
 

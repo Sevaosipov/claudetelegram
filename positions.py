@@ -50,8 +50,8 @@ import crypto
 import marketcap
 import model_score
 
-# model.py and paper.py import this module, so they are imported inside the functions
-# that need them (model for the exit constants and its news seam, paper for the prices).
+# model.py and prices.py import this module, so they are imported inside the functions
+# that need them (model for the exit constants and its news seam, prices for the closes).
 
 CAUTION_LOOKBACK_DAYS = 7
 MANUAL, T212 = "manual", "t212"         # a position's origin: /bought, or the Trading 212 account
@@ -346,16 +346,16 @@ def last_close(ticker: str, source: str | None = None, conn=None, today: dt.date
 
 def daily_closes(ticker: str, source: str | None = None, conn=None) -> list[tuple[str, float]]:
     """The adjusted daily closes, oldest first, of the listing `source` trades the ticker
-    on (paper._closes on its Yahoo symbol); [] when it has no reliable symbol or the fetch
+    on (prices._closes on its Yahoo symbol); [] when it has no reliable symbol or the fetch
     fails. A Trading 212 holding with no Yahoo listing (source T212_SOURCE) has the day
-    prices the sync stored instead (t212_closes), given `conn`. Imported here: paper imports
+    prices the sync stored instead (t212_closes), given `conn`. Imported here: prices imports
     this module."""
-    import paper
+    import prices
     symbol = yahoo_symbol(ticker, source)
     if not symbol:
         return t212_closes(conn, ticker) if source == T212_SOURCE and conn is not None else []
     try:
-        return list(paper._closes(symbol, paper.PRICE_DAYS) or [])
+        return list(prices._closes(symbol, prices.PRICE_DAYS) or [])
     except Exception as e:
         print(f"[positions] no price history for {ticker}: {type(e).__name__}: {e}", file=sys.stderr)
         return []
@@ -407,7 +407,7 @@ def _crypto_caution(conn, pos: Position, today: dt.date, trend_fn) -> str | None
 
 
 def _completed_bars(bars: list[tuple[str, float]], today: dt.date) -> list[tuple[str, float]]:
-    """The closes before `today`, as the model's paper.Prices(today) keeps them: a bar for today
+    """The closes before `today`, as prices.Prices(today) keeps them: a bar for today
     is still in progress (a coin's always is) and must not set a peak or trip a stop or a trend."""
     return [b for b in bars if b[0] < today.isoformat()]
 
@@ -574,7 +574,7 @@ def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes
     model's constants. The headlines are fetched only when every rule before them has
     passed."""
     import model
-    import paper
+    import prices
     coin = crypto.is_crypto(pos.ticker)
     bars = _completed_bars(closes_of(pos), today)
     if price is None:
@@ -592,7 +592,7 @@ def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes
         if trend and trend["down"]:
             return "trend_down", "ниже 100-дн. средней, 20 дн. в минусе"
     elif (price is not None
-            and paper.business_days_between(pos.opened_at, today) >= model.DEAD_MONEY_BDAYS
+            and prices.business_days_between(pos.opened_at, today) >= model.DEAD_MONEY_BDAYS
             and price / pos.entry_price - 1 < model.DEAD_MONEY_MIN_RETURN):
         return "dead_money", f"{model.DEAD_MONEY_BDAYS} торговых дней без роста"
     held = (today - dt.date.fromisoformat(pos.opened_at)).days

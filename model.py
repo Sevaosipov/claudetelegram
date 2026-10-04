@@ -35,6 +35,7 @@ import paper
 import positions
 import sources
 import strategy
+from prices import Prices, listing
 
 STOCK_BOOK, CRYPTO_BOOK = "MODEL-S", "MODEL-C"
 BOOKS = (STOCK_BOOK, CRYPTO_BOOK)
@@ -105,7 +106,7 @@ def default_news(ticker: str, source: str | None) -> list[dict]:
         if crypto.is_crypto(ticker):
             asset = assets.crypto_asset(crypto.symbol_of(ticker))
         else:
-            listed = paper.listing(ticker, source)
+            listed = listing(ticker, source)
             if listed is None:
                 return []
             asset = assets.stock_asset(listed[0])
@@ -129,7 +130,7 @@ def _default_sector(ticker: str, source: str | None) -> str | None:
     Asked on the listing's own Yahoo symbol: research._yf_info would turn EQNR.OL into EQNR-OL."""
     try:
         import yfinance as yf
-        listed = paper.listing(ticker, source)
+        listed = listing(ticker, source)
         return ((yf.Ticker(listed[0]).info or {}).get("sector") or None) if listed else None
     except Exception as e:
         print(f"[model] no sector for {ticker}: {type(e).__name__}: {e}", file=sys.stderr)
@@ -234,7 +235,7 @@ def _score_stocks(conn, candidates, prices, today, news_fn, t212, prune: bool = 
         if prune and score.insiders + score.triggers + PRUNE_HEADROOM < model_score.STOCK_WATCH:
             score.reasons.append(PRUNED_REASON)   # its «импульс 0 · новости 0» is not a reading
         else:
-            listed = paper.listing(sig.ticker, sig.source)
+            listed = listing(sig.ticker, sig.source)
             closes = [c for _d, c in prices.bars(listed[0])] if listed else []
             score = model_score.score_stock(sig, closes, None, **flags)
             if score.total >= NEWS_MIN_PRESCORE:
@@ -255,7 +256,7 @@ def _score_coins(conn, candidates, prices, today, news_fn, trend_fn) -> list:
         caution = None
         if bearish is not None and crypto.trend_confirms_down(trend_fn(conn, coin)):
             caution = f"{bearish.company} — цена подтверждает"
-        closes = [c for _d, c in prices.bars(paper.listing(ticker, "CRYPTO")[0])]
+        closes = [c for _d, c in prices.bars(listing(ticker, "CRYPTO")[0])]
         scored.append(model_score.score_coin(
             coin, closes, bullish_flow=any(c.bullish for c in mine), caution=caution,
             headlines=news_fn(ticker, "CRYPTO")))
@@ -307,7 +308,7 @@ def score_today(conn, today: dt.date | None = None, *, fetch=None, news_fn=None,
     fetches prices and news even for a stock that can't reach the watchlist (the analyst's
     single-ticker look)."""
     today = today or dt.date.today()
-    prices = prices or paper.Prices(fetch, today)
+    prices = prices or Prices(fetch, today)
     news_fn = _memoised(news_fn or default_news)
     trend_fn = trend_fn or crypto.price_trend
     if t212 is None:
@@ -548,7 +549,7 @@ def run(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_f
     trend_fn = trend_fn or crypto.price_trend
     sector_of = _memoised(sector_fn or _default_sector)
     create_books(conn, today)
-    prices = paper.Prices(fetch, today)
+    prices = Prices(fetch, today)
     buys: list[Trade] = []
     sells: list[Trade] = []
     failed: set[str] = set()

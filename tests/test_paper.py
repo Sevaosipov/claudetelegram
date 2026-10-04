@@ -1,6 +1,7 @@
 """paper.py: the virtual-book engine -- orders, fills, fees, valuation, the daily snapshot.
 Offline -- prices come from a stub fetch, dates are fixed so weekday arithmetic is
-deterministic. What the model portfolio trades on it is tested in test_model.py."""
+deterministic. What the model portfolio trades on it is tested in test_model.py; the price helpers
+it reads are tested in test_prices.py."""
 from __future__ import annotations
 
 import datetime as dt
@@ -33,65 +34,10 @@ class Fetch:
 
 
 # ------------------------------------------------------------------ foundation
-@pytest.mark.parametrize("ticker,source,expected", [
-    ("AAPL", "SEC", ("AAPL", "USD")),
-    ("BRK.B", "HOUSE", ("BRK-B", "USD")),
-    ("EQNR", "NORWAY", ("EQNR.OL", "NOK")),
-    ("VOLV-B", "SWEDEN", ("VOLV-B.ST", "SEK")),
-    ("CRYPTO:BTC", "CRYPTO", ("BTC-USD", "USD")),
-    ("DE0007164600", "BAFIN", None),
-])
-def test_listing(ticker, source, expected):
-    assert paper.listing(ticker, source) == expected
-
-
 def test_fees():
     assert paper.fee("AAPL", "USD") == 0.0025
     assert paper.fee("SAP", "EUR") == 0.0010
     assert paper.fee("CRYPTO:BTC", "USD") == 0.0050
-
-
-def test_prices_are_fetched_once_and_a_failure_is_empty():
-    calls = []
-
-    def fetch(symbol, days):
-        calls.append(symbol)
-        if symbol == "BAD":
-            raise RuntimeError("down")
-        return [("2026-10-01", 1.0)]
-    p = paper.Prices(fetch)
-    assert p.bars("AAA") == p.bars("AAA") == [("2026-10-01", 1.0)]
-    assert p.bars("BAD") == [] and calls == ["AAA", "BAD"]
-
-
-def test_prices_with_a_date_keep_only_completed_bars():
-    series = {"AAA": _bars([100, 110, 120])}                          # ... TODAY-1, TODAY
-    assert paper.Prices(Fetch(series), today=TODAY).bars("AAA") == [(_days(2), 100.0), (_days(1), 110.0)]
-    assert paper.Prices(Fetch(series)).bars("AAA") == series["AAA"]   # without a date: every bar
-
-
-@pytest.mark.parametrize("symbol,source,kept", [
-    ("AAPL", "Nasdaq", False),       # not adjusted for dividends and splits
-    ("AAPL", "Yahoo", True),
-    ("BTC-USD", "Binance", True),    # a coin pays no dividend: any source will do
-])
-def test_stock_closes_come_from_yahoo_only(monkeypatch, symbol, source, kept):
-    bars = [("2026-10-01", 1.0), ("2026-10-02", 2.0)]
-    monkeypatch.setattr(paper.sources, "price_history", lambda asset, days: (bars, source))
-    assert paper._closes(symbol, 420) == (bars if kept else [])
-
-
-def test_series_helpers():
-    bars = [("2026-10-01", 10.0), ("2026-10-02", 11.0), ("2026-10-05", 12.0)]
-    assert paper.close_on_or_before(bars, "2026-10-03") == 11.0
-    assert paper.close_on_or_before(bars, "2026-09-30") is None
-    assert paper.first_close_after(bars, "2026-10-02") == ("2026-10-05", 12.0)
-    assert paper.first_close_after(bars, "2026-10-05") is None
-
-
-def test_business_days_between():
-    assert paper.business_days_between("2026-10-02", dt.date(2026, 10, 9)) == 5
-    assert paper.business_days_between("2026-10-05", dt.date(2026, 10, 5)) == 0
 
 
 # ------------------------------------------------------------- orders & fills

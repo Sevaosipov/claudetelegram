@@ -20,11 +20,11 @@ REAL_POPEN = subprocess.Popen
 
 @pytest.fixture(autouse=True)
 def _offline_lookup(monkeypatch):
-    import paper
+    import prices
     import sources
 
     # /bought sizes its stop from the price history: none, offline.
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
     # A queued lookup or question runs run_claude_analysis.sh, i.e. a real headless Claude pass
     # over the real queue that can send Telegram messages. A test that doesn't stub the runner
     # itself must never reach it -- not even while it is still red.
@@ -278,10 +278,10 @@ def _august_closes(symbol, days):
 
 
 def test_bought_tells_the_stop_its_price_history_gave(conn, replies, monkeypatch):
-    import paper
+    import prices
     import positions
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 180.0)
-    monkeypatch.setattr(paper, "_closes", _august_closes)
+    monkeypatch.setattr(prices, "_closes", _august_closes)
     tb._handle_message(conn, "/bought NVDA 180")
     assert replies[-1].startswith("Записал NVDA по 180,00; стоп −10% от максимума; ")
     assert positions.open_positions(conn)[0].stop_pct == 0.10
@@ -674,9 +674,9 @@ def test_portfolio_shows_your_own_positions_with_their_status(conn, replies, mon
 
 def test_a_price_at_the_peak_can_fall_by_the_stop_before_it_fires(conn, replies, monkeypatch):
     """The 10% stop of a calm stock, the price at its peak: «до стопа 10,0%»."""
-    import paper
+    import prices
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 180.0)
-    monkeypatch.setattr(paper, "_closes", _august_closes)
+    monkeypatch.setattr(prices, "_closes", _august_closes)
     tb._handle_message(conn, "/bought NVDA 180")
     replies.clear()
     tb._handle_message(conn, "/portfolio")

@@ -1197,8 +1197,8 @@ def test_a_us_holding_with_no_isin_to_fall_back_on_keeps_its_symbol(conn, run):
 @pytest.fixture
 def yahoo_has_nothing(monkeypatch):
     """Yahoo is down, or does not know the symbol: no history and no last close for anything."""
-    import paper
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    import prices
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
 
 
@@ -1954,10 +1954,10 @@ def test_the_year_counts_from_the_tracking_start_for_a_legacy_holding(conn, run)
 
 def test_dead_money_counts_its_days_from_the_tracking_start_and_its_result_from_the_average(conn, run):
     import model
-    import paper
+    import prices
     run(_holding(created=OLD, avg=100.0, price=101.0))             # +1% on the average price paid
     day = NOW.date()
-    while paper.business_days_between(NOW.date().isoformat(), day) < model.DEAD_MONEY_BDAYS:
+    while prices.business_days_between(NOW.date().isoformat(), day) < model.DEAD_MONEY_BDAYS:
         day += dt.timedelta(days=1)
     assert _exits(conn, day - dt.timedelta(days=1), 101.0) == []
     [alert] = _exits(conn, day, 101.0)
@@ -2132,8 +2132,8 @@ TODAY = NOW.date()
 def no_yahoo(monkeypatch):
     """A US holding's stop line reads Yahoo's closes: none here, and no Yahoo price is asked for
     (Trading 212's own price is what /portfolio shows)."""
-    import paper
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    import prices
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
 
     def refuse(symbol):
         raise AssertionError("the price of a Trading 212 holding is Trading 212's")

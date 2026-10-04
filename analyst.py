@@ -59,6 +59,7 @@ import model_score
 import paper
 import paper_report
 import positions
+import prices
 import research
 import sources
 import t212_account
@@ -553,8 +554,8 @@ def _quiet_lines(conn, ticker: str) -> list[str]:
             name, source = venue
         else:
             name, source = asset.symbol, positions.position_source(conn, asset.symbol)
-        listed = paper.listing(name, source)
-        closes = [c for _d, c in paper.Prices(None, dt.date.today()).bars(listed[0])] if listed else []
+        listed = prices.listing(name, source)
+        closes = [c for _d, c in prices.Prices(None, dt.date.today()).bars(listed[0])] if listed else []
         news_part, red = model_score.news_part(model.default_news(name, source))
     except Exception as e:
         return [f"  импульс и новости недоступны: {type(e).__name__}"]

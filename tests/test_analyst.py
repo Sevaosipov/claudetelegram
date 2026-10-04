@@ -19,7 +19,7 @@ import analyst
 import db
 import model
 import model_score
-import paper
+import prices
 import positions
 import research
 
@@ -61,7 +61,7 @@ def _hermetic(monkeypatch, tmp_path):
     monkeypatch.setattr(analyst, "load_env", lambda *a, **k: [])
     monkeypatch.setattr(analyst, "_env_path", lambda: tmp_path / "absent.env")
     monkeypatch.setattr(analyst, "_LOADED_ENV", set())
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: [])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
     monkeypatch.setattr(model, "default_news", lambda ticker, source: [])
 
 
@@ -1639,7 +1639,7 @@ def _rising_bars(n=260, start=100.0, step=0.5):
 
 def test_a_ticker_without_a_signal_gets_its_momentum_and_news_parts(conn, dossier, monkeypatch):
     bars, priced = _rising_bars(), []
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: priced.append(symbol) or bars)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: priced.append(symbol) or bars)
     headlines = [{"title": "Acme downgrade after probe", "published": "2026-09-28"}]
     monkeypatch.setattr(model, "default_news", lambda ticker, source: headlines)
     momentum = model_score.momentum_part([c for _d, c in bars])
@@ -1675,7 +1675,7 @@ def test_no_extra_lines_when_the_model_has_a_signal(conn, dossier, monkeypatch):
 
 def test_the_listing_of_a_norwegian_ticker_is_its_own(conn, dossier, monkeypatch):
     priced, asked = [], []
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: priced.append(symbol) or [])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: priced.append(symbol) or [])
     monkeypatch.setattr(model, "default_news", lambda t, s: asked.append((t, s)) or [])
     analyst.context(conn, "EQNR.OL", scored=[])
     assert priced == ["EQNR.OL"] and asked == [("EQNR", "NORWAY")]
@@ -1683,7 +1683,7 @@ def test_the_listing_of_a_norwegian_ticker_is_its_own(conn, dossier, monkeypatch
 
 def test_a_signal_journal_source_picks_the_venue_of_a_bare_ticker(conn, dossier, monkeypatch):
     priced = []
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: priced.append(symbol) or [])
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: priced.append(symbol) or [])
     conn.execute("INSERT INTO signal_journal (ticker, source, emitted_at, tier) "
                  "VALUES ('EQNR', 'NORWAY', '2026-09-20', 'buy')")
     conn.commit()
@@ -1693,7 +1693,7 @@ def test_a_signal_journal_source_picks_the_venue_of_a_bare_ticker(conn, dossier,
 
 @pytest.mark.parametrize("ticker", ["CRYPTO:SOL", "SOL", "DE0007164600", "SAP.DE"])
 def test_coins_isins_and_unpriced_venues_get_no_extra_lines(conn, dossier, monkeypatch, ticker):
-    monkeypatch.setattr(paper, "_closes", lambda symbol, days: 1 / 0)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: 1 / 0)
     monkeypatch.setattr(model, "default_news", lambda t, s: 1 / 0)
     out = analyst.context(conn, ticker, scored=[]).splitlines()
     assert out[0] == "МОДЕЛЬ: свежего сигнала за 14 дней нет"
