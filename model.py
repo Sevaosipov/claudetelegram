@@ -1,6 +1,6 @@
 """model.py: the daily scoring pass -- which of the day's signals are worth a word, and how much.
 
-Every fresh stock signal and both coins get a score (model_score.py's pure functions); score_day
+Every fresh stock signal and the thirteen coins get a score (model_score.py's pure functions); score_day
 scores them, keeps the day's scores for the menu and the analyst and reports the decisions that
 bot.py puts in the journal's `tier` and picks the week's buy signals from (signals_weekly.py).
 The bot holds no portfolio -- the user's Trading 212 account is the only one it tracks -- so
@@ -17,6 +17,7 @@ hands each its own stub.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import sys
 import types
 from dataclasses import dataclass
@@ -30,7 +31,8 @@ import sources
 import strategy
 from prices import Prices, listing
 
-COINS = ("BTC", "ETH")
+COINS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "AVAX", "HYPE", "LTC", "ENA", "LINK", "TRX", "SUI")
+MAJOR_COINS = ("BTC", "ETH")  # the other eleven are "alts": bought only while bitcoin is up, flagged high risk
 MODEL_SIGNAL_DAYS = 14        # a stock is scored while its signal was disclosed this recently
 NEWS_DAYS = 14
 NEWS_MIN_PRESCORE = 35.0      # headlines are fetched only for a stock scoring this without them
@@ -178,21 +180,58 @@ def _score_stocks(conn, candidates, prices, today, news_fn, t212, prune: bool = 
     return list(best.values())
 
 
-def _score_coins(conn, candidates, prices, today, news_fn, trend_fn) -> list:
+def _usable_close(close) -> bool:
+    return isinstance(close, (int, float)) and math.isfinite(close) and close > 0
+
+
+def _coin_closes(prices, coin: str) -> list[float]:
+    """The coin's completed daily closes, oldest first. A close that is not a positive number -- a 0.0 from a
+    bad tick, a negative or missing value -- is dropped: left in, it divides by zero in the trend and in the stop
+    and takes the whole day's scoring down with it."""
+    return [c for _d, c in prices.bars(listing(crypto.ticker(coin), "CRYPTO")[0]) if _usable_close(c)]
+
+
+def _score_coins(conn, candidates, prices, today, news_fn, trend_fn, coins=None) -> list:
+    """The coins' scores -- the thirteen of COINS, or only those in `coins` (None: all; an empty set:
+    none, and then nothing is fetched). The bitcoin regime filter is applied here: an alt is a BUY only
+    when bitcoin's own close is above its 100-day average (model_score.coin_trend), else it is WATCH
+    with model_score.ALT_GATE_REASON. BTC and ETH are not gated. Bitcoin with no usable history (under
+    121 completed closes, so no trend to read) is not "up" either: the alts wait, for
+    model_score.ALT_GATE_NO_DATA_REASON. Bitcoin's closes are fetched for the gate only when an alt is
+    among the coins scored, and bitcoin itself is returned only when it is.
+
+    Each coin is scored on its own: one that raises is logged and left out, the others are scored and
+    the pass stays complete (a bad close, a failing headline source or a bug in one coin must not cancel
+    the week's picks); a close that is not a positive number is dropped (_coin_closes)."""
+    wanted = [coin for coin in COINS if coins is None or coin in coins]
+    if not wanted:
+        return []
     since = (today - dt.timedelta(days=CAUTION_DAYS)).isoformat()
     flows = [c for c in candidates if hasattr(c, "crypto_kind") and _flow_is_fresh(c, since)]
+    needs_regime = any(coin not in MAJOR_COINS for coin in wanted)
+    btc_trend = None
+    if needs_regime:
+        try:
+            btc_trend = model_score.coin_trend(_coin_closes(prices, "BTC"))
+        except Exception as e:         # no reading is no data: the alts wait, the week goes on
+            print(f"[model] bitcoin's trend not read: {type(e).__name__}: {e}", file=sys.stderr)
+    btc_up = bool(btc_trend and btc_trend["above_ma100"])
+    btc_known = btc_trend is not None
     scored = []
-    for coin in COINS:
-        ticker = crypto.ticker(coin)
-        mine = [c for c in flows if c.ticker == ticker]
-        bearish = next((c for c in mine if not c.bullish), None)
-        caution = None
-        if bearish is not None and crypto.trend_confirms_down(trend_fn(conn, coin)):
-            caution = f"{bearish.company} — цена подтверждает"
-        closes = [c for _d, c in prices.bars(listing(ticker, "CRYPTO")[0])]
-        scored.append(model_score.score_coin(
-            coin, closes, bullish_flow=any(c.bullish for c in mine), caution=caution,
-            headlines=news_fn(ticker, "CRYPTO")))
+    for coin in wanted:
+        try:
+            ticker = crypto.ticker(coin)
+            mine = [c for c in flows if c.ticker == ticker]
+            bearish = next((c for c in mine if not c.bullish), None)
+            caution = None
+            if bearish is not None and crypto.trend_confirms_down(trend_fn(conn, coin)):
+                caution = f"{bearish.company} — цена подтверждает"
+            scored.append(model_score.score_coin(
+                coin, _coin_closes(prices, coin), bullish_flow=any(c.bullish for c in mine), caution=caution,
+                headlines=news_fn(ticker, "CRYPTO"), btc_up=None if coin in MAJOR_COINS else btc_up,
+                btc_known=btc_known))
+        except Exception as e:         # one coin's bug must not cancel the others, nor the week's picks
+            print(f"[model] {coin} not scored: {type(e).__name__}: {e}", file=sys.stderr)
     return scored
 
 
@@ -209,7 +248,7 @@ def _kept(s) -> dict:
            "reasons": list(s.reasons), "block": s.block, "stop_pct": s.stop_pct}
     if s.kind == "crypto":
         row.update(company=s.coin, source="CRYPTO", coin=s.coin, trend=s.trend, flows=s.flows,
-                   news=s.news, untradeable=None, t212=None)
+                   news=s.news, ret60=s.ret60, untradeable=None, t212=None)
     else:
         row.update(company=s.company, source=s.source, insiders=s.insiders, triggers=s.triggers,
                    momentum=s.momentum, news=s.news, untradeable=s.untradeable, t212=s.t212)
@@ -234,12 +273,15 @@ def cached_scores(conn, today: dt.date | None = None) -> list | None:
 
 
 def score_today(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_fn=None,
-                signals=None, t212=None, prices=None, prune: bool = True) -> list:
-    """Every fresh stock signal and both coins, scored, highest first. Places nothing.
+                signals=None, t212=None, prices=None, prune: bool = True, coins=None) -> list:
+    """Every fresh stock signal and the thirteen coins, scored, highest first. Places nothing.
     `signals` are already-enriched candidates (else the finders run); `t212` is an object
     with can_buy(ticker, source) (else the cached instrument list, if any). `prune=False`
     fetches prices and news even for a stock that can't reach the watchlist (the analyst's
-    single-ticker look)."""
+    single-ticker look). `coins` is the set of coins to score: None -- the daily pass, the menu --
+    all thirteen; the analyst's single-ticker look asks for the coin in question alone, or for
+    none (an empty set) when the question is about a stock. Bitcoin is still read for the alts'
+    gate when an alt is asked for, but is returned only when it is among `coins`."""
     today = today or dt.date.today()
     prices = prices or Prices(fetch, today)
     news_fn = _memoised(news_fn or default_news)
@@ -248,13 +290,13 @@ def score_today(conn, today: dt.date | None = None, *, fetch=None, news_fn=None,
         t212 = _default_t212(conn)
     candidates = signals if signals is not None else candidate_signals(conn, today)
     scored = (_score_stocks(conn, candidates, prices, today, news_fn, t212, prune)
-              + _score_coins(conn, candidates, prices, today, news_fn, trend_fn))
+              + _score_coins(conn, candidates, prices, today, news_fn, trend_fn, coins))
     return sorted(scored, key=lambda s: s.total, reverse=True)
 
 
 def score_day(conn, today: dt.date | None = None, *, fetch=None, news_fn=None, trend_fn=None,
               signals=None, t212=None) -> ScoreReport:
-    """The daily scoring pass: score every fresh stock signal and both coins (score_today), keep the day's
+    """The daily scoring pass: score every fresh stock signal and the thirteen coins (score_today), keep the day's
     scores for the menu and the analyst (keep_scores) and report them. It trades nothing -- there is no
     virtual portfolio -- and touches no table but the kv cache. A scoring that raises is logged and undone:
     the report is then empty and not `complete`. Scores that could not be kept are logged and the pass is

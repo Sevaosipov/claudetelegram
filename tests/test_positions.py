@@ -11,9 +11,11 @@ import model
 import model_score
 import prices
 import positions
+import sources
 from conftest import add_bafin_txn, add_form_144, add_sec_sale, add_stake, add_sweden_txn
 
 TODAY = dt.date(2026, 9, 23)
+_REAL_CLOSES = prices._closes        # kept before the fixture below stubs it, for the tests that go through the sources
 
 
 @pytest.fixture(autouse=True)
@@ -187,6 +189,85 @@ def test_last_close_is_none_for_an_isin(conn, monkeypatch):
     on Yahoo, so pricing it would silently price the wrong instrument (or nothing)."""
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: 100.0)
     assert positions.last_close("DE0007164600", "BAFIN") is None
+
+
+# -------------------------------------- a coin Yahoo has no symbol for (HYPE, SUI)
+def _coin_bars(closes, last_day=TODAY - dt.timedelta(days=1)):
+    """Consecutive daily closes ending on `last_day`, oldest first."""
+    n = len(closes)
+    return [((last_day - dt.timedelta(days=n - 1 - i)).isoformat(), float(c)) for i, c in enumerate(closes)]
+
+
+def test_last_close_of_a_coin_yahoo_does_not_price_is_the_last_completed_bar_of_the_series(monkeypatch):
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+    bars = _coin_bars([38.0, 39.0, 40.0]) + [(TODAY.isoformat(), 99.0)]      # today's bar is still in progress
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: bars)
+    assert positions.last_close("CRYPTO:HYPE", "CRYPTO", today=TODAY) == 40.0
+
+
+def test_the_fallback_reads_the_coins_own_symbol_over_the_price_window(monkeypatch):
+    asked = []
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: asked.append((symbol, days)) or _coin_bars([3.0]))
+    assert positions.last_close("CRYPTO:SUI", "CRYPTO", today=TODAY) == 3.0
+    assert asked == [("SUI-USD", prices.PRICE_DAYS)]
+
+
+def test_a_coin_yahoo_does_price_keeps_yahoos_price_and_never_asks_the_series(monkeypatch):
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: 65_000.0)
+
+    def boom(symbol, days):
+        raise AssertionError("the series was asked")
+    monkeypatch.setattr(prices, "_closes", boom)
+    assert positions.last_close("CRYPTO:BTC", "CRYPTO", today=TODAY) == 65_000.0
+
+
+def test_a_stock_yahoo_cannot_price_has_no_fallback(monkeypatch):
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: _coin_bars([10.0, 11.0]))
+    assert positions.last_close("AAA", today=TODAY) is None
+
+
+def test_a_coin_with_no_completed_bar_has_no_price(monkeypatch):
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [(TODAY.isoformat(), 5.0)])
+    assert positions.last_close("CRYPTO:HYPE", "CRYPTO", today=TODAY) is None
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: [])
+    assert positions.last_close("CRYPTO:HYPE", "CRYPTO", today=TODAY) is None
+
+
+def _hype_sources(monkeypatch, last_bar=TODAY - dt.timedelta(days=1), long_closes=None):
+    """HYPE as the live sources have it: no symbol on Yahoo, 11 days on Binance, the whole year on Bybit."""
+    long_closes = long_closes if long_closes is not None else [40.0] * 421
+    monkeypatch.setattr(prices, "_closes", _REAL_CLOSES)
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+    monkeypatch.setattr(sources, "_crypto_spot", lambda symbol: None)
+    monkeypatch.setattr(sources, "_yahoo_history", lambda symbol, days: [])
+    monkeypatch.setattr(sources, "_binance_history", lambda symbol, days: _coin_bars([40.0] * 11, last_bar))
+    monkeypatch.setattr(sources, "_bybit_history", lambda symbol, days: _coin_bars(long_closes, last_bar))
+    monkeypatch.setattr(sources, "_kraken_history", lambda symbol, days: [])
+
+
+def test_a_hype_position_has_a_price_a_stop_and_a_trailing_stop_alert(conn, monkeypatch):
+    """/bought HYPE: no Yahoo symbol, Binance has 11 bars, Bybit the full year -- the position is still
+    priced, gets the stop its price history gives, and the trailing stop fires on it."""
+    _hype_sources(monkeypatch)
+    price = positions.last_close("CRYPTO:HYPE", "CRYPTO", today=TODAY)
+    assert price == 40.0
+    pos = positions.open_position(conn, "CRYPTO:HYPE", price, today=TODAY - dt.timedelta(days=5), source="CRYPTO")
+    assert pos.stop_pct == model_score.STOP_MIN["crypto"]               # flat history: the 15% floor
+    assert positions.check_exits(conn, today=TODAY) == []               # 40 on a stop of 34: nothing
+    _hype_sources(monkeypatch, long_closes=[40.0] * 420 + [33.0])       # yesterday's close is 33
+    [alert] = positions.check_exits(conn, today=TODAY)
+    assert (alert.trigger, alert.last_price) == ("trailing_stop", 33.0)
+    assert alert.detail == "−15% от максимума 40.00"
+
+
+def test_a_hype_positions_status_has_its_price_and_stop_level(conn, monkeypatch):
+    _hype_sources(monkeypatch)
+    pos = positions.open_position(conn, "CRYPTO:HYPE", 40.0, today=TODAY - dt.timedelta(days=5), source="CRYPTO")
+    st = positions.position_status(pos, TODAY, conn=conn)
+    assert st["last"] == 40.0 and st["stop_level"] == pytest.approx(34.0)
 
 
 def test_check_exits_prices_through_the_positions_own_source(conn):

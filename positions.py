@@ -336,13 +336,27 @@ def last_close(ticker: str, source: str | None = None, conn=None, today: dt.date
     """Most recent daily close from Yahoo for the listing `source` trades the
     ticker on, or None (an ISIN, a delisting, no network). A Trading 212 holding with no
     Yahoo listing (source T212_SOURCE) has the last price the sync stored, given `conn` -- unless
-    that price is stale (t212_stale, as of `today`): then there is no price."""
+    that price is stale (t212_stale, as of `today`): then there is no price.
+
+    A coin Yahoo has no price for (HYPE and SUI have no Yahoo symbol) has the last completed bar of
+    the multi-source daily series (_last_completed_close) instead; a coin Yahoo does price keeps
+    Yahoo's price."""
     symbol = yahoo_symbol(ticker, source)
     if symbol:
-        return _yahoo_close(symbol)
+        price = _yahoo_close(symbol)
+        if price is None and crypto.is_crypto(ticker):
+            return _last_completed_close(ticker, source, today)
+        return price
     if source == T212_SOURCE and conn is not None:
         return t212_price(conn, ticker, today)
     return None
+
+
+def _last_completed_close(ticker: str, source: str | None, today: dt.date | None) -> float | None:
+    """The close of the last completed bar of `ticker`'s daily series (daily_closes: Yahoo, Binance, Bybit,
+    Kraken -- whichever has the depth), or None. A bar dated `today` is still in progress and is not one."""
+    bars = _completed_bars(daily_closes(ticker, source), today or dt.date.today())
+    return bars[-1][1] if bars else None
 
 
 def daily_closes(ticker: str, source: str | None = None, conn=None) -> list[tuple[str, float]]:

@@ -40,9 +40,18 @@ _DAY_MS = 86_400_000
 # spot price: Yahoo files a clashing coin under a numbered ticker, so SYM-USD can be
 # another token (M-USD closed at 0.00029 while MemeCore traded at 1.22).
 CRYPTO_SPOT_TOLERANCE = 0.10
+# A coin's price history is deep enough from this many daily bars (or from `days` bars, when
+# fewer are asked for): the first source in the chain with that many wins. A coin listed days
+# ago has a full year on one exchange and eleven days on another (HYPE: Binance 11, Bybit 421),
+# so the chain's order alone must not pick the short one.
+CRYPTO_MIN_BARS = 200
 
 
-def first_available(attempts: list[tuple[str, Callable]]):
+def first_available(attempts: list[tuple[str, Callable]], min_size: int | None = None):
+    """(data, source name) of the first source that answers. With `min_size`, the first whose
+    answer has that many items -- and when none does, the longest answer any gave (the earliest
+    source among equals), never a short one while a longer one was on offer."""
+    best, best_name = None, None
     for name, fetch in attempts:
         try:
             data = fetch()
@@ -50,9 +59,13 @@ def first_available(attempts: list[tuple[str, Callable]]):
             print(f"[sources] {name} недоступен: {type(e).__name__}: {str(e)[:120]}",
                   file=sys.stderr)   # stderr: stdout is research.py's report / Claude's brief
             continue
-        if data:
+        if not data:
+            continue
+        if min_size is None or len(data) >= min_size:
             return data, name
-    return None, None
+        if best is None or len(data) > len(best):
+            best, best_name = data, name
+    return best, best_name
 
 
 def source_note(label: str, used: str | None, first: str,
@@ -154,7 +167,9 @@ def _yahoo_crypto_history(asset, days: int):
 
 
 def price_history(asset, days: int = 800):
-    """Daily closes [(iso_date, close)], oldest first."""
+    """Daily closes [(iso_date, close)], oldest first. A coin takes the first source, in the
+    order below, that has at least min(days, CRYPTO_MIN_BARS) bars; when none has, the longest
+    series any gave. A stock takes the first source that answers."""
     if asset.is_isin or not asset.yahoo:
         return None, None
     if asset.kind == "crypto":
@@ -162,10 +177,10 @@ def price_history(asset, days: int = 800):
                     ("Binance", lambda: _binance_history(asset.symbol, days)),
                     ("Bybit", lambda: _bybit_history(asset.symbol, days)),
                     ("Kraken", lambda: _kraken_history(asset.symbol, days))]
-    else:
-        attempts = [("Yahoo", lambda: _yahoo_history(asset.yahoo, days))]
-        if not asset.exchange:
-            attempts.append(("Nasdaq", lambda: _nasdaq_history(asset.symbol, days)))
+        return first_available(attempts, min_size=min(days, CRYPTO_MIN_BARS))
+    attempts = [("Yahoo", lambda: _yahoo_history(asset.yahoo, days))]
+    if not asset.exchange:
+        attempts.append(("Nasdaq", lambda: _nasdaq_history(asset.symbol, days)))
     return first_available(attempts)
 
 

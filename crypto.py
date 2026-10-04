@@ -20,10 +20,14 @@ import db
 PREFIX = "CRYPTO:"
 
 # Name fragments as they appear in House PTR asset text and in 8-K prose -> symbol.
-# Checked in order, longest names first, so "bitcoin cash" is not read as bitcoin.
+# Checked in order, longest names first, so "bitcoin cash" is not read as bitcoin and
+# "binance coin" comes before "bnb". Every name is matched as a whole word (symbol_for_text),
+# so "tron" is not found inside "electronic" nor "sui" inside "suite".
 ALIASES = (
     ("bitcoin cash", "BCH"),
     ("ethereum classic", "ETC"),
+    ("binance coin", "BNB"),
+    ("hyperliquid", "HYPE"),
     ("bitcoin", "BTC"),
     ("ethereum", "ETH"),
     ("ether", "ETH"),
@@ -35,14 +39,20 @@ ALIASES = (
     ("chainlink", "LINK"),
     ("avalanche", "AVAX"),
     ("polkadot", "DOT"),
+    ("ethena", "ENA"),
+    ("bnb", "BNB"),
+    ("tron", "TRX"),
+    ("sui", "SUI"),
 )
-SYMBOLS = {"BTC", "ETH", "SOL", "ADA", "DOGE", "LTC", "XRP", "LINK", "AVAX", "DOT",
-           "BCH", "ETC"}
+# The thirteen coins the bot scores (model.COINS) plus the extras House filers also write.
+SYMBOLS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "AVAX", "HYPE", "LTC", "ENA", "LINK",
+           "TRX", "SUI", "ADA", "DOT", "BCH", "ETC"}
 COINGECKO_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "ADA": "cardano",
     "DOGE": "dogecoin", "LTC": "litecoin", "XRP": "ripple", "LINK": "chainlink",
     "AVAX": "avalanche-2", "DOT": "polkadot", "BCH": "bitcoin-cash",
-    "ETC": "ethereum-classic",
+    "ETC": "ethereum-classic", "BNB": "binancecoin", "HYPE": "hyperliquid",
+    "ENA": "ethena", "TRX": "tron", "SUI": "sui",
 }
 PRICE_TTL_SECONDS = 3600
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
@@ -80,6 +90,21 @@ def symbol_for_text(text: str | None) -> str | None:
     return None
 
 
+def units_text(units: float) -> str:
+    """A coin count as a message states it: whole coins with thousands separators from 1,000
+    ("1,250,000", "27,562"), up to four significant digits under that ("12.5", "0.4321") -- never
+    "1.25e+06". The one format of the log line, the purchases CSV and the coin dossier."""
+    return f"{units:,.0f}" if units >= 1000 else f"{units:,.4g}"
+
+
+def usd_price(x: float) -> str:
+    """A coin's price as a message states it: whole dollars from $100 ("$80,000"), cents above ten
+    cents ("$182.40", "$2.45", "$0.24"), four decimals under that ("$0.0520")."""
+    if x >= 100:
+        return f"${x:,.0f}"
+    return f"${x:,.2f}" if x >= 0.1 else f"${x:,.4f}"
+
+
 def yf_symbol(t: str) -> str:
     """The Yahoo Finance symbol for a ticker this project stores. Crypto quotes as
     BTC-USD; share classes as BRK-B rather than the BRK.B the filings use."""
@@ -115,9 +140,7 @@ def price_usd(conn, symbol: str, session: requests.Session | None = None) -> flo
 TREND_TTL_SECONDS = 12 * 3600
 
 
-def _daily_closes(symbol: str) -> list[float] | None:
-    """Daily USD closes, oldest first, or None. Crypto trades every day, so seven
-    closes back is seven calendar days back."""
+def _yahoo_closes(symbol: str) -> list[float] | None:
     try:
         import yfinance as yf
         hist = yf.Ticker(f"{symbol.upper()}-USD").history(period="3mo")["Close"].dropna()
@@ -125,6 +148,25 @@ def _daily_closes(symbol: str) -> list[float] | None:
         return None
     closes = [float(x) for x in hist]
     return closes if len(closes) >= 21 else None
+
+
+def _exchange_closes(symbol: str) -> list[float] | None:
+    """The same from the multi-source history (sources.price_history: Binance, Bybit, Kraken ...),
+    for a coin Yahoo has no symbol for (HYPE, SUI). Imported here: sources imports this module."""
+    try:
+        import assets
+        import sources
+        bars, _src = sources.price_history(assets.crypto_asset(symbol), 90)
+    except Exception:
+        return None
+    closes = [float(c) for _d, c in bars or []]
+    return closes if len(closes) >= 21 else None
+
+
+def _daily_closes(symbol: str) -> list[float] | None:
+    """Daily USD closes, oldest first, or None. Crypto trades every day, so seven
+    closes back is seven calendar days back. Yahoo's, else the other sources'."""
+    return _yahoo_closes(symbol) or _exchange_closes(symbol)
 
 
 def price_trend(conn, symbol: str) -> dict | None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import statistics
 
 import cluster
+import crypto
 import datefmt
 import outlook
 import sources
@@ -106,7 +107,7 @@ def _bot_lines(rep: dict) -> list[str]:
     for filed, company, co_ticker, side, units, total, avg, url in rep["treasury"]:
         verb = "купила" if side == "P" else "продала"
         money = f" (${total:,.0f})" if total else ""
-        lines.append(f"🪙 {datefmt.fmt(filed)} {company} ({co_ticker or '?'}) {verb} {units:,.4g} {rep['ticker']}{money}")
+        lines.append(f"🪙 {datefmt.fmt(filed)} {company} ({co_ticker or '?'}) {verb} {crypto.units_text(units)} {rep['ticker']}{money}")
     for as_of, flow, funds in rep["etf_flows"]:
         lines.append(f"🏦 {datefmt.fmt(as_of)} спот-ETF, фондов: {len(funds)}: {flow / 1e6:+,.0f} млн $")
     for date, member, ttype, amount, url, chamber in rep["political"][:5]:

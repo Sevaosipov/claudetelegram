@@ -104,9 +104,12 @@ def test_the_readme_examples_are_what_the_code_renders(conn):
     insider = positions.CloseAlert(_position(), "insider_sell", "Ryan Cohen — Form 4, 2026-10-01", 20.70)
     holding = ta.T212Position("GME_US_EQ", None, "US36467W1099", "USD", 10.0, 23.10, 24.05,
                               "2026-09-28T14:03:11.000+02:00", 207.3, 199.0, 8.30, "EUR")
+    alt = dict(ticker="CRYPTO:SOL", source="CRYPTO", company="SOL", kind="crypto", score=75.0, stop_pct=0.22,
+               reasons=["выше 100-дн. средней", "20 дн. +12%", "60 дн. +30%"], t212=None, risk=True)
     state = dict(close=1.2000, ma=1.1500, diff=0.35, atr=0.008)
     expected = [
         weekly.buy_text(pick),
+        weekly.buy_text(alt),
         weekly.exit_text("XYZ", ["Anna Lee", "Bo Chen"]),
         tn.format_close_alert(stop),
         tn.format_close_alert(insider),
@@ -178,6 +181,115 @@ def test_the_readme_says_which_buys_are_picked():
                    "ваш счёт Trading 212 — единственный портфель", "Бот ничего не покупает и не продаёт",
                    "RESIGNAL_DAYS", "WEEKLY_BUY_LIMIT"):
         assert phrase in text, phrase
+
+
+def test_the_readme_says_what_the_thirteen_coins_are_and_what_feeds_them():
+    text = " ".join(_text().split())
+    assert "BTC, ETH** и одиннадцатью альтами — **SOL, XRP, BNB, DOGE, AVAX, HYPE, LTC, ENA, LINK, TRX, SUI**" in text
+    for phrase in ("`model.COINS`", "`model.MAJOR_COINS`", "| Тренд (цены) | все тринадцать |",
+                   "| Притоки и оттоки спот-ETF | BTC, ETH и SOL |",
+                   "| Покупки и продажи компаний (8-K/6-K) | все тринадцать |", "| Новости | все тринадцать |"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_how_the_alts_are_held_back():
+    text = " ".join(_text().split())
+    for phrase in ("фильтр биткоина", "биткоин ниже 100-дн. средней — альты не покупаем",
+                   "`coin_trend(закрытия BTC)[\"above_ma100\"]`", "`btc_up`",
+                   "`WEEKLY_COIN_LIMIT`", "не больше двух монет", "кончается словами «высокий риск»",
+                   "поле `risk`", "мало истории"):
+        assert phrase in text, phrase
+    for phrase in ("`signals_weekly.coin_priority`", "сначала BTC и ETH (`model.MAJOR_COINS`)",
+                   "какие бы баллы ни были у альтов", "затем альты по баллу, а при равных баллах — у кого выше "
+                   "доходность за 60 дней", "`ret60`", "нет значения — в конец",
+                   "нет BTC — место получает ETH, а второе — лучший альт"):
+        assert phrase in text, phrase
+    for phrase in ("места для монет зарезервированы", "Баллы монет и акций лежат на разных шкалах",
+                   "Остальные места (пять минус взятые монеты) занимают акции",
+                   "нет ни одной подходящей монеты — все пять мест у акций",
+                   "акций мало — выбранных меньше пяти, а не третья монета",
+                   "Порядок отправки один: сначала акции по убыванию балла, затем монеты (BTC и ETH, потом альты)",
+                   "сначала акции по убыванию балла, затем монеты: BTC и ETH, потом альты"):
+        assert phrase in text, phrase
+    assert "соревнуются с акциями" not in text
+    from model_score import ALT_GATE_NO_DATA_REASON, ALT_GATE_REASON
+    from weekly import RISK_TAG
+    assert ALT_GATE_REASON in text and RISK_TAG in text
+    assert ALT_GATE_NO_DATA_REASON in text and "нет данных по биткоину" in text
+    assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
+
+
+def test_the_readme_says_the_menu_names_the_bitcoin_gate_and_units_are_plain():
+    text = " ".join(_text().split())
+    for phrase in ("у монеты в наблюдении — причина фильтра биткоина", "«биткоин ниже 100-дн. средней — альты не покупаем»",
+                   "Количество монет в логе, в `purchases_log.csv` и в досье — обычным числом, без «1.25e+06»"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_edgar_down_stops_the_search_after_three_failed_queries():
+    text = " ".join(_text().split())
+    for phrase in ("после трёх неудавшихся запросов подряд (`MAX_CONSECUTIVE_FAILURES`) поиск останавливается и источник "
+                   "считается упавшим", "не тратя повторы на остальные монеты"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_what_the_parser_rejects_and_what_multipliers_it_reads():
+    text = " ".join(_text().split())
+    for phrase in ("Заглавный тикер альта, за которым идёт название компании или ценной бумаги",
+                   "«500,000 SOL Strategies common shares», «100 TRON Inc shares»", "Inc, Corp, Corporation, Ltd, LLC, Holdings",
+                   "Количество может быть со словом-множителем", "«12.6 million HYPE tokens», «1.5 billion DOGE», «300 thousand LINK»",
+                   "простые числа перед BTC и ETH читаются, как читались"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_an_unpriced_sale_is_valued_at_the_current_price_before_the_floor():
+    text = " ".join(_text().split())
+    for phrase in ("Продажа без суммы", "количество × текущая цена монеты", "должна пройти тот же порог",
+                   "если цены нет — продажа отбрасывается"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_one_bad_price_does_not_cancel_the_week():
+    text = " ".join(_text().split())
+    for phrase in ("Одна плохая цена не отменяет неделю", "закрытие, которое не положительное число (0, отрицательное, пустое), "
+                   "выбрасывается из ряда", "монета, чья оценка упала с ошибкой, пишется в stderr и пропускается"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_names_reread_for_the_first_backfill_after_the_alts():
+    text = " ".join(_text().split()).lower()
+    for phrase in ("`python crypto_treasury.py --backfill 365 --reread`", "В первый раз после перехода на тринадцать монет",
+                   "перечитывает и уже прочитанные документы", "`crypto_treasury_seen` ничего не удаляется"):
+        assert phrase.lower() in text, phrase
+
+
+def test_the_readme_says_the_analysts_context_scores_only_what_it_needs():
+    text = " ".join(_text().split())
+    for phrase in ("`context 'ТИКЕР'`", "считает заново и **только то, что нужно** (`model.score_today(…, coins=…)`)",
+                   "для акции — без монет (ни цен, ни новостей по монетам), для монеты — её одну",
+                   "для альта ещё читаются цены биткоина, но только для фильтра биткоина",
+                   "`$BTC` — это акция, монеты он не считает", "Меню и `portfolio` считают все тринадцать монет (`coins=None`)"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_a_coins_good_headlines_add_no_points():
+    text = " ".join(_text().split()).lower()
+    for phrase in ("| Новости | −30…0 |", "Хорошие заголовки монете баллов не дают",
+                   "«upgrade» в крипто-новостях — обновление сети", "Красные флаги", "по-прежнему блок"):
+        assert phrase.lower() in text, phrase
+    assert "| новости | −30…+10 | те же списки, что у акций, плюс красные флаги" not in text
+
+
+def test_the_readme_says_what_the_alts_treasury_and_etf_numbers_are():
+    text = " ".join(_text().split())
+    for phrase in ("не меньше €50 млн для BTC и ETH (€10 млн для альтов)", "от €5 млн для альтов",
+                   "farside.co.uk/sol/", "BSOL, FSOL, GSOL, MSOL, SOEZ, TSOL, VSOL", "страницы «вся история» нет",
+                   "| Фиксированный порог дня (истории меньше 30 дней) | $400 млн | $50 млн |",
+                   "| Фиксированный порог 3 дней | $500 млн | $100 млн |",
+                   "| Пол дня (относительное правило) | $100 млн | $25 млн |", "| Пол 3 дней | $250 млн | $60 млн |",
+                   "`python crypto_treasury.py --backfill 365`", "сбой одного запроса", "только если упали все запросы",
+                   "min(дней, 200)", "последний завершённый бар"):
+        assert phrase.lower() in text.lower(), phrase
 
 
 def test_the_readme_says_what_the_views_show_now():

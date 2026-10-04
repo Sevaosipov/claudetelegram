@@ -92,8 +92,15 @@ def test_only_a_buy_is_picked(conn):
 
 
 def test_the_highest_total_comes_first_whatever_order_the_scores_come_in(conn):
+    scored = [_stock("LOW", 61.0), _stock("TOP", 90.0), _stock("MID", 64.0)]
+    assert _picked(conn, scored) == ["TOP", "MID", "LOW"]
+
+
+def test_the_coins_are_listed_after_the_stocks_whatever_they_score(conn):
+    """One order for sending (amendment R3): the stocks by score first, then the coins -- a coin that
+    outscores every stock is still sent after them."""
     scored = [_stock("LOW", 61.0), _coin("BTC", 75.0), _stock("TOP", 90.0), _stock("MID", 64.0)]
-    assert _picked(conn, scored) == ["TOP", "CRYPTO:BTC", "MID", "LOW"]
+    assert _picked(conn, scored) == ["TOP", "MID", "LOW", "CRYPTO:BTC"]
 
 
 def test_equal_totals_keep_the_order_they_came_in(conn):
@@ -110,6 +117,188 @@ def test_a_name_that_is_skipped_does_not_use_up_a_place(conn):
     _hold(conn, "T7")
     scored = [_stock(f"T{i}", 60.0 + i) for i in range(8)]
     assert _picked(conn, scored) == ["T6", "T5", "T4", "T3", "T2"]
+
+
+# ------------------------------------------------- at most two coins a week
+def _coins(*names, top=80.0):
+    """BUY coin scores, `top` for the first and one point less for each next."""
+    return [_coin(c, top - i) for i, c in enumerate(names)]
+
+
+def test_the_week_takes_two_coins_at_most():
+    assert signals_weekly.WEEKLY_COIN_LIMIT == 2 and signals_weekly.WEEKLY_BUY_LIMIT == 5
+
+
+def test_five_coin_buys_and_three_stock_buys_make_two_coins_and_three_stocks(conn):
+    scored = _coins("BTC", "ETH", "SOL", "XRP", "LINK") + [_stock(f"S{i}", 70.0 - 3 * i) for i in range(3)]
+    assert _picked(conn, scored) == ["S0", "S1", "S2", "CRYPTO:BTC", "CRYPTO:ETH"]        # the stocks first, then the coins
+    scored = _coins("SOL", "XRP", "LINK", "SUI", "TRX") + [_stock(f"S{i}", 70.0 - 3 * i) for i in range(3)]
+    assert _picked(conn, scored) == ["S0", "S1", "S2", "CRYPTO:SOL", "CRYPTO:XRP"]        # alts: the two highest
+
+
+def test_the_two_coins_are_the_two_highest_scoring_whatever_order_they_come_in(conn):
+    scored = [_coin("SUI", 61.0), _coin("HYPE", 90.0), _coin("LINK", 75.0), _coin("TRX", 88.0)]
+    assert _picked(conn, scored) == ["CRYPTO:HYPE", "CRYPTO:TRX"]
+
+
+def test_the_coin_places_are_reserved_and_the_stocks_fill_the_rest(conn):
+    scored = [_stock("S0", 95.0), _coin("SOL", 90.0), _stock("S1", 85.0), _coin("XRP", 80.0), _coin("LINK", 78.0),
+              _stock("S2", 70.0), _stock("S3", 65.0), _stock("S4", 61.0)]
+    assert _picked(conn, scored) == ["S0", "S1", "S2", "CRYPTO:SOL", "CRYPTO:XRP"]
+
+
+def test_a_third_coin_does_not_take_a_stocks_place_when_there_are_too_few_stocks(conn):
+    scored = _coins("BTC", "ETH", "SOL", "XRP", "LINK", "SUI") + [_stock("S0", 62.0), _stock("S1", 61.0)]
+    assert _picked(conn, scored) == ["S0", "S1", "CRYPTO:BTC", "CRYPTO:ETH"]        # four, not five
+
+
+def test_a_coin_that_is_skipped_does_not_use_up_one_of_the_two(conn):
+    _hold(conn, "CRYPTO:BTC", "CRYPTO")
+    _signalled(conn, "CRYPTO:ETH", 10)
+    assert _picked(conn, _coins("BTC", "ETH", "SOL", "XRP", "LINK")) == ["CRYPTO:SOL", "CRYPTO:XRP"]
+
+
+def test_a_coin_that_is_not_a_buy_does_not_use_up_one_of_the_two(conn):
+    scored = [_coin("BTC", 99.0, model_score.WATCH), _coin("ETH", 98.0, model_score.BLOCK, block="x")] + _coins("SOL", "XRP", "LINK")
+    assert _picked(conn, scored) == ["CRYPTO:SOL", "CRYPTO:XRP"]
+
+
+def test_a_coin_takes_its_place_even_when_every_stock_scores_higher(conn):
+    scored = [_stock(f"T{i}", 60.0 + i) for i in range(8)] + [_coin("BTC", 60.5)]
+    assert _picked(conn, scored) == ["T7", "T6", "T5", "T4", "CRYPTO:BTC"]         # the four best stocks, and bitcoin
+
+
+# ------------------------------------------------- amendment R2: which two coins
+def test_five_alts_at_the_same_score_give_the_two_with_the_highest_60_day_return(conn):
+    scored = [_coin("SOL", 60.0, ret60=0.10), _coin("XRP", 60.0, ret60=0.55), _coin("LINK", 60.0, ret60=0.20),
+              _coin("SUI", 60.0, ret60=0.90), _coin("TRX", 60.0, ret60=0.30)]
+    assert _picked(conn, scored) == ["CRYPTO:SUI", "CRYPTO:XRP"]               # 0.90, 0.55: the highest first
+
+
+def test_a_higher_score_beats_a_higher_return_among_alts(conn):
+    scored = [_coin("XRP", 60.0, ret60=0.90), _coin("LINK", 60.0, ret60=0.80), _coin("SOL", 75.0, ret60=0.01)]
+    assert _picked(conn, scored) == ["CRYPTO:SOL", "CRYPTO:XRP"]
+
+
+def test_a_negative_return_is_still_ranked_by_its_value(conn):
+    scored = [_coin("XRP", 60.0, ret60=-0.30), _coin("LINK", 60.0, ret60=-0.05), _coin("SOL", 60.0, ret60=-0.50)]
+    assert _picked(conn, scored) == ["CRYPTO:LINK", "CRYPTO:XRP"]
+
+
+def test_a_coin_with_no_60_day_return_sorts_last_among_equal_scores(conn):
+    scored = [_coin("SOL", 60.0), _coin("XRP", 60.0, ret60=-0.20), _coin("LINK", 60.0, ret60=0.10)]
+    assert _picked(conn, scored) == ["CRYPTO:LINK", "CRYPTO:XRP"]
+    assert _picked(conn, [_coin("SOL", 60.0), _coin("XRP", 60.0), _coin("LINK", 60.0)]) == [
+        "CRYPTO:SOL", "CRYPTO:XRP"]                                              # none known: as they came
+
+
+def test_bitcoin_and_ether_are_picked_before_higher_scoring_alts(conn):
+    scored = [_coin("SOL", 90.0, ret60=0.9), _coin("XRP", 85.0, ret60=0.8), _coin("LINK", 80.0, ret60=0.7),
+              _coin("ETH", 60.0, ret60=0.1), _coin("BTC", 60.0, ret60=0.1)]
+    assert _picked(conn, scored) == ["CRYPTO:BTC", "CRYPTO:ETH"]                # equal scores: MAJOR_COINS order
+    scored = [_coin("SOL", 90.0), _coin("ETH", 61.0), _coin("BTC", 60.0)]
+    assert _picked(conn, scored) == ["CRYPTO:BTC", "CRYPTO:ETH"]                # the coins are listed majors first, in that order
+
+
+@pytest.mark.parametrize("unavailable", ["held", "signalled"])
+def test_bitcoin_held_or_signalled_this_month_gives_its_place_to_ether_and_then_the_best_alt(conn, unavailable):
+    if unavailable == "held":
+        _hold(conn, "CRYPTO:BTC", "CRYPTO")
+    else:
+        _signalled(conn, "CRYPTO:BTC", 10)
+    scored = [_coin("BTC", 99.0), _coin("ETH", 60.0, ret60=0.1), _coin("SOL", 75.0, ret60=0.10),
+              _coin("XRP", 75.0, ret60=0.40), _coin("LINK", 65.0, ret60=0.90)]
+    assert _picked(conn, scored) == ["CRYPTO:ETH", "CRYPTO:XRP"]               # ether, and the best alt: XRP wins the tie at 75
+
+
+def test_ether_unavailable_too_gives_the_two_best_alts(conn):
+    _hold(conn, "CRYPTO:BTC", "CRYPTO")
+    _signalled(conn, "CRYPTO:ETH", 3)
+    scored = [_coin("BTC", 99.0), _coin("ETH", 98.0), _coin("SOL", 70.0, ret60=0.1), _coin("XRP", 70.0, ret60=0.4),
+              _coin("LINK", 70.0, ret60=0.2)]
+    assert _picked(conn, scored) == ["CRYPTO:XRP", "CRYPTO:LINK"]
+
+
+def test_a_major_that_is_not_a_buy_does_not_take_a_coin_place(conn):
+    scored = [_coin("BTC", 99.0, model_score.WATCH), _coin("ETH", 60.0), _coin("SOL", 75.0), _coin("XRP", 70.0)]
+    assert _picked(conn, scored) == ["CRYPTO:ETH", "CRYPTO:SOL"]
+
+
+def test_only_one_major_to_pick_leaves_the_other_place_to_the_best_alt(conn):
+    scored = [_coin("BTC", 62.0), _coin("SOL", 70.0, ret60=0.2), _coin("XRP", 70.0, ret60=0.6), _coin("LINK", 64.0)]
+    assert _picked(conn, scored) == ["CRYPTO:BTC", "CRYPTO:XRP"]
+
+
+# ------------------------------------------------- amendment R3: the coin places are reserved
+STOCKS_70_UP = [_stock(f"S{i}", 90.0 - 5 * i) for i in range(5)]                       # 90, 85, 80, 75, 70
+
+
+def test_five_stock_buys_at_70_and_up_and_bitcoin_and_ether_at_60_make_three_stocks_and_both_coins(conn):
+    """Coin and stock scores are on different scales: the two coin places are reserved, the stocks fill the rest."""
+    scored = STOCKS_70_UP + [_coin("BTC", 60.0), _coin("ETH", 60.0)]
+    assert _picked(conn, scored) == ["S0", "S1", "S2", "CRYPTO:BTC", "CRYPTO:ETH"]
+
+
+def test_one_eligible_coin_takes_one_place_and_four_stocks_the_rest(conn):
+    assert _picked(conn, STOCKS_70_UP + [_coin("BTC", 60.0)]) == ["S0", "S1", "S2", "S3", "CRYPTO:BTC"]
+    assert _picked(conn, STOCKS_70_UP + [_coin("BTC", 60.0), _coin("ETH", 99.0, model_score.WATCH)]) == [
+        "S0", "S1", "S2", "S3", "CRYPTO:BTC"]                                          # ether is not a buy
+    _hold(conn, "CRYPTO:ETH", "CRYPTO")
+    assert _picked(conn, STOCKS_70_UP + [_coin("BTC", 60.0), _coin("ETH", 99.0)]) == [
+        "S0", "S1", "S2", "S3", "CRYPTO:BTC"]                                          # ether is held
+
+
+def test_no_eligible_coin_leaves_all_five_places_to_the_stocks(conn):
+    assert _picked(conn, STOCKS_70_UP + [_coin("BTC", 99.0, model_score.WATCH)]) == ["S0", "S1", "S2", "S3", "S4"]
+    _hold(conn, "CRYPTO:BTC", "CRYPTO")
+    _signalled(conn, "CRYPTO:SOL", 5)
+    assert _picked(conn, STOCKS_70_UP + [_coin("BTC", 99.0), _coin("SOL", 99.0)]) == ["S0", "S1", "S2", "S3", "S4"]
+    assert _picked(conn, STOCKS_70_UP) == ["S0", "S1", "S2", "S3", "S4"]
+
+
+def test_an_alt_does_not_take_a_reserved_place_from_bitcoin_and_ether(conn):
+    scored = STOCKS_70_UP + [_coin("BTC", 60.0), _coin("ETH", 60.0), _coin("SOL", 99.0)]
+    assert _picked(conn, scored) == ["S0", "S1", "S2", "CRYPTO:BTC", "CRYPTO:ETH"]
+
+
+def test_the_alts_take_the_reserved_places_the_majors_leave(conn):
+    _hold(conn, "CRYPTO:BTC", "CRYPTO")
+    scored = STOCKS_70_UP + [_coin("BTC", 99.0), _coin("ETH", 60.0), _coin("SOL", 62.0, ret60=0.2), _coin("XRP", 62.0, ret60=0.5)]
+    assert _picked(conn, scored) == ["S0", "S1", "S2", "CRYPTO:ETH", "CRYPTO:XRP"]
+
+
+def test_the_picks_are_listed_stocks_by_score_first_and_then_the_coins_in_their_own_order(conn):
+    """One order for sending: the stocks best score first, then the coins -- BTC and ETH, then the alts by score and return."""
+    scored = [_coin("SOL", 99.0, ret60=0.9), _coin("ETH", 61.0), _stock("A", 61.0), _stock("B", 95.0), _coin("BTC", 60.0)]
+    assert _picked(conn, scored) == ["B", "A", "CRYPTO:BTC", "CRYPTO:ETH"]
+    _hold(conn, "CRYPTO:ETH", "CRYPTO")
+    assert _picked(conn, scored) == ["B", "A", "CRYPTO:BTC", "CRYPTO:SOL"]
+
+
+def test_stocks_keep_their_order_and_are_listed_before_the_coins(conn):
+    scored = [_coin("BTC", 64.0), _stock("B", 64.0), _stock("A", 64.0)]
+    assert _picked(conn, scored) == ["B", "A", "CRYPTO:BTC"]
+
+
+def test_with_few_stocks_the_week_has_fewer_picks_not_a_third_coin(conn):
+    scored = _coins("BTC", "ETH", "SOL", "XRP") + [_stock("S0", 80.0)]
+    assert _picked(conn, scored) == ["S0", "CRYPTO:BTC", "CRYPTO:ETH"]
+
+
+def test_a_score_kept_before_the_return_was_has_none_and_sorts_last(conn):
+    import types
+    old = types.SimpleNamespace(kind="crypto", ticker="CRYPTO:SOL", coin="SOL", decision=model_score.BUY, total=60.0,
+                                source="CRYPTO", stop_pct=0.2, reasons=[], t212=None)         # no ret60 at all
+    scored = [old, _coin("XRP", 60.0, ret60=-0.4), _coin("LINK", 60.0, ret60=0.1)]
+    assert _picked(conn, scored) == ["CRYPTO:LINK", "CRYPTO:XRP"]
+
+
+def test_the_return_rides_through_the_days_kept_scores(conn):
+    live = [_coin("SOL", 60.0, ret60=0.15), _coin("XRP", 60.0, ret60=0.55), _coin("LINK", 60.0)]
+    model.keep_scores(conn, TODAY, live)
+    kept = model.cached_scores(conn, TODAY)
+    assert {s.ticker: s.ret60 for s in kept} == {"CRYPTO:SOL": 0.15, "CRYPTO:XRP": 0.55, "CRYPTO:LINK": None}
+    assert _picked(conn, kept) == ["CRYPTO:XRP", "CRYPTO:SOL"]
 
 
 def test_the_picks_are_the_score_objects_themselves(conn):
@@ -240,6 +429,36 @@ def test_a_coin_pick_is_stored_with_its_symbol_as_the_company_and_crypto_as_the_
     record = signals_weekly.pick_record(_coin("BTC", 75.0))
     assert (record["ticker"], record["source"], record["company"], record["kind"], record["t212"]) == (
         "CRYPTO:BTC", "CRYPTO", "BTC", "crypto", None)
+
+
+# ------------------------------------------------- the high-risk flag of an alt
+@pytest.mark.parametrize("coin", model.COINS[2:])
+def test_an_alts_pick_carries_the_risk_flag(coin):
+    record = signals_weekly.pick_record(_coin(coin, 75.0))
+    assert record["risk"] is True and record["company"] == coin and record["kind"] == "crypto"
+    assert json.loads(json.dumps(record)) == record
+
+
+@pytest.mark.parametrize("pick", [_coin("BTC", 75.0), _coin("ETH", 75.0), _stock("GME", 70.0)])
+def test_bitcoin_ether_and_stock_picks_carry_no_risk_flag(pick):
+    assert "risk" not in signals_weekly.pick_record(pick)
+
+
+def test_the_risk_flag_survives_the_days_kept_scores_and_a_json_round_trip(conn):
+    live = [_coin("SOL", 75.0), _coin("BTC", 70.0), _stock("AAA", 64.0)]
+    model.keep_scores(conn, TODAY, live)
+    kept = {s.ticker: s for s in model.cached_scores(conn, TODAY)}
+    for s in live:
+        assert signals_weekly.pick_record(kept[s.ticker]) == signals_weekly.pick_record(s)
+    assert signals_weekly.pick_record(kept["CRYPTO:SOL"])["risk"] is True
+    assert "risk" not in signals_weekly.pick_record(kept["CRYPTO:BTC"])
+
+
+def test_the_risk_flag_is_not_a_column_of_buy_signals(conn):
+    record = signals_weekly.pick_record(_coin("SOL", 75.0))
+    signals_weekly.record_signal(conn, record, TODAY)
+    assert "risk" not in [r[1] for r in conn.execute("PRAGMA table_info(buy_signals)")]
+    assert conn.execute("SELECT ticker, kind FROM buy_signals").fetchall() == [("CRYPTO:SOL", "crypto")]
 
 
 def test_a_score_read_back_from_the_days_kept_scores_is_stored_the_same_way(conn):

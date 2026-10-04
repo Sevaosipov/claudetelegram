@@ -11,7 +11,9 @@ links them to each other and to congressional buys of the same coin for free.
 
 Like the other finders these are pure SQL plus fx: coin values that need a live price
 (an on-chain move is measured in coins, not money) are filled in by enrich_signals,
-the one network step.
+the one network step. The one exception is a company sale no filing priced: whether it is
+big enough to be a caution depends on its value, so _sale_signals values it at the coin's
+current price (crypto.price_usd, which reads its hour cache first) before the floor.
 """
 
 from __future__ import annotations
@@ -29,27 +31,31 @@ import fx
 # today), summed across companies. Strategy and a few imitators buy almost every
 # week, so a single filing says little -- the week is a signal only when it is above
 # what TOP_DECILE (the 90th percentile) of the previous weeks reached, and at least
-# the floor.
-TREASURY_WEEK_FLOOR_EUR = 50e6
+# the floor. The floors are per coin (coin_bar): €50m for bitcoin and ether, €10m for
+# every other coin -- the alts' treasuries are an order of magnitude smaller.
+TREASURY_WEEK_FLOOR_EUR = {"BTC": 50e6, "ETH": 50e6, "default": 10e6}
 TREASURY_HISTORY_WEEKS = 52
 TREASURY_MIN_HISTORY_WEEKS = 8
 TREASURY_FIRST_BUY_COVERAGE_DAYS = 365   # "first purchase ever" needs this much history
 # A company selling coins is rare and is news: any single filing from this size is a
-# caution signal, for TREASURY_WINDOW_DAYS after it was filed.
-TREASURY_SALE_MIN_EUR = 10e6
+# caution signal, for TREASURY_WINDOW_DAYS after it was filed. €10m for bitcoin and
+# ether, €5m for the alts.
+TREASURY_SALE_MIN_EUR = {"BTC": 10e6, "ETH": 10e6, "default": 5e6}
 TREASURY_WINDOW_DAYS = 14
 # Spot-ETF net flow, in USD, summed across a coin's funds. "Unusual" is judged against
 # the coin's own recent days -- the top 10% of the previous ETF_HISTORY_DAYS, with a
 # floor -- because the market grows and a fixed dollar bar goes stale. The fixed
 # bars apply only while there are fewer than ETF_MIN_HISTORY_DAYS stored days.
-ETF_DAY_FLOW_USD = 400e6
+# The dollar bars are per coin (coin_bar): SOL's funds are an order of magnitude smaller than
+# bitcoin's, and a coin not named takes "default" -- bitcoin's and ether's numbers.
+ETF_DAY_FLOW_USD = {"BTC": 400e6, "ETH": 400e6, "SOL": 50e6, "default": 400e6}        # fixed day bar
 ETF_STREAK_DAYS = 3
-ETF_STREAK_MIN_USD = 500e6
+ETF_STREAK_MIN_USD = {"BTC": 500e6, "ETH": 500e6, "SOL": 100e6, "default": 500e6}     # fixed 3-day bar
 ETF_MAX_AGE_DAYS = 7       # don't resurface a flow from a day this old
 ETF_HISTORY_DAYS = 126     # about six months of trading days
 ETF_MIN_HISTORY_DAYS = 30
-ETF_DAY_FLOOR_USD = 100e6
-ETF_STREAK_FLOOR_USD = 250e6
+ETF_DAY_FLOOR_USD = {"BTC": 100e6, "ETH": 100e6, "SOL": 25e6, "default": 100e6}       # day floor, relative rule
+ETF_STREAK_FLOOR_USD = {"BTC": 250e6, "ETH": 250e6, "SOL": 60e6, "default": 250e6}    # 3-day floor, relative rule
 TOP_DECILE = 0.9
 # Farside has trading-day rows only, so its staleness is counted in business days.
 FARSIDE_STALE_BUSINESS_DAYS = 3
@@ -90,6 +96,12 @@ def _is_new(conn, source: str, keys: list[str]) -> bool:
 
 def _monday(d: dt.date) -> dt.date:
     return d - dt.timedelta(days=d.weekday())
+
+
+def coin_bar(table: dict[str, float], coin: str) -> float:
+    """The coin's own entry of a per-coin bar (ETF_DAY_FLOW_USD, TREASURY_WEEK_FLOOR_EUR ...), else the
+    table's "default"."""
+    return table.get(coin, table["default"])
 
 
 def _usd_short(v: float) -> str:
@@ -137,7 +149,7 @@ def _weekly_demand_signals(conn, rows: list[dict], today: dt.date,
             continue
         week_usd = sum(r["usd"] or 0.0 for r in week)
         week_eur = fx.to_eur(week_usd, "USD", conn) if week_usd else 0.0
-        if week_eur < TREASURY_WEEK_FLOOR_EUR:
+        if week_eur < coin_bar(TREASURY_WEEK_FLOOR_EUR, coin):
             continue
         hist = []
         for k in range(1, n_hist + 1):
@@ -191,27 +203,36 @@ def _sale_signals(conn, rows: list[dict], today: dt.date,
         if r["side"] != "S" or r["filed"] < since:
             continue
         g = grouped.setdefault((r["acc"], r["coin"]), {"r": r, "units": 0.0, "usd": 0.0,
-                                                       "known": True, "avgs": []})
+                                                       "unpriced_units": 0.0, "avgs": []})
         g["units"] += r["units"]
         if r["usd"] is None:
-            g["known"] = False
+            g["unpriced_units"] += r["units"]
         else:
             g["usd"] += r["usd"]
         if r["avg"]:
             g["avgs"].append(r["avg"])
+    spot: dict[str, float | None] = {}      # a coin's current price, asked once per call
     signals = []
     for (acc, coin), g in grouped.items():
         r = g["r"]
-        # Unknown is not small: a sale with no stated value is kept and valued at
-        # spot by enrich_signals.
-        value_eur = fx.to_eur(g["usd"], "USD", conn) if g["known"] else None
-        if value_eur is not None and value_eur < TREASURY_SALE_MIN_EUR:
+        # A sale no filing put a price on is valued here, before the floor, at its units x the coin's
+        # current USD price (crypto.price_usd reads its hour cache before it asks CoinGecko): it
+        # must clear the coin's sale floor like any other. With no price to be had it is dropped.
+        usd = g["usd"]
+        if g["unpriced_units"]:
+            if coin not in spot:
+                spot[coin] = crypto.price_usd(conn, coin)
+            if not spot[coin]:
+                continue
+            usd += g["unpriced_units"] * spot[coin]
+        value_eur = fx.to_eur(usd, "USD", conn)
+        if value_eur < coin_bar(TREASURY_SALE_MIN_EUR, coin):
             continue
         keys = [f"{acc}|{coin}|S"]
         if not ignore_alert_state and not _is_new(conn, "CRYPTO_TREASURY", keys):
             continue
         who = f"{r['company']} ({r['co_ticker']})" if r["co_ticker"] else r["company"]
-        details = ([f"средняя цена ${sum(g['avgs']) / len(g['avgs']):,.0f} за {coin}"]
+        details = ([f"средняя цена {crypto.usd_price(sum(g['avgs']) / len(g['avgs']))} за {coin}"]
                    if g["avgs"] else [])
         signals.append(CryptoSignal(
             source="CRYPTO_TREASURY", crypto_kind="treasury", ticker=crypto.ticker(coin),
@@ -225,8 +246,9 @@ def _sale_signals(conn, rows: list[dict], today: dt.date,
 def find_treasury_signals(conn, ignore_alert_state: bool = False,
                           today: dt.date | None = None) -> list[CryptoSignal]:
     """Company demand for a coin -- this week's purchases summed across companies,
-    a buy signal when the week is unusually large -- plus any single sale of
-    TREASURY_SALE_MIN_EUR or more, a caution signal."""
+    a buy signal when the week is unusually large and over the coin's floor
+    (TREASURY_WEEK_FLOOR_EUR) -- plus any single sale of the coin's TREASURY_SALE_MIN_EUR or
+    more, a caution signal."""
     today = today or dt.date.today()
     rows = _treasury_rows(conn)
     return (_weekly_demand_signals(conn, rows, today, ignore_alert_state)
@@ -316,17 +338,19 @@ def _daily_etf_flows(conn) -> dict[str, list[tuple[str, float, list[str]]]]:
 daily_etf_flows = _daily_etf_flows   # public name for the crypto dossier (crypto_research.py)
 
 
-def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
+def find_etf_flow_signals(conn, day_flow_usd: float | None = None,
                           streak_days: int = ETF_STREAK_DAYS,
-                          streak_min_usd: float = ETF_STREAK_MIN_USD,
+                          streak_min_usd: float | None = None,
                           ignore_alert_state: bool = False,
                           today: dt.date | None = None) -> list[CryptoSignal]:
     """An unusual day, or an unusual run of same-direction days, judged on the most
     recent day only so an old flow never resurfaces. Unusual = the top 10% of the
     previous ETF_HISTORY_DAYS (a day against days, a streak against 3-day totals),
-    and at least the floor; with under ETF_MIN_HISTORY_DAYS of history the fixed
-    day_flow_usd / streak_min_usd apply instead. An inflow is a buy signal, an
-    outflow a caution signal (journaled as `caution`, see bot._journal)."""
+    and at least the coin's floor (ETF_DAY_FLOOR_USD / ETF_STREAK_FLOOR_USD); with under
+    ETF_MIN_HISTORY_DAYS of history the coin's fixed bars (ETF_DAY_FLOW_USD /
+    ETF_STREAK_MIN_USD) apply instead -- or `day_flow_usd` / `streak_min_usd`, when given, for
+    every coin. An inflow is a buy signal, an outflow a caution signal (journaled as
+    `caution`, see bot._journal)."""
     today = today or dt.date.today()
     signals = []
     for coin, (source, days) in etf_flow_days(conn, today).items():
@@ -350,10 +374,12 @@ def find_etf_flow_signals(conn, day_flow_usd: float = ETF_DAY_FLOW_USD,
         three_day = [abs(history[i][1] + history[i - 1][1] + history[i - 2][1])
                      for i in range(2, len(history))]
         if relative:
-            day_bar = max(_p90(day_sizes), ETF_DAY_FLOOR_USD)
-            streak_bar = max(_p90(three_day), ETF_STREAK_FLOOR_USD)
+            day_bar = max(_p90(day_sizes), coin_bar(ETF_DAY_FLOOR_USD, coin))
+            streak_bar = max(_p90(three_day), coin_bar(ETF_STREAK_FLOOR_USD, coin))
         else:
-            day_bar, streak_bar = day_flow_usd, streak_min_usd
+            day_bar = day_flow_usd if day_flow_usd is not None else coin_bar(ETF_DAY_FLOW_USD, coin)
+            streak_bar = (streak_min_usd if streak_min_usd is not None
+                          else coin_bar(ETF_STREAK_MIN_USD, coin))
 
         keys, details = [], []
         if abs(last_flow) >= day_bar:

@@ -96,7 +96,10 @@ def flows(snapshots: list[tuple[str, float, float]]) -> list[tuple[str, str, flo
 # Farside Investors publishes every US spot fund's daily net flow, in $ millions, in
 # one table per coin -- all the funds, where the issuer pages above cover only
 # BlackRock's two. Outflows are in parentheses, "-" is a fund that hasn't reported yet.
-FARSIDE_URLS = {"BTC": "https://farside.co.uk/btc/", "ETH": "https://farside.co.uk/eth/"}
+# SOL (seven funds: BSOL, FSOL, GSOL, MSOL, SOEZ, TSOL, VSOL) has its recent page only, no
+# all-data one: its stored history is built day by day (fetch_farside).
+FARSIDE_URLS = {"BTC": "https://farside.co.uk/btc/", "ETH": "https://farside.co.uk/eth/",
+                "SOL": "https://farside.co.uk/sol/"}
 FARSIDE_ALL_URLS = {"BTC": "https://farside.co.uk/bitcoin-etf-flow-all-data/",
                     "ETH": "https://farside.co.uk/ethereum-etf-flow-all-data/"}
 _TABLE_RE = re.compile(r"<table.*?</table>", re.S | re.I)
@@ -158,7 +161,9 @@ def parse_farside(coin: str, raw_html: str) -> list[Flow]:
 
 def fetch_farside(coin: str, full_history: bool = False,
                   session: requests.Session | None = None) -> list[Flow]:
-    url = (FARSIDE_ALL_URLS if full_history else FARSIDE_URLS)[coin]
+    """The coin's flows from Farside. `full_history` asks for the all-data page; a coin with none
+    (SOL) gets its recent page instead, and builds its history over the days that follow."""
+    url = FARSIDE_ALL_URLS.get(coin, FARSIDE_URLS[coin]) if full_history else FARSIDE_URLS[coin]
     resp = (session or requests.Session()).get(url, headers=_HEADERS, timeout=30)
     resp.raise_for_status()
     return parse_farside(coin, resp.text)

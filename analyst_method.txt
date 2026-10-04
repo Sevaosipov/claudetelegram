@@ -59,6 +59,19 @@ project's files. The commands find the keys they need themselves.
      Trading 212 account or /bought), if any, and «ДОСЬЕ:» with insiders, the score factors,
      analyst targets, the outlook and the recent headlines.
    - Read the headlines yourself: what is bullish, what is bearish and what is noise.
+   - The bot scores thirteen coins: BTC, ETH (the majors) and the alts SOL, XRP, BNB, DOGE, AVAX,
+     HYPE, LTC, ENA, LINK, TRX and SUI; a bare symbol is the coin («SOL» is Solana). The score is
+     the same for all: trend, flows (ETF flows exist for BTC, ETH and SOL only; company purchases
+     for all thirteen) and news. News count for a coin only when they are bad: a positive headline
+     adds no points (a network «upgrade» is not news about the price), while a red flag still blocks.
+     An alt is a buy only while bitcoin is above its 100-day average,
+     otherwise it is «наблюдение» with the reason «биткоин ниже 100-дн. средней — альты не
+     покупаем» (or «нет данных по биткоину — альты не покупаем» when bitcoin has too little
+     history to tell); a buy signal on an alt ends «высокий риск», and a week brings at most two coin
+     signals: BTC and ETH first when they are a buy and not already held or signalled, then the
+     alts by score, equal scores by the 60-day return. Those two places are reserved: the stocks
+     fill the other three (or all five when no coin qualifies), and the stock signals are sent
+     first. Say so when the owner asks about an alt, and never treat an alt like BTC or ETH.
 
 3. TRADINGVIEW -- only these nine tools, each as mcp__tradingview__<name>:
    tv_health_check, tv_launch, chart_get_state, chart_set_symbol, chart_set_timeframe,

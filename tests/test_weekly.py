@@ -146,6 +146,40 @@ def test_a_coin_buy_is_named_by_its_symbol():
     assert "CRYPTO" not in text
 
 
+def test_an_alts_buy_ends_with_high_risk():
+    text = weekly.buy_text(_pick("CRYPTO:SOL", kind="crypto", source="CRYPTO", company="SOL", score=75.0,
+                                 stop_pct=0.22, reasons=["выше 100-дн. средней", "приток в ETF"], t212=None,
+                                 risk=True))
+    assert text == "🟢 <b>SOL!</b>: покупка — выше 100-дн. средней; приток в ETF; балл 75, стоп −22%, высокий риск"
+    assert text.endswith(", высокий риск") and "CRYPTO" not in text
+
+
+def test_bitcoin_and_ether_buys_have_no_risk_tag():
+    for coin in ("BTC", "ETH"):
+        text = weekly.buy_text(_pick(f"CRYPTO:{coin}", kind="crypto", source="CRYPTO", company=coin, score=75.0,
+                                     stop_pct=0.15, reasons=["выше 100-дн. средней"], t212=None))
+        assert "риск" not in text
+    assert "риск" not in weekly.buy_text(_pick(risk=False))
+
+
+def test_the_risk_tag_comes_after_the_stop_and_the_trading_212_note_and_stands_alone_when_there_is_nothing_else():
+    assert weekly.buy_text(_pick(t212=False, risk=True)).endswith("стоп −10%, нет на Trading 212, высокий риск")
+    assert weekly.buy_text(_pick(reasons=[], score=None, stop_pct=None, risk=True)) == (
+        "🟢 <b>GME!</b>: покупка — высокий риск")
+
+
+def test_a_pick_kept_before_the_flag_existed_has_no_tag():
+    old = dict(ticker="CRYPTO:SOL", source="CRYPTO", company="SOL", kind="crypto", score=75.0, stop_pct=0.22,
+               reasons=["выше 100-дн. средней"], t212=None)
+    assert "риск" not in weekly.buy_text(old)
+
+
+def test_the_weeks_signals_carry_the_tag_of_the_picks_that_have_it(conn):
+    picks = [_pick("CRYPTO:SOL", kind="crypto", source="CRYPTO", company="SOL", risk=True), _pick("CRYPTO:BTC", kind="crypto", source="CRYPTO", company="BTC")]
+    texts = dict(weekly.week_signals(conn, FRI, picks))
+    assert texts["buy:CRYPTO:SOL"].endswith("высокий риск") and "риск" not in texts["buy:CRYPTO:BTC"]
+
+
 def test_a_buy_is_one_line_with_only_bold_and_every_dynamic_part_escaped():
     text = weekly.buy_text(_pick("A&B", reasons=["<b>bold</b> & co"]))
     assert "A&amp;B" in text and "&lt;b&gt;bold&lt;/b&gt; &amp; co" in text

@@ -41,6 +41,10 @@ NEWS_MIN, NEWS_MAX = -30, 10
 NEWS_NEGATIVE_POINTS, NEWS_POSITIVE_POINTS = -10, 5
 COIN_TREND_STEP = 15          # above the 100-day average, and each positive 20/60/120-day return
 COIN_BULLISH_FLOW, COIN_CAUTION = 15, -20
+# An alt (any coin but BTC and ETH) is bought only while bitcoin itself is above its 100-day average.
+ALT_GATE_REASON = "биткоин ниже 100-дн. средней — альты не покупаем"
+# ... and when bitcoin has too little history to tell (coin_trend is None), the alts wait all the same, for this reason.
+ALT_GATE_NO_DATA_REASON = "нет данных по биткоину — альты не покупаем"
 
 # How many management buyers earn what; the last entry is "that many or more".
 _COUNT_POINTS = {1: 22, 2: 34, 3: 42, 4: 46}
@@ -134,6 +138,9 @@ class CoinScore:
     stop_pct: float | None
     last_close: float | None
     kind: str = "crypto"
+    # The 60-day return as a fraction (coin_trend's ret60), None under 121 closes: it breaks the ties between
+    # alts for the week's coin places (signals_weekly.pick_buys); it is not part of the score.
+    ret60: float | None = None
 
 
 # ---------------------------------------------------------------- small helpers
@@ -288,7 +295,12 @@ def momentum_part(closes: list[float]) -> Part:
 
 def news_part(headlines: list[dict] | None, *, coin: bool = False) -> tuple[Part, str | None]:
     """Score the headlines (-30..+10) and return the first red-flag title, if any.
-    A title counts once per list and a red-flag title is not also a negative one."""
+    A title counts once per list and a red-flag title is not also a negative one.
+
+    For a coin (`coin=True`) a positive headline adds no points -- crypto headlines say «upgrade»
+    for a network upgrade, which says nothing about the price -- so its part is -30..0: negative
+    headlines still subtract, a red flag still blocks, and a good headline is not even counted
+    (it would explain no points). A stock is unchanged."""
     if not headlines:
         return Part(0, []), None
     red_re = _COIN_RED_RE if coin else _RED_RE
@@ -304,7 +316,7 @@ def news_part(headlines: list[dict] | None, *, coin: bool = False) -> tuple[Part
             continue
         if _NEGATIVE_RE.search(low):
             bad += 1
-        if _POSITIVE_RE.search(low):
+        if not coin and _POSITIVE_RE.search(low):
             good += 1
     points = max(NEWS_MIN, min(NEWS_MAX, bad * NEWS_NEGATIVE_POINTS + good * NEWS_POSITIVE_POINTS))
     lines = []
@@ -409,9 +421,20 @@ def coin_trend(closes: list[float]) -> dict | None:
 
 
 def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: str | None,
-               headlines: list[dict] | None) -> CoinScore:
-    """Score BTC or ETH: trend (0-60), flows (-20..+15) and news (-30..+10). A coin buys
-    only in an uptrend; a red-flag headline or a price-confirmed caution blocks it."""
+               headlines: list[dict] | None, btc_up: bool | None = None,
+               btc_known: bool = True) -> CoinScore:
+    """Score a coin: trend (0-60), flows (-20..+15) and news (-30..0: a coin's positive headlines
+    add nothing, see news_part). A coin buys only in an uptrend; a red-flag headline or a
+    price-confirmed caution blocks it.
+
+    `btc_up` is the bitcoin regime filter for an alt: False -- bitcoin's close is not above its
+    100-day average (coin_trend(...)["above_ma100"]) -- turns a would-be BUY into WATCH, with
+    ALT_GATE_REASON among the reasons; the score itself is not touched. None -- BTC and ETH, or
+    any caller with no regime to apply -- is not gated, and neither is True. `btc_known=False`
+    says bitcoin had too little history to tell (coin_trend is None, and btc_up is then False):
+    the gate is the same, its reason is ALT_GATE_NO_DATA_REASON. A BLOCK stays a block, and a
+    coin that would not buy anyway (no uptrend, under the bar, too little history) has nothing
+    for the gate to stop."""
     trend = coin_trend(closes)
     news, red = news_part(headlines, coin=True)
 
@@ -447,6 +470,9 @@ def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: s
         decision = BLOCK
     elif trend_up and total >= COIN_BUY:
         decision = BUY
+        if btc_up is False:
+            decision = WATCH
+            reasons.append(ALT_GATE_REASON if btc_known else ALT_GATE_NO_DATA_REASON)
     else:
         decision = WATCH
 
@@ -455,4 +481,5 @@ def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: s
         total=total, trend_up=trend_up, trend_down=bool(trend and trend["down"]),
         caution=caution, block=block, decision=decision, reasons=reasons,
         stop_pct=stop_distance(closes, "crypto"),
-        last_close=closes[-1] if closes else None)
+        last_close=closes[-1] if closes else None,
+        ret60=trend["ret60"] if trend else None)

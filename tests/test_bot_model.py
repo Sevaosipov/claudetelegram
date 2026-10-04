@@ -488,6 +488,38 @@ def test_the_week_is_picked_with_the_real_rules(conn):
     assert [p["ticker"] for p in db.get_cached_json(conn, PICKS_KEY)] == ["TOP", "LOW"]
 
 
+def _coin_score(coin, total):
+    return model_score.CoinScore(
+        coin=coin, ticker=f"CRYPTO:{coin}", trend=45.0, flows=15.0, news=0.0, total=total, trend_up=True,
+        trend_down=False, caution=None, block=None, decision=model_score.BUY,
+        reasons=["выше 100-дн. средней", "покупают крупные игроки"], stop_pct=0.22, last_close=100.0)
+
+
+def test_the_week_keeps_bitcoin_and_ether_as_the_two_coins_before_higher_scoring_alts(conn):
+    scored = [_coin_score(c, 90.0 - i) for i, c in enumerate(["SOL", "BTC", "XRP", "LINK", "ETH"])] + [
+        _score("S0", 66.0), _score("S1", 64.0), _score("S2", 62.0)]
+    bot._pick_week(conn, FRI, _report(scored=scored))
+    kept = db.get_cached_json(conn, PICKS_KEY)
+    assert [p["ticker"] for p in kept] == ["S0", "S1", "S2", "CRYPTO:BTC", "CRYPTO:ETH"]     # stocks first, then the coins
+    assert [p.get("risk") for p in kept] == [None] * 5                           # no alt among them: no tag
+
+
+def test_the_week_keeps_two_coins_at_most_and_marks_the_alts_high_risk(conn):
+    eth = _coin_score("ETH", 86.0)
+    eth.decision = model_score.WATCH                                              # ether is not a buy: its place goes to an alt
+    scored = [_coin_score(c, 90.0 - i) for i, c in enumerate(["SOL", "BTC", "XRP", "LINK"])] + [eth] + [
+        _score("S0", 66.0), _score("S1", 64.0), _score("S2", 62.0)]
+    bot._pick_week(conn, FRI, _report(scored=scored))
+    kept = db.get_cached_json(conn, PICKS_KEY)
+    assert [p["ticker"] for p in kept] == ["S0", "S1", "S2", "CRYPTO:BTC", "CRYPTO:SOL"]
+    assert [p.get("risk") for p in kept] == [None, None, None, None, True]
+    # ... and what a retry sends is read back from the kept records
+    texts = dict(weekly.week_signals(conn, FRI, bot._week_picks(conn, FRI)))
+    assert texts["buy:CRYPTO:SOL"] == ("🟢 <b>SOL!</b>: покупка — выше 100-дн. средней; покупают крупные игроки; "
+                                       "балл 90, стоп −22%, высокий риск")
+    assert texts["buy:CRYPTO:BTC"].endswith("балл 89, стоп −22%")
+
+
 def test_a_week_with_nothing_to_signal_is_still_picked_once(conn):
     assert bot._pick_week(conn, FRI, _report(scored=[_score("WAT", 50.0, decision="watch")])) is True
     assert db.get_cached_json(conn, PICKS_KEY) == [] and bot._weekly_due(conn, FRI, bot.BUYS_KEY) is False

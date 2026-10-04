@@ -391,7 +391,7 @@ CREATE TABLE IF NOT EXISTS crypto_treasury_txns (
     company        TEXT,
     ticker         TEXT,          -- the company's own ticker (MSTR), not the coin's
     cik            TEXT,
-    coin           TEXT NOT NULL, -- BTC / ETH
+    coin           TEXT NOT NULL, -- a key of crypto_treasury.QUERIES: BTC, ETH, SOL ...
     side           TEXT NOT NULL, -- P / S
     units          REAL NOT NULL,
     avg_price_usd  REAL,

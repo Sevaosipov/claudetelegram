@@ -89,6 +89,7 @@ def _stub_scoring(monkeypatch, scores, seen=None):
     def score(conn, today=None, *, signals=None, **kw):
         seen["signals"] = signals
         seen["prune"] = kw.get("prune", True)
+        seen["coins"] = kw.get("coins", "all")        # not passed: every coin is scored
         return scores
 
     monkeypatch.setattr(model, "candidate_signals", candidates)
@@ -813,6 +814,27 @@ def test_context_matches_a_coin_by_symbol_or_by_key(conn, dossier):
     assert "МОДЕЛЬ: свежего сигнала" in analyst.context(conn, "ETH", scored=[_coin("BTC")])
 
 
+@pytest.mark.parametrize("coin", model.COINS)
+def test_context_has_the_model_line_of_each_of_the_thirteen_coins(conn, dossier, coin):
+    scored = [_coin(c, 70.0 if c == coin else 10.0) for c in model.COINS]
+    for key in (coin, f"CRYPTO:{coin}", coin.lower()):
+        assert "МОДЕЛЬ: балл 70 — покупка" in analyst.context(conn, key, scored=scored), key
+
+
+def test_context_says_an_alt_is_only_watched_while_bitcoin_is_down(conn, dossier):
+    sol = _coin("SOL", 75.0, model_score.WATCH, reasons=["выше 100-дн. средней", model_score.ALT_GATE_REASON])
+    out = analyst.context(conn, "SOL", scored=[sol])
+    assert "МОДЕЛЬ: балл 75 — наблюдение" in out
+    assert "• биткоин ниже 100-дн. средней — альты не покупаем" in out
+
+
+def test_the_portfolio_watchlist_names_the_alts_too(conn):
+    scored = [_coin("SOL", 58.0, model_score.WATCH, reasons=["выше 100-дн. средней"]),
+              _coin("HYPE", 40.0, model_score.WATCH, reasons=["мало истории"])]
+    out = analyst.portfolio(conn, scored=scored)
+    assert "CRYPTO:SOL — 58: выше 100-дн. средней" in out and "CRYPTO:HYPE — 40: мало истории" in out
+
+
 def test_context_shows_why_a_score_is_only_watch_and_the_block(conn, dossier):
     out = analyst.context(conn, "NVDA", scored=[
         _stock("NVDA", 66.0, model_score.WATCH, untradeable="компания меньше €20 млн", t212=False)])
@@ -1226,6 +1248,20 @@ def test_the_method_says_the_portfolio_command_covers_your_positions_the_buy_sig
     assert "«СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ»" in method and "«НАБЛЮДЕНИЕ»" in method
     assert method.index("«ВАШИ ПОЗИЦИИ (/bought):»") < method.index("«СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ»") \
         < method.index("«НАБЛЮДЕНИЕ»")
+
+
+def test_the_method_names_the_thirteen_coins_and_how_the_alts_are_held_back():
+    method = " ".join(_text("analyst_method.txt").split())
+    assert "The bot scores thirteen coins: BTC, ETH (the majors) and the alts SOL, XRP, BNB, DOGE, AVAX, HYPE, LTC, ENA, LINK, TRX and SUI" in method
+    for coin in model.COINS:
+        assert coin in method, coin
+    assert "An alt is a buy only while bitcoin is above its 100-day average" in method
+    assert model_score.ALT_GATE_REASON in method and "«высокий риск»" in method
+    assert model_score.ALT_GATE_NO_DATA_REASON in method and "too little history" in method
+    assert "ETF flows exist for BTC, ETH and SOL only" in method and "at most two coin signals" in method
+    assert "a positive headline adds no points" in method and "a red flag still blocks" in method
+    assert "BTC and ETH first when they are a buy and not already held or signalled, then the alts by score, equal scores by the 60-day return" in method
+    assert "Those two places are reserved: the stocks fill the other three (or all five when no coin qualifies)" in method
 
 
 def test_the_method_says_the_bot_scores_signals_and_holds_no_portfolio():
@@ -1652,6 +1688,92 @@ def test_context_scores_a_ticker_the_kept_scores_miss_by_itself(conn, dossier, m
     seen = _stub_scoring(monkeypatch, [_stock("NVDA", 61.0)])
     assert "МОДЕЛЬ: балл 61" in analyst.context(conn, "$NVDA")
     assert seen["tickers"] == {"NVDA"}
+
+
+# ------------------------------------------------- amendment R5: the single-ticker context scores what it needs
+@pytest.mark.parametrize("ticker, coins", [
+    ("NVDA", set()), ("$NVDA", set()), ("$BTC", set()), ("$sol", set()), ("EQNR.OL", set()), ("VOLV-B.ST", set()),
+    ("BTC", {"BTC"}), ("btc", {"BTC"}), ("CRYPTO:BTC", {"BTC"}), ("SOL", {"SOL"}), ("crypto:sol", {"SOL"}),
+    ("HYPE", {"HYPE"}), ("ADA", set())])                  # ADA is a coin the bot does not score
+def test_the_coins_a_question_is_about(ticker, coins):
+    assert analyst._coins_asked(ticker) == coins
+
+
+def test_context_asks_the_scoring_for_only_the_coins_the_question_is_about(conn, dossier, monkeypatch):
+    seen = _stub_scoring(monkeypatch, [_stock("NVDA", 61.0)])
+    analyst.context(conn, "$NVDA")
+    assert seen["coins"] == set()
+    analyst.context(conn, "SOL")
+    assert seen["coins"] == {"SOL"}
+    analyst.context(conn, "$BTC")                          # the stock BTC, not the coin
+    assert seen["coins"] == set()
+
+
+def test_the_portfolio_and_the_menu_still_score_every_coin(conn, monkeypatch):
+    seen = _stub_scoring(monkeypatch, [])
+    analyst.portfolio(conn)
+    assert "coins" not in seen or seen["coins"] == "all"
+
+
+def _falling_bars(n=260, start=400.0, step=0.5):
+    today = dt.date.today()
+    return [((today - dt.timedelta(days=n - i)).isoformat(), start - i * step) for i in range(n)]
+
+
+@pytest.fixture
+def coin_seams(monkeypatch):
+    """The real scoring with its network seams recorded: the symbols whose prices are asked for, and the
+    tickers whose headlines are. Bitcoin and every other coin rise unless `series` says otherwise."""
+    import types as _types
+    run = _types.SimpleNamespace(prices=[], news=[], series={})
+
+    def closes(symbol, days):
+        run.prices.append(symbol)
+        return run.series.get(symbol, _rising_bars())
+
+    monkeypatch.setattr(prices, "_closes", closes)
+    monkeypatch.setattr(model, "default_news", lambda ticker, source: run.news.append(ticker) or [])
+    monkeypatch.setattr(model, "candidate_signals", lambda conn, today, *, tickers=None: [])
+    monkeypatch.setattr(model, "_default_t212", lambda conn: None)
+    run.coin_prices = lambda: sorted(s for s in run.prices if s.endswith("-USD"))
+    run.coin_news = lambda: sorted(t for t in run.news if t.startswith("CRYPTO:"))
+    return run
+
+
+def test_a_stock_context_fetches_no_coin_prices(conn, dossier, coin_seams):
+    out = analyst.context(conn, "NVDA")
+    assert "МОДЕЛЬ: свежего сигнала за 14 дней нет" in out
+    assert coin_seams.coin_prices() == [] and coin_seams.coin_news() == []
+    assert "NVDA" in coin_seams.prices                        # its own momentum is still read
+
+
+def test_the_stock_spelled_like_a_coin_fetches_no_coin_either(conn, dossier, coin_seams):
+    analyst.context(conn, "$BTC")
+    assert coin_seams.coin_prices() == [] and coin_seams.coin_news() == []
+
+
+def test_a_sol_context_fetches_sol_and_bitcoin_only(conn, dossier, coin_seams):
+    out = analyst.context(conn, "SOL")
+    assert coin_seams.coin_prices() == ["BTC-USD", "SOL-USD"]
+    assert coin_seams.coin_news() == ["CRYPTO:SOL"]            # bitcoin is read for the gate, not scored
+    assert "МОДЕЛЬ: балл 60 — покупка" in out
+
+
+def test_the_sol_context_still_has_the_bitcoin_gate(conn, dossier, coin_seams):
+    coin_seams.series["BTC-USD"] = _falling_bars()
+    out = analyst.context(conn, "SOL")
+    assert coin_seams.coin_prices() == ["BTC-USD", "SOL-USD"]
+    assert "МОДЕЛЬ: балл 60 — наблюдение" in out
+    assert "• биткоин ниже 100-дн. средней — альты не покупаем" in out
+
+
+def test_an_ether_or_bitcoin_context_fetches_that_coin_only(conn, dossier, coin_seams):
+    analyst.context(conn, "ETH")
+    assert coin_seams.coin_prices() == ["ETH-USD"] and coin_seams.coin_news() == ["CRYPTO:ETH"]
+    coin_seams.prices.clear()
+    coin_seams.news.clear()
+    analyst.context(conn, "BTC")
+    assert coin_seams.coin_prices() == ["BTC-USD"] and coin_seams.coin_news() == ["CRYPTO:BTC"]
 
 
 def test_portfolio_still_scores_everything(conn, monkeypatch):

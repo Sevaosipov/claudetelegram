@@ -407,6 +407,49 @@ def test_news_plain_titles_score_nothing():
     assert ms.news_part(_titles("Acme opens new office")) == (ms.Part(0, []), None)
 
 
+# ---- R1 (amendment): for a coin a positive headline adds no points
+GOOD = ("upgrade", "buyback announced", "beats estimates")
+
+
+def test_news_a_coins_positive_headlines_add_nothing():
+    assert ms.news_part(_titles(*GOOD), coin=True) == (ms.Part(0, []), None)
+    assert ms.news_part(_titles(*GOOD))[0].points == 10          # the same headlines are +10 for a stock
+
+
+def test_news_a_network_upgrade_is_not_news_about_the_coin():
+    title = "Ethereum network upgrade goes live"
+    assert ms.news_part(_titles(title), coin=True) == (ms.Part(0, []), None)
+    assert ms.news_part(_titles(title), coin=False)[0].points == 5
+
+
+def test_news_a_coins_negatives_still_subtract_and_good_ones_do_not_offset_them():
+    part, red = ms.news_part(_titles("downgrade", "upgrade", "raises guidance"), coin=True)
+    assert part.points == -10 and part.lines == ["новости: 1 плохая"] and red is None
+    part, _ = ms.news_part(_titles("downgrade", "upgrade", "raises guidance"))           # a stock: -10 + 5 + 5
+    assert part.points == 0 and part.lines == ["новости: 1 плохая, 2 хорошие"]
+
+
+def test_news_a_coins_negatives_are_clamped_at_minus_thirty():
+    assert ms.news_part(_titles("downgrade a", "lawsuit b", "recall c", "probe d"), coin=True)[0].points == -30
+
+
+@pytest.mark.parametrize("titles", [("upgrade",), GOOD, ("wins contract", "raises forecast", "fda approval", "record revenue"),
+                                    ("downgrade", "upgrade"), ()])
+def test_news_a_coins_part_is_never_above_zero(titles):
+    assert ms.news_part(_titles(*titles), coin=True)[0].points <= 0
+
+
+def test_news_a_coins_red_flag_still_blocks_whatever_else_is_said():
+    part, red = ms.news_part(_titles("Network upgrade done", "Exchange hack drains hot wallet"), coin=True)
+    assert red == "Exchange hack drains hot wallet" and part.points == 0
+    assert ms.news_part(_titles("Network upgrade done", "Exchange hack drains hot wallet"))[1] is None      # a stock: no such flag
+
+
+def test_news_a_stocks_positive_points_are_unchanged():
+    assert ms.NEWS_MAX == 10 and ms.NEWS_POSITIVE_POINTS == 5
+    assert ms.news_part(_titles("upgrade", "buyback announced"), coin=False)[0].points == 10
+
+
 def test_news_coin_red_flags_only_apply_to_coins():
     title = "Major exchange hack drains hot wallet"
     _, red_coin = ms.news_part(_titles(title), coin=True)
@@ -813,11 +856,25 @@ def test_score_coin_red_flag_blocks():
     assert f"новости: {title}" in c.reasons
 
 
-def test_score_coin_news_points_and_lines():
+def test_score_coin_positive_headlines_add_no_points():
+    """Crypto headlines say «upgrade» for a network upgrade: for a coin a good headline scores nothing
+    (and has nothing to explain)."""
     c = ms.score_coin("BTC", _grow(150, 0.01), bullish_flow=False, caution=None,
                       headlines=_titles("upgrade", "record revenue"))
-    assert c.news == 10 and c.total == 70
-    assert "новости: 2 хорошие" in c.reasons
+    assert c.news == 0 and c.total == 60 and c.decision == ms.BUY
+    assert not any("новости" in r for r in c.reasons)
+
+
+def test_score_coin_negative_headlines_still_subtract_and_good_ones_do_not_offset_them():
+    c = ms.score_coin("BTC", _grow(150, 0.01), bullish_flow=False, caution=None,
+                      headlines=_titles("Analyst downgrade", "upgrade", "network upgrade"))
+    assert c.news == -10 and c.total == 50 and c.decision == ms.WATCH
+    assert "новости: 1 плохая" in c.reasons and not any("хорош" in r for r in c.reasons)
+
+
+def test_score_coin_news_is_never_above_zero():
+    c = ms.score_coin("BTC", _grow(150, 0.01), bullish_flow=True, caution=None, headlines=_titles(*GOOD))
+    assert c.news == 0 and c.total == 75                        # trend 60 + flows 15, the headlines nothing
 
 
 def test_score_coin_short_history_is_watch_with_a_reason():
@@ -830,10 +887,12 @@ def test_score_coin_short_history_is_watch_with_a_reason():
 
 def test_score_coin_short_history_keeps_flows_and_news():
     c = ms.score_coin("BTC", _grow(100, 0.01), bullish_flow=True, caution=None,
-                      headlines=_titles("upgrade"))
-    assert c.flows == 15 and c.news == 5 and c.total == 20
+                      headlines=_titles("downgrade"))
+    assert c.flows == 15 and c.news == -10 and c.total == 5
     assert c.decision == ms.WATCH
     assert c.reasons[0] == "мало истории"
+    c = ms.score_coin("BTC", _grow(100, 0.01), bullish_flow=True, caution=None, headlines=_titles("upgrade"))
+    assert c.flows == 15 and c.news == 0 and c.total == 15      # a good headline adds nothing for a coin
 
 
 def test_score_coin_total_is_clamped():
@@ -846,6 +905,115 @@ def test_score_coin_no_closes():
     c = ms.score_coin("BTC", [], bullish_flow=False, caution=None, headlines=None)
     assert c.decision == ms.WATCH
     assert c.stop_pct is None and c.last_close is None
+
+
+# ------------------------------------------------------------------ score_coin: the 60-day return (amendment R2)
+def test_a_coin_score_carries_its_60_day_return():
+    closes = _grow(150, 0.01)
+    c = ms.score_coin("SOL", closes, bullish_flow=False, caution=None, headlines=None)
+    assert c.ret60 == pytest.approx(closes[-1] / closes[-61] - 1) == pytest.approx(ms.coin_trend(closes)["ret60"])
+    c = ms.score_coin("SOL", _grow(150, -0.01), bullish_flow=False, caution=None, headlines=None)
+    assert c.ret60 < 0                                             # a fraction, negative when the coin fell
+
+
+def test_a_coin_with_too_little_history_has_no_60_day_return():
+    for closes in (_grow(120, 0.01), []):
+        assert ms.score_coin("SOL", closes, bullish_flow=False, caution=None, headlines=None).ret60 is None
+
+
+def test_the_return_is_not_part_of_the_score_and_a_hand_built_score_has_none():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None)
+    assert (c.trend, c.total, c.decision) == (60, 60, ms.BUY)
+    assert ms.CoinScore("SOL", "CRYPTO:SOL", 0, 0, 0, 0, False, False, None, None, ms.WATCH, [], None, None).ret60 is None
+
+
+# ------------------------------------------------------------------ score_coin: the bitcoin regime filter
+BTC_DOWN_REASON = "биткоин ниже 100-дн. средней — альты не покупаем"
+
+
+BTC_NO_DATA_REASON = "нет данных по биткоину — альты не покупаем"
+
+
+def test_the_gate_reason_is_the_one_the_spec_words():
+    assert ms.ALT_GATE_REASON == BTC_DOWN_REASON
+    assert ms.ALT_GATE_NO_DATA_REASON == BTC_NO_DATA_REASON                    # amendment R4
+
+
+def test_an_alt_is_still_not_bought_when_bitcoin_has_too_little_history_and_the_reason_says_so():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=True, caution=None, headlines=None,
+                      btc_up=False, btc_known=False)
+    assert c.decision == ms.WATCH and c.reasons[-1] == BTC_NO_DATA_REASON
+    assert BTC_DOWN_REASON not in c.reasons
+    assert (c.trend, c.flows, c.total) == (60, 15, 75)                         # the score is not touched
+
+
+def test_a_known_bitcoin_below_its_average_keeps_its_own_reason():
+    for kw in ({"btc_up": False}, {"btc_up": False, "btc_known": True}):
+        c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None, **kw)
+        assert c.decision == ms.WATCH and c.reasons[-1] == BTC_DOWN_REASON and BTC_NO_DATA_REASON not in c.reasons
+
+
+def test_the_no_data_gate_has_nothing_to_stop_on_a_coin_that_would_not_buy_anyway_and_never_unblocks():
+    down = ms.score_coin("SOL", _grow(150, -0.01), bullish_flow=False, caution=None, headlines=None,
+                         btc_up=False, btc_known=False)
+    assert down.decision == ms.WATCH and BTC_NO_DATA_REASON not in down.reasons
+    blocked = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution="x", headlines=None,
+                            btc_up=False, btc_known=False)
+    assert blocked.decision == ms.BLOCK and BTC_NO_DATA_REASON not in blocked.reasons
+    short = ms.score_coin("SOL", _grow(100, 0.01), bullish_flow=False, caution=None, headlines=None,
+                          btc_up=False, btc_known=False)
+    assert short.reasons == ["мало истории"]
+
+
+def test_bitcoin_being_known_or_not_changes_nothing_without_the_gate():
+    for btc_up in (None, True):
+        c = ms.score_coin("ETH", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None,
+                          btc_up=btc_up, btc_known=False)
+        assert c.decision == ms.BUY and BTC_NO_DATA_REASON not in c.reasons and BTC_DOWN_REASON not in c.reasons
+
+
+def test_an_alt_uptrend_is_a_buy_while_bitcoin_is_above_its_100_day_average():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None, btc_up=True)
+    assert c.decision == ms.BUY and c.total == 60 and c.trend_up
+    assert BTC_DOWN_REASON not in c.reasons
+
+
+def test_an_alt_that_would_buy_is_watch_with_the_reason_while_bitcoin_is_below():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=True, caution=None, headlines=None, btc_up=False)
+    assert c.decision == ms.WATCH
+    assert c.reasons[-1] == BTC_DOWN_REASON
+    assert (c.trend, c.flows, c.total, c.trend_up) == (60, 15, 75, True)       # the score itself is not touched
+    assert c.block is None and c.caution is None
+
+
+def test_without_a_bitcoin_reading_nothing_is_gated():
+    """btc_up=None: BTC and ETH, and every caller that has no regime to apply."""
+    c = ms.score_coin("ETH", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None)
+    assert c.decision == ms.BUY and BTC_DOWN_REASON not in c.reasons
+    c = ms.score_coin("ETH", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None, btc_up=None)
+    assert c.decision == ms.BUY
+
+
+def test_the_gate_does_not_touch_a_block():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution="спот-ETF США — цена подтверждает",
+                      headlines=None, btc_up=False)
+    assert c.decision == ms.BLOCK and BTC_DOWN_REASON not in c.reasons
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None,
+                      headlines=_titles("Exchange hack drains reserves"), btc_up=False)
+    assert c.decision == ms.BLOCK and BTC_DOWN_REASON not in c.reasons
+
+
+def test_the_gate_says_nothing_about_a_coin_that_would_not_buy_anyway():
+    c = ms.score_coin("SOL", _grow(150, -0.01), bullish_flow=False, caution=None, headlines=None, btc_up=False)
+    assert c.decision == ms.WATCH and BTC_DOWN_REASON not in c.reasons
+    c = ms.score_coin("SOL", _UP_TWO_OF_THREE, bullish_flow=False, caution=None, headlines=None, btc_up=False)
+    assert c.total == 45 and c.decision == ms.WATCH and BTC_DOWN_REASON not in c.reasons
+
+
+def test_a_short_history_stays_watch_with_its_own_reason_whatever_bitcoin_does():
+    for btc_up in (True, False, None):
+        c = ms.score_coin("SOL", _grow(100, 0.01), bullish_flow=False, caution=None, headlines=None, btc_up=btc_up)
+        assert c.decision == ms.WATCH and c.reasons == ["мало истории"]
 
 
 # ------------------------------------------------------------------ constants

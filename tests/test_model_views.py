@@ -35,6 +35,14 @@ def _close(ticker="CCC"):
 
 
 # --------------------------------------------------------------- format_scored
+def test_the_scored_list_shows_all_thirteen_coins():
+    scored = [_coin(c, 60.0 if c == "SOL" else 0.0, model_score.BUY if c == "SOL" else model_score.WATCH)
+              for c in model.COINS]
+    lines = tn.format_scored(scored).splitlines()
+    assert [line.split()[1] for line in lines[1:]] == [f"CRYPTO:{c}" for c in model.COINS]
+    assert lines[1 + model.COINS.index("SOL")].startswith("🟢 CRYPTO:SOL 60:")
+
+
 def test_scored_header_and_empty_message():
     text = tn.format_scored([_stock()])
     assert text.splitlines()[0] == "СИГНАЛЫ — оценка модели (покупка от 60, наблюдение 45–59)"
@@ -72,6 +80,34 @@ def test_block_and_untradeable_reasons_and_the_t212_label():
     assert "— компания меньше €20 млн" in lines["SML1"] and "нет на T212" in lines["SML1"]
     assert "— hack news" in lines["CRYPTO:BTC"]
     assert "нет на T212" not in lines["BLK1"]
+
+
+def test_a_watched_alt_names_the_bitcoin_gate_on_its_line():
+    """The menu shows why an alt that would buy is only watched (review V7)."""
+    down = _coin("SOL", 60.0, model_score.WATCH, reasons=["выше 100-дн. средней", "20 дн. +12%", model_score.ALT_GATE_REASON])
+    nodata = _coin("XRP", 60.0, model_score.WATCH, reasons=["выше 100-дн. средней", model_score.ALT_GATE_NO_DATA_REASON])
+    lines = {ln.split()[1]: ln for ln in tn.format_scored([down, nodata]).splitlines()[1:]}
+    assert lines["CRYPTO:SOL"].endswith("тренд 45 · потоки 15 · новости 0 — биткоин ниже 100-дн. средней — альты не покупаем")
+    assert lines["CRYPTO:XRP"].endswith("новости 0 — нет данных по биткоину — альты не покупаем")
+    assert tn.format_scored([down], html=True).splitlines()[1].endswith("— биткоин ниже 100-дн. средней — альты не покупаем")
+
+
+def test_the_gate_line_is_only_for_a_watched_coin_with_that_reason():
+    plain = _coin("SOL", 50.0, model_score.WATCH, reasons=["ниже 100-дн. средней"])
+    short = _coin("LINK", 0.0, model_score.WATCH, reasons=["мало истории"])
+    buy = _coin("ETH", 60.0, model_score.BUY, reasons=["выше 100-дн. средней"])
+    blocked = _coin("XRP", 40.0, model_score.BLOCK, block="hack news", reasons=["выше 100-дн. средней", model_score.ALT_GATE_REASON])
+    lines = {ln.split()[1]: ln for ln in tn.format_scored([plain, short, buy, blocked]).splitlines()[1:]}
+    assert "—" not in lines["CRYPTO:SOL"] and "—" not in lines["CRYPTO:LINK"] and "—" not in lines["CRYPTO:ETH"]
+    assert lines["CRYPTO:XRP"].endswith("— hack news")                       # a block's own reason wins
+
+
+def test_a_kept_score_read_back_from_the_day_shows_the_gate_too():
+    import types
+    kept = types.SimpleNamespace(kind="crypto", ticker="CRYPTO:SOL", coin="SOL", total=60.0, decision="watch", trend=45.0,
+                                 flows=15.0, news=0.0, block=None, t212=None,
+                                 reasons=["выше 100-дн. средней", model_score.ALT_GATE_REASON])
+    assert tn.format_scored([kept]).splitlines()[1].endswith("— биткоин ниже 100-дн. средней — альты не покупаем")
 
 
 def test_a_negative_news_part_reads_with_a_minus():

@@ -2,8 +2,8 @@
 them, journal the *signals* they form, and score them (model.py).
 The bot holds no portfolio: your Trading 212 account is the only one it tracks. It scores every
 fresh signal on every full run, and on the week's first full run from Friday to Sunday it picks the
-buy signals worth sending (signals_weekly.py: at most five, not already held, not repeated within a
-month). The week's Telegram messages -- one short message per signal (each picked buy, the groups that
+buy signals worth sending (signals_weekly.py: at most five -- two of them coins at most --, not already
+held, not repeated within a month). The week's Telegram messages -- one short message per signal (each picked buy, the groups that
 started selling), then a short summary of your account (weekly.py) -- go out once that pass has got
 through, on Sunday regardless, with a warning in the summary if the scoring never did. Every other day
 Telegram gets only the close alerts on your positions (/bought and the Trading 212 account), one

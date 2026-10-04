@@ -213,13 +213,18 @@ def _paper_rows(conn) -> int:
     return sum(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in PAPER_TABLES)
 
 
+# the coins nothing is known about: no prices, no flows, no news -- scored 0, watched
+QUIET = [(f"CRYPTO:{c}", 0, "watch") for c in model.COINS[1:]]
+
+
 def test_score_day_scores_stores_the_days_scores_and_reports_them(conn):
     report = _score_day(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],
                   {"AAA": _stock_bars(), "BBB": _stock_bars(), "BTC-USD": _rising()})
     assert isinstance(report, model.ScoreReport) and report.complete is True
     assert [(s.ticker, s.total, s.decision) for s in report.scored] == [
-        ("AAA", 65.0, "buy"), ("CRYPTO:BTC", 60, "buy"), ("BBB", 34.0, "skip"), ("CRYPTO:ETH", 0, "watch")]
-    assert report.decisions == {"AAA": "buy", "CRYPTO:BTC": "buy", "BBB": "skip", "CRYPTO:ETH": "watch"}
+        ("AAA", 65.0, "buy"), ("CRYPTO:BTC", 60, "buy"), ("BBB", 34.0, "skip")] + QUIET
+    assert report.decisions == {"AAA": "buy", "CRYPTO:BTC": "buy", "BBB": "skip",
+                                **{t: d for t, _total, d in QUIET}}
     assert [(s.ticker, s.total) for s in model.cached_scores(conn, TODAY)] == [
         (s.ticker, s.total) for s in report.scored]
 
@@ -282,7 +287,7 @@ def test_score_today_scores_and_places_nothing(conn):
     scored = _score(conn, [_sig("AAA", corroborated=("BAFIN",)), _sig("BBB", n=2, roles=(), pct=None)],
                     {"AAA": _stock_bars(), "BBB": _stock_bars(), "BTC-USD": _rising()})
     assert [(s.ticker, s.total, s.decision) for s in scored] == [
-        ("AAA", 65.0, "buy"), ("CRYPTO:BTC", 60, "buy"), ("BBB", 34.0, "skip"), ("CRYPTO:ETH", 0, "watch")]
+        ("AAA", 65.0, "buy"), ("CRYPTO:BTC", 60, "buy"), ("BBB", 34.0, "skip")] + QUIET
     assert conn.execute("SELECT count(*) FROM paper_orders").fetchone()[0] == 0
     assert conn.execute("SELECT count(*) FROM paper_books").fetchone()[0] == 0
 
@@ -291,7 +296,7 @@ def test_only_stock_signals_are_scored_as_stocks(conn):
     signals = [_sig("AAA"), _sig("CRYPTO:BTC", source="HOUSE"), _flow("BTC")]
     scored = _score(conn, signals, {"AAA": _stock_bars()})
     assert [s.ticker for s in scored if s.kind == "stock"] == ["AAA"]
-    assert [s.ticker for s in scored if s.kind == "crypto"] == ["CRYPTO:BTC", "CRYPTO:ETH"]
+    assert [s.ticker for s in scored if s.kind == "crypto"] == [f"CRYPTO:{c}" for c in model.COINS]
 
 
 def test_the_best_score_per_ticker_is_kept(conn):
@@ -419,12 +424,23 @@ def test_the_coin_trend_is_asked_only_when_there_is_a_bearish_signal(conn):
 
 def test_coin_headlines_score_and_a_red_flag_blocks(conn):
     news = {"CRYPTO:BTC": [{"title": "Bitcoin ETF upgrade lifts price"}],
-            "CRYPTO:ETH": [{"title": "Protocol exploit drains ETH"}]}
-    scored = _score(conn, [], {"BTC-USD": _rising(), "ETH-USD": _rising()},
+            "CRYPTO:ETH": [{"title": "Protocol exploit drains ETH"}],
+            "CRYPTO:SOL": [{"title": "Solana downgrade by a rating agency"}]}
+    scored = _score(conn, [], {"BTC-USD": _rising(), "ETH-USD": _rising(), "SOL-USD": _rising()},
                     news_fn=lambda t, s: news.get(t, []))
     by = {s.ticker: s for s in scored}
-    assert (by["CRYPTO:BTC"].news, by["CRYPTO:BTC"].total) == (5, 65)
+    assert (by["CRYPTO:BTC"].news, by["CRYPTO:BTC"].total) == (0, 60)          # a good headline adds nothing to a coin
+    assert (by["CRYPTO:SOL"].news, by["CRYPTO:SOL"].total, by["CRYPTO:SOL"].decision) == (-10, 50, "watch")
     assert (by["CRYPTO:ETH"].decision, by["CRYPTO:ETH"].block) == ("block", "Protocol exploit drains ETH")
+
+
+def test_keyword_good_news_gives_no_alt_an_edge_over_another(conn):
+    """The live check: AVAX and ENA led the BUYs only because «upgrade» in crypto headlines is a network upgrade."""
+    news = {"CRYPTO:AVAX": [{"title": "Avalanche network upgrade goes live"}, {"title": "AVAX upgrade beats estimates"}],
+            "CRYPTO:ENA": [{"title": "Ethena raises forecast after upgrade"}]}
+    series = {f"{c}-USD": _rising() for c in model.COINS}
+    scored = _score(conn, [], series, news_fn=lambda t, s: news.get(t, []))
+    assert {s.total for s in scored if s.kind == "crypto"} == {60} and {s.news for s in scored if s.kind == "crypto"} == {0}
 
 
 # ------------------------------------------------- stake candidates: only a real signal is a trigger
@@ -547,6 +563,394 @@ def test_headlines_are_fetched_once_per_ticker_for_the_whole_pass(conn):
            news_fn=lambda t, s: calls.append((t, s)) or [])
     assert calls.count(("AAA", "SEC")) == 1                       # two signals on one name: one fetch
     assert ("CRYPTO:BTC", "CRYPTO") in calls and ("CRYPTO:ETH", "CRYPTO") in calls
+
+
+# ------------------------------------------------- the thirteen coins and the bitcoin regime filter
+ALTS = model.COINS[2:]
+
+
+def _coin(scored, coin):
+    return next(s for s in scored if s.ticker == f"CRYPTO:{coin}")
+
+
+def test_the_scored_coins_are_the_thirteen_and_the_majors_are_bitcoin_and_ether():
+    assert model.COINS == ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "AVAX", "HYPE", "LTC", "ENA", "LINK",
+                           "TRX", "SUI")
+    assert model.MAJOR_COINS == ("BTC", "ETH") and ALTS == model.COINS[2:] and len(ALTS) == 11
+
+
+def test_all_thirteen_coins_are_scored_and_kept(conn):
+    series = {f"{c}-USD": _rising() for c in model.COINS}
+    report = _score_day(conn, [], series)
+    assert sorted(s.ticker for s in report.scored) == sorted(f"CRYPTO:{c}" for c in model.COINS)
+    assert {s.decision for s in report.scored} == {"buy"} and {s.total for s in report.scored} == {60}
+    kept = model.cached_scores(conn, TODAY)
+    assert sorted(s.coin for s in kept) == sorted(model.COINS)
+
+
+def test_each_coin_score_has_the_60_day_return_of_its_own_closes_and_the_day_keeps_it(conn):
+    flat = _bars([100.0] * 200, YESTERDAY)
+    scored = _score_day(conn, [], {"BTC-USD": _rising(), "SOL-USD": _falling(), "XRP-USD": flat,
+                                   "LINK-USD": _rising(100)}).scored
+    by = {s.coin: s for s in scored if s.kind == "crypto"}
+    assert by["BTC"].ret60 == pytest.approx(1.002 ** 60 - 1)
+    assert by["SOL"].ret60 == pytest.approx(101.0 / 161.0 - 1) and by["XRP"].ret60 == 0.0      # 300 falling by 1 a day
+    assert by["LINK"].ret60 is None and by["DOGE"].ret60 is None                  # under 121 closes, and no prices at all
+    kept = {s.coin: s.ret60 for s in model.cached_scores(conn, TODAY) if s.kind == "crypto"}
+    assert kept == {c: by[c].ret60 for c in model.COINS}
+
+
+def test_a_broad_uptrend_day_signals_bitcoin_and_ether_not_the_alts_keyword_news_favours(conn):
+    """The live check: 12 of 13 coins BUY, AVAX and ENA ahead on «upgrade» headlines. Now they are level, and the
+    week's two coin places go to BTC and ETH -- or, with bitcoin already held, to ETH and the first alt."""
+    import signals_weekly
+    news = {"CRYPTO:AVAX": [{"title": "Avalanche network upgrade goes live"}],
+            "CRYPTO:ENA": [{"title": "Ethena upgrade lifts the protocol"}]}
+    scored = _score(conn, [], {f"{c}-USD": _rising() for c in model.COINS}, news_fn=lambda t, s: news.get(t, []))
+    assert {(s.decision, s.total) for s in scored} == {("buy", 60)}
+    assert [s.ticker for s in signals_weekly.pick_buys(conn, TODAY, scored)] == ["CRYPTO:BTC", "CRYPTO:ETH"]
+    conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price) VALUES ('CRYPTO:BTC', 'CRYPTO', '2026-09-01', 1)")
+    assert [s.ticker for s in signals_weekly.pick_buys(conn, TODAY, scored)] == ["CRYPTO:ETH", "CRYPTO:SOL"]
+
+
+def test_a_stock_has_no_return_in_the_kept_scores(conn):
+    _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert not hasattr(next(s for s in model.cached_scores(conn, TODAY) if s.ticker == "AAA"), "ret60")
+
+
+def test_every_scored_coin_asks_for_its_own_prices_and_headlines(conn):
+    fetched, asked = [], []
+
+    def fetch(symbol, days=None):
+        fetched.append(symbol)
+        return []
+    model.score_today(conn, TODAY, fetch=fetch, news_fn=lambda t, s: asked.append((t, s)) or [],
+                      trend_fn=lambda c, s: None, signals=[], t212=T212)
+    assert sorted(set(fetched)) == sorted(f"{c}-USD" for c in model.COINS)
+    assert sorted(asked) == sorted((f"CRYPTO:{c}", "CRYPTO") for c in model.COINS)
+
+
+@pytest.mark.parametrize("coin", ALTS)
+def test_an_alt_uptrend_is_a_buy_when_bitcoin_is_above_its_100_day_average(conn, coin):
+    scored = _score(conn, [], {"BTC-USD": _rising(), f"{coin}-USD": _rising()})
+    s = _coin(scored, coin)
+    assert (s.total, s.decision) == (60, "buy") and "биткоин ниже" not in " ".join(s.reasons)
+
+
+@pytest.mark.parametrize("coin", ALTS)
+def test_an_alt_uptrend_is_only_watched_when_bitcoin_is_below_it(conn, coin):
+    scored = _score(conn, [], {"BTC-USD": _falling(), f"{coin}-USD": _rising()})
+    s = _coin(scored, coin)
+    assert (s.total, s.decision) == (60, "watch")
+    assert s.reasons[-1] == "биткоин ниже 100-дн. средней — альты не покупаем"
+
+
+def test_bitcoin_and_ether_are_not_gated(conn):
+    scored = _score(conn, [], {"BTC-USD": _rising(), "ETH-USD": _rising()})
+    assert (_coin(scored, "BTC").decision, _coin(scored, "ETH").decision) == ("buy", "buy")
+    scored = _score(conn, [], {"BTC-USD": _falling(), "ETH-USD": _rising()})        # bitcoin itself is down
+    assert _coin(scored, "BTC").decision == "watch"
+    eth = _coin(scored, "ETH")
+    assert (eth.decision, eth.total) == ("buy", 60) and "биткоин ниже" not in " ".join(eth.reasons)
+
+
+def test_the_regime_is_bitcoins_close_against_its_100_day_mean_and_nothing_else(conn):
+    """Bitcoin above its mean but with falling returns is "up" for the filter: only above_ma100 counts."""
+    closes = [300.0] * 21 + [100.0] * 79 + [110.0] * 20 + [120.0]                   # above the mean, 120-day return down
+    assert model_score.coin_trend(closes)["above_ma100"] is True
+    scored = _score(conn, [], {"BTC-USD": _bars(closes, YESTERDAY), "SOL-USD": _rising()})
+    assert _coin(scored, "SOL").decision == "buy"
+    assert _coin(scored, "BTC").decision == "watch"                                  # its own trend is not up for 60
+
+
+def test_without_a_bitcoin_history_the_alts_are_not_bought_and_the_reason_says_there_is_no_data(conn):
+    scored = _score(conn, [], {"SOL-USD": _rising()})                               # BTC-USD: nothing at all
+    sol = _coin(scored, "SOL")
+    assert (sol.total, sol.decision) == (60, "watch")
+    assert sol.reasons[-1] == "нет данных по биткоину — альты не покупаем"
+    assert "биткоин ниже" not in " ".join(sol.reasons)
+
+
+@pytest.mark.parametrize("closes", [100, 120])
+def test_bitcoin_with_too_little_history_to_read_a_trend_is_no_data_not_down(conn, closes):
+    """coin_trend is None under 121 closes: the alts still wait, but the reason is not «ниже 100-дн.»."""
+    scored = _score(conn, [], {"BTC-USD": _rising(closes), "SOL-USD": _rising()})
+    sol = _coin(scored, "SOL")
+    assert (sol.decision, sol.reasons[-1]) == ("watch", "нет данных по биткоину — альты не покупаем")
+    assert _coin(scored, "BTC").reasons == ["мало истории"]                         # bitcoin's own reason is its own
+
+
+def test_bitcoin_down_and_bitcoin_up_keep_their_own_readings(conn):
+    down = _coin(_score(conn, [], {"BTC-USD": _falling(), "SOL-USD": _rising()}), "SOL")
+    assert (down.decision, down.reasons[-1]) == ("watch", "биткоин ниже 100-дн. средней — альты не покупаем")
+    up = _coin(_score(conn, [], {"BTC-USD": _rising(121), "SOL-USD": _rising()}), "SOL")      # 121 closes: a trend can be read
+    assert up.decision == "buy" and "альты не покупаем" not in " ".join(up.reasons)
+
+
+def test_ether_is_not_gated_whatever_bitcoin_has(conn):
+    eth = _coin(_score(conn, [], {"ETH-USD": _rising()}), "ETH")                    # no bitcoin at all
+    assert eth.decision == "buy" and "биткоин" not in " ".join(eth.reasons)
+
+
+def test_an_alt_with_too_little_history_stays_watch_with_its_own_reason(conn):
+    scored = _score(conn, [], {"BTC-USD": _rising(), "SOL-USD": _rising(100)})
+    sol = _coin(scored, "SOL")
+    assert sol.decision == "watch" and sol.reasons == ["мало истории"]
+    scored = _score(conn, [], {"BTC-USD": _falling(), "SOL-USD": _rising(100)})
+    assert _coin(scored, "SOL").reasons == ["мало истории"]                          # the gate had nothing to stop
+
+
+def test_an_alt_uses_the_bitcoin_closes_completed_before_today(conn):
+    """A bar dated today is still in progress: a crash in it must not flip the regime."""
+    rising_then_crash = _rising() + [(TODAY.isoformat(), 1.0)]
+    scored = _score(conn, [], {"BTC-USD": rising_then_crash, "SOL-USD": _rising()})
+    assert _coin(scored, "SOL").decision == "buy"
+
+
+def test_an_alts_own_etf_inflow_counts_and_a_confirmed_outflow_blocks_it(conn):
+    scored = _score(conn, [_flow("SOL")], {"BTC-USD": _rising(), "SOL-USD": _rising()})
+    sol = _coin(scored, "SOL")
+    assert (sol.flows, sol.total, sol.decision) == (15, 75, "buy")
+    asked = []
+    scored = _score(conn, [_flow("SOL", bullish=False)], {"BTC-USD": _rising(), "SOL-USD": _rising()},
+                    trend_fn=lambda c, s: asked.append(s) or FALLING)
+    sol = _coin(scored, "SOL")
+    assert (sol.flows, sol.decision, sol.caution) == (-20, "block", "спот-ETF США — цена подтверждает")
+    assert asked == ["SOL"]
+
+
+def test_a_flow_on_one_coin_is_not_another_coins(conn):
+    scored = _score(conn, [_flow("LINK")], {"BTC-USD": _rising()})
+    assert {s.coin: s.flows for s in scored if s.kind == "crypto"} == {
+        c: (15 if c == "LINK" else 0) for c in model.COINS}
+
+
+def test_the_coin_red_flags_apply_to_an_alt(conn):
+    scored = _score(conn, [], {"BTC-USD": _rising(), "HYPE-USD": _rising()},
+                    news_fn=lambda t, s: [{"title": "Hyperliquid exploit drains vault"}] if t.endswith("HYPE") else [])
+    hype = _coin(scored, "HYPE")
+    assert (hype.decision, hype.block) == ("block", "Hyperliquid exploit drains vault")
+
+
+def test_a_sol_etf_inflow_goes_through_the_whole_chain_to_a_high_risk_buy_line(conn):
+    """Farside rows -> the ETF finder -> the day's scores -> the week's pick -> the message."""
+    import cluster
+    import crypto_etf
+    import signals_weekly
+    import weekly
+    quiet = [1e6, -1e6] * 5                                                      # ten ordinary days, then $60m
+    amounts = quiet + [60e6]
+    db.save_etf_flows(conn, [crypto_etf.Flow("SOL", (TODAY - dt.timedelta(days=len(amounts) - i)).isoformat(),
+                                             "BSOL", usd) for i, usd in enumerate(amounts)])
+    signals = cluster.find_etf_flow_signals(conn, today=TODAY)                  # $60m on a short history: SOL's $50m bar
+    assert [(s.ticker, s.bullish) for s in signals] == [("CRYPTO:SOL", True)]
+    series = {"BTC-USD": _rising(), "SOL-USD": _rising(), "ETH-USD": _falling()}
+    scored = _score(conn, signals, series)
+    sol = _coin(scored, "SOL")
+    assert (sol.flows, sol.total, sol.decision) == (15, 75, "buy")
+    picks = signals_weekly.pick_buys(conn, TODAY, scored)
+    assert [p.ticker for p in picks] == ["CRYPTO:BTC", "CRYPTO:SOL"]                           # the coins: BTC first, then the alt
+    texts = dict(weekly.week_signals(conn, TODAY, [signals_weekly.pick_record(p) for p in picks]))
+    assert texts["buy:CRYPTO:SOL"] == ("🟢 <b>SOL!</b>: покупка — выше 100-дн. средней; 20 дн. +4%; "
+                                       "балл 75, стоп −15%, высокий риск")
+    assert texts["buy:CRYPTO:BTC"] == "🟢 <b>BTC!</b>: покупка — выше 100-дн. средней; 20 дн. +4%; балл 60, стоп −15%"
+
+
+# ------------------------------------------------- review V2: one bad price must not cancel the week
+def _with_closes(bars, **bad):
+    """`bars` with the closes at the given negative indexes replaced: _with_closes(bars, **{"61": 0.0})."""
+    out = list(bars)
+    for index, close in bad.items():
+        out[-int(index)] = (out[-int(index)][0], close)
+    return out
+
+
+@pytest.mark.parametrize("bad", [0.0, -3.0, float("nan"), None])
+def test_a_close_that_is_not_a_positive_number_is_dropped_and_the_coin_is_still_scored(conn, bad):
+    """A 0.0 at the 60-day mark and another among the last 20 days: they divided by zero in the trend and in the stop."""
+    series = {f"{c}-USD": _rising() for c in model.COINS}
+    series["SOL-USD"] = _with_closes(_rising(), **{"61": bad, "5": bad})
+    report = _score_day(conn, [], series)
+    assert report.complete is True and sorted(s.coin for s in report.scored) == sorted(model.COINS)
+    sol = _coin(report.scored, "SOL")
+    assert (sol.decision, sol.total) == ("buy", 60) and sol.stop_pct is not None and sol.ret60 is not None
+    assert sol.last_close > 0
+
+
+def test_a_series_that_is_all_bad_closes_is_a_coin_with_no_history(conn):
+    series = {"BTC-USD": _rising(), "SOL-USD": [(d, 0.0) for d, _c in _rising()]}
+    sol = _coin(_score(conn, [], series), "SOL")
+    assert sol.reasons == ["мало истории"] and sol.last_close is None and sol.stop_pct is None
+
+
+def test_a_bad_bitcoin_close_does_not_stop_the_alts_or_their_gate(conn):
+    series = {"BTC-USD": _with_closes(_rising(), **{"61": 0.0, "3": 0.0}), "SOL-USD": _rising()}
+    scored = _score(conn, [], series)
+    assert _coin(scored, "BTC").decision == "buy" and _coin(scored, "SOL").decision == "buy"
+
+
+class _BrokenPrices:
+    """A prices seam whose series for `broken` symbols raises, the way a source's bug would."""
+    def __init__(self, series, broken):
+        self.series, self.broken = series, set(broken)
+
+    def bars(self, symbol, days=None):
+        if symbol in self.broken:
+            raise RuntimeError(f"{symbol}: boom")
+        return self.series.get(symbol, [])
+
+
+def _score_with(conn, prices, **seams):
+    return model.score_today(conn, TODAY, prices=prices, signals=[], **_seams(**seams))
+
+
+def test_a_coin_that_raises_is_logged_and_left_out_and_the_others_are_scored(conn, capsys):
+    prices = _BrokenPrices({f"{c}-USD": _rising() for c in model.COINS}, broken={"SOL-USD"})
+    scored = _score_with(conn, prices)
+    assert sorted(s.coin for s in scored) == sorted(c for c in model.COINS if c != "SOL")
+    assert "[model] SOL not scored: RuntimeError: SOL-USD: boom" in capsys.readouterr().err
+    assert {s.decision for s in scored} == {"buy"}
+
+
+def test_a_coin_whose_headlines_raise_is_left_out_too(conn, capsys):
+    def news(ticker, source):
+        if ticker == "CRYPTO:XRP":
+            raise ValueError("feed down")
+        return []
+    scored = _score(conn, [], {f"{c}-USD": _rising() for c in model.COINS}, news_fn=news)
+    assert "XRP" not in {s.coin for s in scored} and len(scored) == 12
+    assert "[model] XRP not scored: ValueError: feed down" in capsys.readouterr().err
+
+
+def test_a_coin_whose_caution_check_raises_is_left_out(conn, capsys):
+    def trend(c, symbol):
+        raise OSError("no cache")
+    scored = _score(conn, [_flow("LINK", bullish=False)], {f"{c}-USD": _rising() for c in model.COINS}, trend_fn=trend)
+    assert "LINK" not in {s.coin for s in scored} and len(scored) == 12
+    assert "LINK not scored: OSError" in capsys.readouterr().err
+
+
+def test_a_fetch_that_raises_is_a_coin_with_no_history_not_a_lost_week(conn, capsys):
+    def fetch(symbol, days=None):
+        if symbol == "XRP-USD":
+            raise ConnectionError("exchange down")
+        return _rising()
+    report = model.score_day(conn, TODAY, fetch=fetch, signals=[], **_seams())
+    assert report.complete is True and len(report.scored) == 13
+    xrp = _coin(report.scored, "XRP")
+    assert xrp.reasons == ["мало истории"] and xrp.decision == "watch"
+    assert {s.decision for s in report.scored if s.coin != "XRP"} == {"buy"}
+
+
+def test_the_day_stays_complete_and_keeps_the_other_scores_when_a_coin_raises(conn, capsys):
+    def news(ticker, source):
+        if ticker in ("CRYPTO:SOL", "CRYPTO:DOGE"):
+            raise RuntimeError("feed bug")
+        return []
+    report = _score_day(conn, [], {f"{c}-USD": _rising() for c in model.COINS}, news_fn=news)
+    left = sorted(c for c in model.COINS if c not in ("SOL", "DOGE"))
+    assert report.complete is True and sorted(s.coin for s in report.scored) == left
+    assert sorted(t.removeprefix("CRYPTO:") for t in report.decisions) == left
+    assert sorted(s.coin for s in model.cached_scores(conn, TODAY)) == left
+
+
+def test_bitcoins_own_failure_leaves_it_out_and_the_alts_wait_for_a_reading(conn, capsys):
+    prices = _BrokenPrices({f"{c}-USD": _rising() for c in model.COINS}, broken={"BTC-USD"})
+    scored = _score_with(conn, prices)
+    assert "BTC" not in {s.coin for s in scored}
+    sol, eth = _coin(scored, "SOL"), _coin(scored, "ETH")
+    assert (sol.decision, sol.reasons[-1]) == ("watch", "нет данных по биткоину — альты не покупаем")
+    assert eth.decision == "buy"                                          # ether is not gated
+    err = capsys.readouterr().err
+    assert "bitcoin's trend not read" in err and "BTC not scored" in err
+
+
+def test_a_coin_that_raises_is_left_out_of_the_single_coin_look_too(conn):
+    prices = _BrokenPrices({"BTC-USD": _rising()}, broken={"SOL-USD"})
+    assert model.score_today(conn, TODAY, prices=prices, signals=[], coins={"SOL"}, **_seams()) == []
+
+
+# ------------------------------------------------- amendment R5: score only the coins asked for
+def _recorder(series=None):
+    """A fetch seam that remembers the symbols it is asked for, answering from `series`."""
+    asked = []
+
+    def fetch(symbol, days=None):
+        asked.append(symbol)
+        return (series or {}).get(symbol, [])
+    return asked, fetch
+
+
+def _score_coins_only(conn, coins, series=None, signals=()):
+    asked, fetch = _recorder(series)
+    news = []
+    scored = model.score_today(conn, TODAY, fetch=fetch, news_fn=lambda t, s: news.append(t) or [],
+                               trend_fn=lambda c, s: None, signals=list(signals), t212=T212, coins=coins)
+    return scored, asked, news
+
+
+def test_an_empty_set_of_coins_scores_none_fetches_no_coin_and_asks_no_coin_news(conn):
+    scored, asked, news = _score_coins_only(conn, set(), {"BTC-USD": _rising()})
+    assert [s for s in scored if s.kind == "crypto"] == [] and asked == [] and news == []
+
+
+def test_none_scores_all_thirteen_as_before(conn):
+    scored, asked, news = _score_coins_only(conn, None, {f"{c}-USD": _rising() for c in model.COINS})
+    assert sorted(s.coin for s in scored) == sorted(model.COINS)
+    assert sorted(asked) == sorted(f"{c}-USD" for c in model.COINS) and len(news) == 13
+
+
+def test_an_alt_asked_for_alone_is_scored_with_bitcoin_fetched_only_for_the_gate(conn):
+    scored, asked, news = _score_coins_only(conn, {"SOL"}, {"BTC-USD": _rising(), "SOL-USD": _rising(),
+                                                           "ETH-USD": _rising()})
+    assert [s.ticker for s in scored] == ["CRYPTO:SOL"]                              # bitcoin is not returned
+    assert sorted(asked) == ["BTC-USD", "SOL-USD"]                                    # nothing else is fetched
+    assert news == ["CRYPTO:SOL"]                                                      # nor asked about
+    assert (scored[0].total, scored[0].decision) == (60, "buy")
+
+
+@pytest.mark.parametrize("btc, decision, reason", [
+    (_rising(), "buy", None),
+    (_falling(), "watch", "биткоин ниже 100-дн. средней — альты не покупаем"),
+    (_rising(100), "watch", "нет данных по биткоину — альты не покупаем"),
+    (None, "watch", "нет данных по биткоину — альты не покупаем")], ids=["up", "down", "too-short", "none"])
+def test_the_gate_still_works_when_bitcoin_is_fetched_only_for_it(conn, btc, decision, reason):
+    series = {"SOL-USD": _rising()}
+    if btc is not None:
+        series["BTC-USD"] = btc
+    [sol], asked, _news = _score_coins_only(conn, {"SOL"}, series)
+    assert sol.decision == decision and (sol.reasons[-1] == reason if reason else "биткоин" not in " ".join(sol.reasons))
+    assert sorted(asked) == ["BTC-USD", "SOL-USD"]
+
+
+def test_a_major_asked_for_alone_needs_no_bitcoin_reading(conn):
+    scored, asked, news = _score_coins_only(conn, {"ETH"}, {"ETH-USD": _rising()})
+    assert [s.ticker for s in scored] == ["CRYPTO:ETH"] and asked == ["ETH-USD"] and news == ["CRYPTO:ETH"]
+    assert scored[0].decision == "buy"
+    scored, asked, _news = _score_coins_only(conn, {"BTC"}, {"BTC-USD": _rising()})
+    assert [s.ticker for s in scored] == ["CRYPTO:BTC"] and asked == ["BTC-USD"]
+
+
+def test_bitcoin_asked_for_with_an_alt_is_fetched_once_and_returned(conn):
+    scored, asked, _news = _score_coins_only(conn, {"BTC", "SOL"}, {"BTC-USD": _rising(), "SOL-USD": _rising()})
+    assert sorted(s.ticker for s in scored) == ["CRYPTO:BTC", "CRYPTO:SOL"]
+    assert sorted(asked) == ["BTC-USD", "SOL-USD"]
+
+
+def test_a_symbol_that_is_not_one_of_the_thirteen_is_ignored(conn):
+    scored, asked, news = _score_coins_only(conn, {"FOO", "ADA"})
+    assert scored == [] and asked == [] and news == []
+
+
+def test_the_coin_selection_leaves_the_stock_scores_alone(conn):
+    scored, asked, _news = _score_coins_only(conn, set(), {"AAA": _stock_bars()}, signals=[_sig("AAA")])
+    assert [s.ticker for s in scored] == ["AAA"] and asked == ["AAA"]
+
+
+def test_the_daily_pass_still_scores_every_coin(conn):
+    asked, fetch = _recorder({f"{c}-USD": _rising() for c in model.COINS})
+    report = model.score_day(conn, TODAY, fetch=fetch, signals=[], **_seams())
+    assert sorted(s.coin for s in report.scored) == sorted(model.COINS)
 
 
 # ------------------------------------------------- the exit rules the user's positions read from here

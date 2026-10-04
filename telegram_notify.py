@@ -245,8 +245,8 @@ def format_treasury_line(t) -> str:
     verb = "bought" if t.side == "P" else "sold"
     who = f"{t.company} ({t.ticker})" if t.ticker else t.company
     value = f" = ${t.value_usd:,.0f}" if t.value_usd else ""
-    price = f" @ ${t.avg_price_usd:,.0f}" if t.avg_price_usd else ""
-    return (f"🪙 Treasury: {who} {verb} {t.units:,.4g} {t.coin}{price}{value}\n"
+    price = f" @ {crypto.usd_price(t.avg_price_usd)}" if t.avg_price_usd else ""
+    return (f"🪙 Treasury: {who} {verb} {crypto.units_text(t.units)} {t.coin}{price}{value}\n"
             f"   {t.form} filed {datefmt.fmt(t.filed_date)}\n"
             f"   {t.source_url}")
 
@@ -794,11 +794,22 @@ def _pts(x: float) -> str:
     return str(round(x)).replace("-", "−")
 
 
+def _bitcoin_gate(s) -> str | None:
+    """Why a watched coin is not a buy when it is the bitcoin filter -- «биткоин ниже 100-дн. средней — альты не
+    покупаем» or «нет данных по биткоину — …» (model_score.ALT_GATE_REASON / ALT_GATE_NO_DATA_REASON), found among its
+    reasons -- else None."""
+    import model_score
+    if s.decision != model_score.WATCH:
+        return None
+    gates = (model_score.ALT_GATE_REASON, model_score.ALT_GATE_NO_DATA_REASON)
+    return next((r for r in (getattr(s, "reasons", None) or []) if r in gates), None)
+
+
 def _score_line(s, html: bool) -> str:
     icon = _DECISION_ICON.get(s.decision, "·")
     if s.kind == "crypto":
         parts = f"тренд {_pts(s.trend)} · потоки {_pts(s.flows)} · новости {_pts(s.news)}"
-        why = s.block
+        why = s.block or _bitcoin_gate(s)
     else:
         parts = (f"инсайдеры {_pts(s.insiders)} · поводы {_pts(s.triggers)} · "
                  f"импульс {_pts(s.momentum)} · новости {_pts(s.news)}")
