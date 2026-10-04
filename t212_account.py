@@ -468,19 +468,31 @@ def _watched(conn, key: str, source: str | None, insiders: list[str]) -> str:
 
 
 def _new_text(name: str, h: T212Position, watched: str) -> str:
-    esc = telegram_notify._esc
+    """«⚪ GME!: куплено в Trading 212 — 10 шт. по 23,10 USD, слежу: стоп, срок и новости»: a holding
+    that appeared in the account, with what is known of the lot and what the bot really watches
+    for it (_watched). The dot is white: it is news, not a signal to buy or sell."""
     lot = []
     if h.quantity is not None:
         lot.append(f"{telegram_notify.quantity(h.quantity)} шт.")
     entry = _entry(h)
     if entry is not None:
-        lot.append(f"по {telegram_notify._price(entry)}" + (f" {esc(h.currency)}" if h.currency else ""))
-    what = (" — " + " ".join(lot)).rstrip(".") if lot else ""
-    return f"📥 Вижу в Trading 212: {esc(name)}{what}. Слежу: {watched}."
+        lot.append(f"по {telegram_notify._price(entry)}" + (f" {h.currency}" if h.currency else ""))
+    details = f"{' '.join(lot)}, слежу: {watched}" if lot else f"слежу: {watched}"
+    return telegram_notify.signal_line(telegram_notify.DOT_NEUTRAL, name, "куплено в Trading 212", details)
 
 
-def _sold_text(name: str) -> str:
-    return f"📤 {telegram_notify._esc(name)} больше нет в Trading 212 — слежение закрыто."
+def _sold_text(name: str, pos: positions.Position | None = None, last_price: float | None = None) -> str:
+    """«⚪ GME!: продано в Trading 212 — слежение закрыто, итог ≈ +$9,50 (+4,1%)»: a holding the
+    account no longer has. The result is the last price known (`last_price`) against the average
+    price paid -- money first, in the holding's own currency, when its quantity is known -- and «≈»
+    says it is not the price it was sold at. Left out without a position or a price. The dot stays
+    white whatever the result."""
+    shown = None
+    if pos is not None and last_price and pos.entry_price:
+        shown = telegram_notify.position_result(pos.entry_price, last_price, pos.quantity, pos.currency)
+    return telegram_notify.signal_line(telegram_notify.DOT_NEUTRAL, name, "продано в Trading 212",
+                                       "слежение закрыто", label="итог ≈",
+                                       result=shown[0] if shown else None, extra=shown[1] if shown else None)
 
 
 def _first_text(names: list[str], legacy_since: str | None, day: str) -> str:
@@ -549,7 +561,7 @@ def _close_missing(conn, missing: list[positions.Position], holdings: list[T212P
                    summary: T212Summary | None, agrees: bool | None, unkeyed: int, now: dt.datetime,
                    result: SyncResult) -> list[str]:
     """Close the tracked positions the list did not show -- when the list can be believed
-    (`agrees`: _list_agrees). Returns the «📤» messages of those closed; the others go to
+    (`agrees`: _list_agrees). Returns the «продано» messages of those closed; the others go to
     result.held with result.note.
 
       the list adds up to the summary     every missing one was sold: closed;
@@ -585,7 +597,8 @@ def _close_missing(conn, missing: list[positions.Position], holdings: list[T212P
         conn.execute("UPDATE positions SET closed_at = ?, close_reason = ? WHERE id = ?",
                      (day, SOLD_REASON, pos.id))
         result.closed.append(pos.ticker)
-        texts.append(_sold_text(positions.display_name(pos)))
+        last = positions.t212_price(conn, pos.ticker, now.date())     # the sync's last fresh price of it
+        texts.append(_sold_text(positions.display_name(pos), pos, last))
     closed = {p.id for p in sold}
     kept = [p for p in missing if p.id not in closed]
     if kept:
