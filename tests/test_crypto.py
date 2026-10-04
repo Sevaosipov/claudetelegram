@@ -472,10 +472,11 @@ class _Efts:
     a payload, a Response, an exception to raise, or a function of the request params (for paging); any
     other query answers with no hits. `docs` maps a document URL to its text."""
     def __init__(self, by_query=None, docs=None):
-        self.by_query, self.docs, self.asked = by_query or {}, docs or {}, []
+        self.by_query, self.docs, self.asked, self.fetched = by_query or {}, docs or {}, [], []
 
     def get(self, url, params=None, timeout=None):
         if url != ct.EFTS_URL:
+            self.fetched.append(url)
             return _resp(200, self.docs[url]) if url in self.docs else _resp(404)
         self.asked.append(params["q"])
         reply = self.by_query.get(params["q"], _NO_HITS)
@@ -554,6 +555,85 @@ def test_the_backfill_reads_the_alts_too(conn, sleeps, monkeypatch):
     assert session.asked == list(ct.QUERIES.values())
     assert conn.execute("SELECT coin, side, units FROM crypto_treasury_txns").fetchall() == [("SOL", "P", 1_250_000)]
     assert _HIT_SOL["_id"] in db.crypto_treasury_seen(conn)
+
+
+# ---- V1: --reread
+_OLD_DOC = ("Over the week Acme purchased 1,355 bitcoin at an average price of approximately $79,475 per bitcoin "
+            "and purchased 1,250,000 SOL at an average price of $182.40.")
+
+
+def _read_by_the_old_parser(conn):
+    """The state a database is in after the BTC/ETH-only parser read _HIT_SOL: its bitcoin trade stored, the document seen."""
+    db.save_crypto_treasury_txn(conn, ct.TreasuryTxn(
+        _HIT_SOL["_id"].split(":")[0], "DEFI DEV", "DFDV", "0001234567", "BTC", "P", 1355.0, 79475.0, None,
+        "2026-09-22", "8-K", ct.doc_url(_HIT_SOL)))
+    db.mark_crypto_treasury_seen(conn, _HIT_SOL["_id"])
+    conn.commit()
+
+
+def _old_document_session(monkeypatch):
+    session = _Efts({ct.QUERIES["BTC"]: _hits(_HIT_SOL), ct.QUERIES["SOL"]: _hits(_HIT_SOL)},
+                    docs={ct.doc_url(_HIT_SOL): _OLD_DOC})
+    monkeypatch.setattr(ct, "new_session", lambda: session)
+    return session
+
+
+def _stored(conn):
+    return conn.execute("SELECT coin, side, units FROM crypto_treasury_txns ORDER BY coin").fetchall()
+
+
+def test_a_seen_document_is_not_read_again_by_a_plain_backfill(conn, sleeps, monkeypatch):
+    _read_by_the_old_parser(conn)
+    session = _old_document_session(monkeypatch)
+    assert ct.backfill(conn, 6, today=dt.date(2026, 9, 21)) == 0
+    assert session.fetched == [] and _stored(conn) == [("BTC", "P", 1355.0)]
+
+
+def test_reread_reads_a_seen_document_again_and_stores_its_alt_trade(conn, sleeps, monkeypatch):
+    """The filing was read before the parser knew solana: with reread its SOL trade is stored now, the bitcoin
+    trade is not stored twice, and the seen set loses nothing."""
+    _read_by_the_old_parser(conn)
+    session = _old_document_session(monkeypatch)
+    assert ct.backfill(conn, 6, today=dt.date(2026, 9, 21), reread=True) == 1
+    assert session.fetched == [ct.doc_url(_HIT_SOL)]
+    assert _stored(conn) == [("BTC", "P", 1355.0), ("SOL", "P", 1_250_000.0)]
+    assert db.crypto_treasury_seen(conn) == {_HIT_SOL["_id"]}
+
+
+def test_a_second_reread_stores_nothing_new_and_duplicates_nothing(conn, sleeps, monkeypatch):
+    _read_by_the_old_parser(conn)
+    _old_document_session(monkeypatch)
+    assert ct.backfill(conn, 6, today=dt.date(2026, 9, 21), reread=True) == 1
+    assert ct.backfill(conn, 6, today=dt.date(2026, 9, 21), reread=True) == 0
+    assert _stored(conn) == [("BTC", "P", 1355.0), ("SOL", "P", 1_250_000.0)]
+
+
+def test_reread_still_marks_what_it_reads_and_deletes_no_seen_row(conn, sleeps, monkeypatch):
+    other = "0003-26-3:old.htm"
+    db.mark_crypto_treasury_seen(conn, other)                  # a document no query returns now
+    _read_by_the_old_parser(conn)
+    _old_document_session(monkeypatch)
+    ct.backfill(conn, 6, today=dt.date(2026, 9, 21), reread=True)
+    assert db.crypto_treasury_seen(conn) == {_HIT_SOL["_id"], other}
+
+
+def test_the_daily_pass_still_skips_a_seen_document(conn, sleeps, monkeypatch):
+    import passes
+    _read_by_the_old_parser(conn)
+    session = _old_document_session(monkeypatch)
+    monkeypatch.setattr("cik_map.CikMap", lambda: None)
+    assert passes.run_crypto_treasury_pass(conn, _Args()) == 0
+    assert session.fetched == [] and _stored(conn) == [("BTC", "P", 1355.0)]
+
+
+def test_the_backfill_command_takes_reread_and_is_called_as_before_without_it(conn, monkeypatch):
+    got = {}
+    monkeypatch.setattr(ct, "backfill", lambda c, days, cik_lookup=None, **kw: got.update(days=days, kw=kw) or 0)
+    monkeypatch.setattr(db, "connect", lambda path: conn)
+    monkeypatch.setattr("cik_map.CikMap", lambda: None)
+    assert ct.main(["--backfill", "365", "--reread"]) == 0 and got == {"days": 365, "kw": {"reread": True}}
+    got.clear()
+    assert ct.main(["--backfill", "365"]) == 0 and got == {"days": 365, "kw": {}}
 
 
 class _Args:

@@ -335,17 +335,24 @@ def scan_new_filings(start: dt.date, end: dt.date, seen_doc_ids: set[str],
 BACKFILL_SLICE_DAYS = 7   # EFTS returns at most MAX_PAGES x PAGE_SIZE hits per query
 
 
-def backfill(conn, days: int, today: dt.date | None = None, scan=None, cik_lookup=None) -> int:
+def backfill(conn, days: int, today: dt.date | None = None, scan=None, cik_lookup=None,
+             reread: bool = False) -> int:
     """Read the past `days` of 8-K/6-K filings, one week-long slice at a time, through
     the same paced scanner and parser the daily run uses. A document already read is
     skipped, and each one is committed as it is read, so an interrupted backfill
     resumes where it stopped. Newest slice first: an interrupted run then leaves an
     unbroken recent history rather than an old filing that makes the missing months
-    look like weeks without buying. Returns how many new trades were stored."""
+    look like weeks without buying. Returns how many new trades were stored.
+
+    `reread=True` (--reread) ignores the seen-document set for this run: a filing read before the
+    parser knew a coin (the BTC/ETH-only one) yields that coin's trades now. The inserts are
+    idempotent (the trade is the primary key, INSERT OR IGNORE), so what is stored is not
+    duplicated, and every document read is still marked seen -- nothing is ever removed from
+    crypto_treasury_seen. The daily pass never rereads."""
     import db
     scan = scan or scan_new_filings
     today = today or dt.date.today()
-    seen = db.crypto_treasury_seen(conn)
+    seen = set() if reread else db.crypto_treasury_seen(conn)
     new = 0
     earliest = today - dt.timedelta(days=days)
     end = today
@@ -373,6 +380,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backfill", type=int, metavar="DAYS", required=True,
                     help="read this many past days of filings (one-time: 365 gives the weekly "
                          "company-demand signal its year of history)")
+    ap.add_argument("--reread", action="store_true",
+                    help="also read the documents already read (the first backfill after the alts were added: "
+                         "the parser read those filings for bitcoin and ether only); stored trades are not "
+                         "duplicated and no document is forgotten")
     args = ap.parse_args(argv)
     conn = db.connect(Path(__file__).parent / "data" / "disclosures.db")
     try:
@@ -380,7 +391,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"[backfill] no CIK->ticker map ({e}); using EDGAR's first-listed ticker")
         cik_lookup = None
-    new = backfill(conn, args.backfill, cik_lookup=cik_lookup)
+    options = {"reread": True} if args.reread else {}      # without the flag: called exactly as before
+    new = backfill(conn, args.backfill, cik_lookup=cik_lookup, **options)
     print(f"[backfill] {new} new trade(s)")
     return 0
 

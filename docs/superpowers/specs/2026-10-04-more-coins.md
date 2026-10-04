@@ -259,3 +259,17 @@ known down gives the old one; 121 closes can be read; ETH is not gated; `score_c
   the bot does not score (`ADA`). The context still reads today's kept scores first.
 - Tests: a stock context fetches no coin price and asks no coin headline; a SOL context fetches SOL and BTC only; the gate still
   works there; ETH and BTC contexts fetch that coin only; `portfolio` and `score_day` still score all thirteen.
+
+## Amendment 2 (2026-10-04, after the review): V1-V7
+
+A review of the finished branch ("with fixes": BTC and ETH provably unchanged) ruled the seven items below, binding.
+
+### V1. The backfill can re-read documents already seen
+
+`python crypto_treasury.py --backfill N --reread` (and `backfill(..., reread=False)`) ignores the seen-document set for that
+run, so a filing read earlier by the BTC/ETH-only parser yields its alt trades now. The inserts are idempotent (the trade is
+the primary key, `INSERT OR IGNORE`), so nothing is stored twice; every document read is still marked seen, and rows are never
+deleted from `crypto_treasury_seen`. The daily pass is unchanged: it still skips seen documents. The command without the flag
+calls `backfill` exactly as before. Tests: a seen document with "purchased 1,355 bitcoin ... and 1,250,000 SOL" stores the SOL
+trade with `reread` and not without, a second reread duplicates nothing, the seen set loses nothing, the daily pass still skips
+the document, the command passes the flag only when given. The README names `--reread` for the first run after this change.

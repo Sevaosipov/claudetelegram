@@ -219,6 +219,13 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
+def test_the_readme_names_reread_for_the_first_backfill_after_the_alts():
+    text = " ".join(_text().split()).lower()
+    for phrase in ("`python crypto_treasury.py --backfill 365 --reread`", "В первый раз после перехода на тринадцать монет",
+                   "перечитывает и уже прочитанные документы", "`crypto_treasury_seen` ничего не удаляется"):
+        assert phrase.lower() in text, phrase
+
+
 def test_the_readme_says_the_analysts_context_scores_only_what_it_needs():
     text = " ".join(_text().split())
     for phrase in ("`context 'ТИКЕР'`", "считает заново и **только то, что нужно** (`model.score_today(…, coins=…)`)",
