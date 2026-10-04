@@ -600,6 +600,19 @@ def test_each_coin_score_has_the_60_day_return_of_its_own_closes_and_the_day_kee
     assert kept == {c: by[c].ret60 for c in model.COINS}
 
 
+def test_a_broad_uptrend_day_signals_bitcoin_and_ether_not_the_alts_keyword_news_favours(conn):
+    """The live check: 12 of 13 coins BUY, AVAX and ENA ahead on «upgrade» headlines. Now they are level, and the
+    week's two coin places go to BTC and ETH -- or, with bitcoin already held, to ETH and the first alt."""
+    import signals_weekly
+    news = {"CRYPTO:AVAX": [{"title": "Avalanche network upgrade goes live"}],
+            "CRYPTO:ENA": [{"title": "Ethena upgrade lifts the protocol"}]}
+    scored = _score(conn, [], {f"{c}-USD": _rising() for c in model.COINS}, news_fn=lambda t, s: news.get(t, []))
+    assert {(s.decision, s.total) for s in scored} == {("buy", 60)}
+    assert [s.ticker for s in signals_weekly.pick_buys(conn, TODAY, scored)] == ["CRYPTO:BTC", "CRYPTO:ETH"]
+    conn.execute("INSERT INTO positions (ticker, source, opened_at, entry_price) VALUES ('CRYPTO:BTC', 'CRYPTO', '2026-09-01', 1)")
+    assert [s.ticker for s in signals_weekly.pick_buys(conn, TODAY, scored)] == ["CRYPTO:ETH", "CRYPTO:SOL"]
+
+
 def test_a_stock_has_no_return_in_the_kept_scores(conn):
     _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
     assert not hasattr(next(s for s in model.cached_scores(conn, TODAY) if s.ticker == "AAA"), "ret60")
