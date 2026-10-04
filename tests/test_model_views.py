@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-import pytest
-
 import model
 import model_score
 import positions

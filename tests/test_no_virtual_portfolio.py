@@ -11,8 +11,6 @@ import pathlib
 import re
 import types
 
-import pytest
-
 import analyst
 import bot
 import db
