@@ -188,6 +188,26 @@ def test_position_ticker_maps_crypto_symbols():
     assert tb._position_ticker("CRYPTO:ZZZ") is None
 
 
+@pytest.mark.parametrize("coin", ["SOL", "XRP", "BNB", "DOGE", "AVAX", "HYPE", "LTC", "ENA", "LINK", "TRX", "SUI"])
+def test_position_ticker_knows_the_alts(coin):
+    assert tb._position_ticker(coin) == f"CRYPTO:{coin}"
+    assert tb._position_ticker(coin.lower()) == f"CRYPTO:{coin}"
+    assert tb._position_ticker(f"CRYPTO:{coin}") == f"CRYPTO:{coin}"
+
+
+def test_bought_and_sold_work_for_the_new_coins(conn, replies):
+    """/bought HYPE 90 opens CRYPTO:HYPE as a coin, /sold SUI closes CRYPTO:SUI."""
+    import positions
+    tb._handle_message(conn, "/bought HYPE 90")
+    [pos] = positions.open_positions(conn)
+    assert (pos.ticker, pos.source, pos.entry_price) == ("CRYPTO:HYPE", "CRYPTO", 90.0)
+    tb._handle_message(conn, "/bought SUI 3.5")
+    assert {p.ticker for p in positions.open_positions(conn)} == {"CRYPTO:HYPE", "CRYPTO:SUI"}
+    tb._handle_message(conn, "/sold SUI")
+    assert [p.ticker for p in positions.open_positions(conn)] == ["CRYPTO:HYPE"]
+    assert replies[-1] == "Позиция CRYPTO:SUI закрыта."
+
+
 def test_bought_with_price_opens_a_position(conn, replies):
     import positions
     tb._handle_message(conn, "/bought grab 18.40")

@@ -68,6 +68,12 @@ def test_default_coins_are_the_builtin_list():
     assert assets.resolve("ETH").kind == "crypto" and assets.resolve("NVDA").kind == "stock"
 
 
+@pytest.mark.parametrize("symbol", ["SOL", "XRP", "BNB", "DOGE", "AVAX", "HYPE", "LTC", "ENA", "LINK", "TRX", "SUI"])
+def test_the_alts_are_in_the_builtin_list(symbol):
+    a = assets.resolve(symbol)
+    assert (a.kind, a.symbol, a.yahoo, a.key) == ("crypto", symbol, f"{symbol}-USD", f"CRYPTO:{symbol}")
+
+
 def test_signal_ticker_matches_the_signal_tables():
     assert assets.resolve("BTC", COINS).signal_ticker == "CRYPTO:BTC"
     assert assets.resolve("NVDA", COINS).signal_ticker == "NVDA"

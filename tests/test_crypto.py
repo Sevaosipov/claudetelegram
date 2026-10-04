@@ -38,6 +38,67 @@ def test_symbol_for_text(text, symbol):
     assert crypto.symbol_for_text(text) == symbol
 
 
+THIRTEEN = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "AVAX", "HYPE", "LTC", "ENA", "LINK", "TRX", "SUI")
+
+
+@pytest.mark.parametrize("text,symbol", [
+    ("Hyperliquid [CT]", "HYPE"), ("HYPE [CT]", "HYPE"), ("Hyperliquid (HYPE) [CT]", "HYPE"),
+    ("Ethena [CT]", "ENA"), ("ENA [CT]", "ENA"),
+    ("Binance Coin [CT]", "BNB"), ("BNB [CT]", "BNB"), ("Binance Coin (BNB) [CT]", "BNB"),
+    ("Tron [CT]", "TRX"), ("TRX [CT]", "TRX"),
+    ("Sui [CT]", "SUI"), ("SUI [CT]", "SUI"),
+    ("XRP [CT]", "XRP"), ("Ripple [CT]", "XRP"), ("Dogecoin [CT]", "DOGE"), ("Litecoin (LTC) [CT]", "LTC"),
+    ("Chainlink [CT]", "LINK"), ("Avalanche [CT]", "AVAX"), ("AVAX [CT]", "AVAX"),
+    ("Bitcoin Cash [CT]", "BCH"),                     # the longer name still wins over bitcoin
+])
+def test_the_new_coins_resolve_from_asset_text(text, symbol):
+    assert crypto.symbol_for_text(text) == symbol
+
+
+@pytest.mark.parametrize("text", [
+    "Electronic Arts Inc [ST]",          # "tron" is inside "electronic"
+    "Patron Holdings [ST]",
+    "Suite Property Trust [ST]",         # "sui" is inside "suite"
+    "Pursuit Holdings [ST]",
+    "Hyperlink Systems [ST]", "Venom Inc [ST]",
+])
+def test_a_coin_name_inside_another_word_is_not_a_coin(text):
+    assert crypto.symbol_for_text(text) is None
+
+
+def test_every_scored_coin_is_known_to_crypto():
+    """The thirteen scored coins resolve as tickers and have a CoinGecko id for spot prices."""
+    for sym in THIRTEEN:
+        assert sym in crypto.SYMBOLS and sym in crypto.COINGECKO_IDS, sym
+        assert crypto.is_crypto(crypto.ticker(sym)) and crypto.symbol_of(crypto.ticker(sym)) == sym
+        assert crypto.yf_symbol(crypto.ticker(sym)) == f"{sym}-USD"
+    assert {"ADA", "DOT", "BCH", "ETC"} <= crypto.SYMBOLS        # the earlier extras stay
+
+
+@pytest.mark.parametrize("symbol,cg_id", [("BNB", "binancecoin"), ("HYPE", "hyperliquid"), ("ENA", "ethena"),
+                                          ("TRX", "tron"), ("SUI", "sui")])
+def test_the_new_coins_have_their_coingecko_ids(symbol, cg_id):
+    assert crypto.COINGECKO_IDS[symbol] == cg_id
+
+
+def test_a_new_coins_spot_price_asks_coingecko_for_its_id():
+    asked = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"hyperliquid": {"usd": 38.5}}
+
+    class Session:
+        def get(self, url, params=None, timeout=None):
+            asked.append(params)
+            return Resp()
+    assert crypto.price_usd(None, "HYPE", Session()) == 38.5
+    assert asked == [{"ids": "hyperliquid", "vs_currencies": "usd"}]
+
+
 def test_yf_symbol_maps_crypto_and_share_classes():
     assert crypto.yf_symbol("CRYPTO:BTC") == "BTC-USD"
     assert crypto.yf_symbol("BRK.B") == "BRK-B"
