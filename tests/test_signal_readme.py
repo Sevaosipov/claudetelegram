@@ -104,9 +104,12 @@ def test_the_readme_examples_are_what_the_code_renders(conn):
     insider = positions.CloseAlert(_position(), "insider_sell", "Ryan Cohen — Form 4, 2026-10-01", 20.70)
     holding = ta.T212Position("GME_US_EQ", None, "US36467W1099", "USD", 10.0, 23.10, 24.05,
                               "2026-09-28T14:03:11.000+02:00", 207.3, 199.0, 8.30, "EUR")
+    alt = dict(ticker="CRYPTO:SOL", source="CRYPTO", company="SOL", kind="crypto", score=75.0, stop_pct=0.22,
+               reasons=["выше 100-дн. средней", "20 дн. +12%", "60 дн. +30%"], t212=None, risk=True)
     state = dict(close=1.2000, ma=1.1500, diff=0.35, atr=0.008)
     expected = [
         weekly.buy_text(pick),
+        weekly.buy_text(alt),
         weekly.exit_text("XYZ", ["Anna Lee", "Bo Chen"]),
         tn.format_close_alert(stop),
         tn.format_close_alert(insider),
@@ -178,6 +181,39 @@ def test_the_readme_says_which_buys_are_picked():
                    "ваш счёт Trading 212 — единственный портфель", "Бот ничего не покупает и не продаёт",
                    "RESIGNAL_DAYS", "WEEKLY_BUY_LIMIT"):
         assert phrase in text, phrase
+
+
+def test_the_readme_says_what_the_thirteen_coins_are_and_what_feeds_them():
+    text = " ".join(_text().split())
+    assert "BTC, ETH** и одиннадцатью альтами — **SOL, XRP, BNB, DOGE, AVAX, HYPE, LTC, ENA, LINK, TRX, SUI**" in text
+    for phrase in ("`model.COINS`", "`model.MAJOR_COINS`", "| Тренд (цены) | все тринадцать |",
+                   "| Притоки и оттоки спот-ETF | BTC, ETH и SOL |",
+                   "| Покупки и продажи компаний (8-K/6-K) | все тринадцать |", "| Новости | все тринадцать |"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_how_the_alts_are_held_back():
+    text = " ".join(_text().split())
+    for phrase in ("фильтр биткоина", "биткоин ниже 100-дн. средней — альты не покупаем",
+                   "`coin_trend(закрытия BTC)[\"above_ma100\"]`", "`btc_up`",
+                   "`WEEKLY_COIN_LIMIT`", "не больше двух монет", "кончается словами «высокий риск»",
+                   "поле `risk`", "мало истории"):
+        assert phrase in text, phrase
+    from model_score import ALT_GATE_REASON
+    from weekly import RISK_TAG
+    assert ALT_GATE_REASON in text and RISK_TAG in text
+
+
+def test_the_readme_says_what_the_alts_treasury_and_etf_numbers_are():
+    text = " ".join(_text().split())
+    for phrase in ("не меньше €50 млн для BTC и ETH (€10 млн для альтов)", "от €5 млн для альтов",
+                   "farside.co.uk/sol/", "BSOL, FSOL, GSOL, MSOL, SOEZ, TSOL, VSOL", "страницы «вся история» нет",
+                   "| Фиксированный порог дня (истории меньше 30 дней) | $400 млн | $50 млн |",
+                   "| Фиксированный порог 3 дней | $500 млн | $100 млн |",
+                   "| Пол дня (относительное правило) | $100 млн | $25 млн |", "| Пол 3 дней | $250 млн | $60 млн |",
+                   "`python crypto_treasury.py --backfill 365`", "сбой одного запроса", "только если упали все запросы",
+                   "min(дней, 200)", "последний завершённый бар"):
+        assert phrase.lower() in text.lower(), phrase
 
 
 def test_the_readme_says_what_the_views_show_now():

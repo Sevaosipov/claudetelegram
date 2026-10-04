@@ -1249,6 +1249,16 @@ def test_the_method_says_the_portfolio_command_covers_your_positions_the_buy_sig
         < method.index("«НАБЛЮДЕНИЕ»")
 
 
+def test_the_method_names_the_thirteen_coins_and_how_the_alts_are_held_back():
+    method = " ".join(_text("analyst_method.txt").split())
+    assert "The bot scores thirteen coins: BTC, ETH (the majors) and the alts SOL, XRP, BNB, DOGE, AVAX, HYPE, LTC, ENA, LINK, TRX and SUI" in method
+    for coin in model.COINS:
+        assert coin in method, coin
+    assert "An alt is a buy only while bitcoin is above its 100-day average" in method
+    assert model_score.ALT_GATE_REASON in method and "«высокий риск»" in method
+    assert "ETF flows exist for BTC, ETH and SOL only" in method and "at most two coin signals" in method
+
+
 def test_the_method_says_the_bot_scores_signals_and_holds_no_portfolio():
     method = " ".join(_text("analyst_method.txt").split())
     assert "The bot holds no portfolio of its own" in method and "«оценивает сигналы»" in method
