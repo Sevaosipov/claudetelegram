@@ -407,6 +407,49 @@ def test_news_plain_titles_score_nothing():
     assert ms.news_part(_titles("Acme opens new office")) == (ms.Part(0, []), None)
 
 
+# ---- R1 (amendment): for a coin a positive headline adds no points
+GOOD = ("upgrade", "buyback announced", "beats estimates")
+
+
+def test_news_a_coins_positive_headlines_add_nothing():
+    assert ms.news_part(_titles(*GOOD), coin=True) == (ms.Part(0, []), None)
+    assert ms.news_part(_titles(*GOOD))[0].points == 10          # the same headlines are +10 for a stock
+
+
+def test_news_a_network_upgrade_is_not_news_about_the_coin():
+    title = "Ethereum network upgrade goes live"
+    assert ms.news_part(_titles(title), coin=True) == (ms.Part(0, []), None)
+    assert ms.news_part(_titles(title), coin=False)[0].points == 5
+
+
+def test_news_a_coins_negatives_still_subtract_and_good_ones_do_not_offset_them():
+    part, red = ms.news_part(_titles("downgrade", "upgrade", "raises guidance"), coin=True)
+    assert part.points == -10 and part.lines == ["новости: 1 плохая"] and red is None
+    part, _ = ms.news_part(_titles("downgrade", "upgrade", "raises guidance"))           # a stock: -10 + 5 + 5
+    assert part.points == 0 and part.lines == ["новости: 1 плохая, 2 хорошие"]
+
+
+def test_news_a_coins_negatives_are_clamped_at_minus_thirty():
+    assert ms.news_part(_titles("downgrade a", "lawsuit b", "recall c", "probe d"), coin=True)[0].points == -30
+
+
+@pytest.mark.parametrize("titles", [("upgrade",), GOOD, ("wins contract", "raises forecast", "fda approval", "record revenue"),
+                                    ("downgrade", "upgrade"), ()])
+def test_news_a_coins_part_is_never_above_zero(titles):
+    assert ms.news_part(_titles(*titles), coin=True)[0].points <= 0
+
+
+def test_news_a_coins_red_flag_still_blocks_whatever_else_is_said():
+    part, red = ms.news_part(_titles("Network upgrade done", "Exchange hack drains hot wallet"), coin=True)
+    assert red == "Exchange hack drains hot wallet" and part.points == 0
+    assert ms.news_part(_titles("Network upgrade done", "Exchange hack drains hot wallet"))[1] is None      # a stock: no such flag
+
+
+def test_news_a_stocks_positive_points_are_unchanged():
+    assert ms.NEWS_MAX == 10 and ms.NEWS_POSITIVE_POINTS == 5
+    assert ms.news_part(_titles("upgrade", "buyback announced"), coin=False)[0].points == 10
+
+
 def test_news_coin_red_flags_only_apply_to_coins():
     title = "Major exchange hack drains hot wallet"
     _, red_coin = ms.news_part(_titles(title), coin=True)
@@ -813,11 +856,25 @@ def test_score_coin_red_flag_blocks():
     assert f"новости: {title}" in c.reasons
 
 
-def test_score_coin_news_points_and_lines():
+def test_score_coin_positive_headlines_add_no_points():
+    """Crypto headlines say «upgrade» for a network upgrade: for a coin a good headline scores nothing
+    (and has nothing to explain)."""
     c = ms.score_coin("BTC", _grow(150, 0.01), bullish_flow=False, caution=None,
                       headlines=_titles("upgrade", "record revenue"))
-    assert c.news == 10 and c.total == 70
-    assert "новости: 2 хорошие" in c.reasons
+    assert c.news == 0 and c.total == 60 and c.decision == ms.BUY
+    assert not any("новости" in r for r in c.reasons)
+
+
+def test_score_coin_negative_headlines_still_subtract_and_good_ones_do_not_offset_them():
+    c = ms.score_coin("BTC", _grow(150, 0.01), bullish_flow=False, caution=None,
+                      headlines=_titles("Analyst downgrade", "upgrade", "network upgrade"))
+    assert c.news == -10 and c.total == 50 and c.decision == ms.WATCH
+    assert "новости: 1 плохая" in c.reasons and not any("хорош" in r for r in c.reasons)
+
+
+def test_score_coin_news_is_never_above_zero():
+    c = ms.score_coin("BTC", _grow(150, 0.01), bullish_flow=True, caution=None, headlines=_titles(*GOOD))
+    assert c.news == 0 and c.total == 75                        # trend 60 + flows 15, the headlines nothing
 
 
 def test_score_coin_short_history_is_watch_with_a_reason():
@@ -830,10 +887,12 @@ def test_score_coin_short_history_is_watch_with_a_reason():
 
 def test_score_coin_short_history_keeps_flows_and_news():
     c = ms.score_coin("BTC", _grow(100, 0.01), bullish_flow=True, caution=None,
-                      headlines=_titles("upgrade"))
-    assert c.flows == 15 and c.news == 5 and c.total == 20
+                      headlines=_titles("downgrade"))
+    assert c.flows == 15 and c.news == -10 and c.total == 5
     assert c.decision == ms.WATCH
     assert c.reasons[0] == "мало истории"
+    c = ms.score_coin("BTC", _grow(100, 0.01), bullish_flow=True, caution=None, headlines=_titles("upgrade"))
+    assert c.flows == 15 and c.news == 0 and c.total == 15      # a good headline adds nothing for a coin
 
 
 def test_score_coin_total_is_clamped():

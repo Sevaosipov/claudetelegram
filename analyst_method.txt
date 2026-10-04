@@ -62,7 +62,9 @@ project's files. The commands find the keys they need themselves.
    - The bot scores thirteen coins: BTC, ETH (the majors) and the alts SOL, XRP, BNB, DOGE, AVAX,
      HYPE, LTC, ENA, LINK, TRX and SUI; a bare symbol is the coin («SOL» is Solana). The score is
      the same for all: trend, flows (ETF flows exist for BTC, ETH and SOL only; company purchases
-     for all thirteen) and news. An alt is a buy only while bitcoin is above its 100-day average,
+     for all thirteen) and news. News count for a coin only when they are bad: a positive headline
+     adds no points (a network «upgrade» is not news about the price), while a red flag still blocks.
+     An alt is a buy only while bitcoin is above its 100-day average,
      otherwise it is «наблюдение» with the reason «биткоин ниже 100-дн. средней — альты не
      покупаем»; a buy signal on an alt ends «высокий риск», and a week brings at most two coin
      signals. Say so when the owner asks about an alt, and never treat an alt like BTC or ETH.

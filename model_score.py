@@ -290,7 +290,12 @@ def momentum_part(closes: list[float]) -> Part:
 
 def news_part(headlines: list[dict] | None, *, coin: bool = False) -> tuple[Part, str | None]:
     """Score the headlines (-30..+10) and return the first red-flag title, if any.
-    A title counts once per list and a red-flag title is not also a negative one."""
+    A title counts once per list and a red-flag title is not also a negative one.
+
+    For a coin (`coin=True`) a positive headline adds no points -- crypto headlines say «upgrade»
+    for a network upgrade, which says nothing about the price -- so its part is -30..0: negative
+    headlines still subtract, a red flag still blocks, and a good headline is not even counted
+    (it would explain no points). A stock is unchanged."""
     if not headlines:
         return Part(0, []), None
     red_re = _COIN_RED_RE if coin else _RED_RE
@@ -306,7 +311,7 @@ def news_part(headlines: list[dict] | None, *, coin: bool = False) -> tuple[Part
             continue
         if _NEGATIVE_RE.search(low):
             bad += 1
-        if _POSITIVE_RE.search(low):
+        if not coin and _POSITIVE_RE.search(low):
             good += 1
     points = max(NEWS_MIN, min(NEWS_MAX, bad * NEWS_NEGATIVE_POINTS + good * NEWS_POSITIVE_POINTS))
     lines = []
@@ -412,8 +417,9 @@ def coin_trend(closes: list[float]) -> dict | None:
 
 def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: str | None,
                headlines: list[dict] | None, btc_up: bool | None = None) -> CoinScore:
-    """Score a coin: trend (0-60), flows (-20..+15) and news (-30..+10). A coin buys
-    only in an uptrend; a red-flag headline or a price-confirmed caution blocks it.
+    """Score a coin: trend (0-60), flows (-20..+15) and news (-30..0: a coin's positive headlines
+    add nothing, see news_part). A coin buys only in an uptrend; a red-flag headline or a
+    price-confirmed caution blocks it.
 
     `btc_up` is the bitcoin regime filter for an alt: False -- bitcoin's close is not above its
     100-day average (coin_trend(...)["above_ma100"]) -- turns a would-be BUY into WATCH, with

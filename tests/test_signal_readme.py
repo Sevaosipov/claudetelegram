@@ -204,6 +204,14 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert ALT_GATE_REASON in text and RISK_TAG in text
 
 
+def test_the_readme_says_a_coins_good_headlines_add_no_points():
+    text = " ".join(_text().split()).lower()
+    for phrase in ("| Новости | −30…0 |", "Хорошие заголовки монете баллов не дают",
+                   "«upgrade» в крипто-новостях — обновление сети", "Красные флаги", "по-прежнему блок"):
+        assert phrase.lower() in text, phrase
+    assert "| новости | −30…+10 | те же списки, что у акций, плюс красные флаги" not in text
+
+
 def test_the_readme_says_what_the_alts_treasury_and_etf_numbers_are():
     text = " ".join(_text().split())
     for phrase in ("не меньше €50 млн для BTC и ETH (€10 млн для альтов)", "от €5 млн для альтов",

@@ -1257,6 +1257,7 @@ def test_the_method_names_the_thirteen_coins_and_how_the_alts_are_held_back():
     assert "An alt is a buy only while bitcoin is above its 100-day average" in method
     assert model_score.ALT_GATE_REASON in method and "«высокий риск»" in method
     assert "ETF flows exist for BTC, ETH and SOL only" in method and "at most two coin signals" in method
+    assert "a positive headline adds no points" in method and "a red flag still blocks" in method
 
 
 def test_the_method_says_the_bot_scores_signals_and_holds_no_portfolio():

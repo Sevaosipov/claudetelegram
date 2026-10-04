@@ -180,3 +180,23 @@ The crypto section lists the thirteen coins and what feeds each:
 - news for all.
 
 It also covers the bitcoin regime filter, the two-coins-a-week limit, and the «высокий риск» tag.
+
+## Amendment (2026-10-04, after the live check)
+
+A live check on real prices scored 12 of 13 coins BUY (a broad uptrend), with AVAX and ENA ahead only because of
+keyword "positive news" (+10): crypto headlines say "upgrade" for network upgrades. Two binding rulings follow. They
+supersede what sections 5 ("News: the coin red flags are unchanged") and 6 ("the two highest-scoring coins") say; the
+rest of the spec stands.
+
+### R1. A coin's positive headlines add no points
+
+- `news_part(headlines, coin=True)` gives at most 0. A positive headline adds nothing, and is not counted, so it is not
+  listed among the reasons (it would explain no points). A negative headline still subtracts (-10 each, not below
+  -30). A red flag still blocks; the coin red flags are unchanged.
+- A mixed list scores as its negatives alone: "downgrade", "upgrade", "raises guidance" is -10 for a coin (for a stock
+  it is 0).
+- A coin's news is therefore -30..0, in `news_part` and in `score_coin`. Stocks are unchanged (-30..+10, `NEWS_MAX`
+  stays 10).
+- Tests: a coin's good headlines score 0 and leave no reason line; a network "upgrade" is not news for a coin and
+  +5 for a stock; negatives still subtract and good ones do not offset them; a red flag still blocks; the stock tests
+  are untouched; no alt gets an edge from keyword news. The README line and the analyst method say it.

@@ -424,12 +424,23 @@ def test_the_coin_trend_is_asked_only_when_there_is_a_bearish_signal(conn):
 
 def test_coin_headlines_score_and_a_red_flag_blocks(conn):
     news = {"CRYPTO:BTC": [{"title": "Bitcoin ETF upgrade lifts price"}],
-            "CRYPTO:ETH": [{"title": "Protocol exploit drains ETH"}]}
-    scored = _score(conn, [], {"BTC-USD": _rising(), "ETH-USD": _rising()},
+            "CRYPTO:ETH": [{"title": "Protocol exploit drains ETH"}],
+            "CRYPTO:SOL": [{"title": "Solana downgrade by a rating agency"}]}
+    scored = _score(conn, [], {"BTC-USD": _rising(), "ETH-USD": _rising(), "SOL-USD": _rising()},
                     news_fn=lambda t, s: news.get(t, []))
     by = {s.ticker: s for s in scored}
-    assert (by["CRYPTO:BTC"].news, by["CRYPTO:BTC"].total) == (5, 65)
+    assert (by["CRYPTO:BTC"].news, by["CRYPTO:BTC"].total) == (0, 60)          # a good headline adds nothing to a coin
+    assert (by["CRYPTO:SOL"].news, by["CRYPTO:SOL"].total, by["CRYPTO:SOL"].decision) == (-10, 50, "watch")
     assert (by["CRYPTO:ETH"].decision, by["CRYPTO:ETH"].block) == ("block", "Protocol exploit drains ETH")
+
+
+def test_keyword_good_news_gives_no_alt_an_edge_over_another(conn):
+    """The live check: AVAX and ENA led the BUYs only because «upgrade» in crypto headlines is a network upgrade."""
+    news = {"CRYPTO:AVAX": [{"title": "Avalanche network upgrade goes live"}, {"title": "AVAX upgrade beats estimates"}],
+            "CRYPTO:ENA": [{"title": "Ethena raises forecast after upgrade"}]}
+    series = {f"{c}-USD": _rising() for c in model.COINS}
+    scored = _score(conn, [], series, news_fn=lambda t, s: news.get(t, []))
+    assert {s.total for s in scored if s.kind == "crypto"} == {60} and {s.news for s in scored if s.kind == "crypto"} == {0}
 
 
 # ------------------------------------------------- stake candidates: only a real signal is a trigger
