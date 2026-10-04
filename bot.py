@@ -528,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-score", type=float, default=0,
                      help="marks a manual, filtered run (as do the --*-only flags): new signals are "
                           "still collected and journaled, but the model portfolio does not trade and "
-                          "the weekly message and the monthly report wait for a full run. Default 0 "
+                          "the weekly messages and the monthly report wait for a full run. Default 0 "
                           "(a full run)")
     ap.add_argument("--min-liquidity", type=float, default=0,
                      help="marks a manual, filtered run, like --min-score. Default 0 (a full run)")

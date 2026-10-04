@@ -1,4 +1,4 @@
-"""The model portfolio's views: the weekly Telegram message, the scored list, the summary
+"""The model portfolio's views: the weekly Telegram signals and summary, the scored list, the summary
 (paper_report.format_summary / model_stats) and the menu's signals view. Offline -- scores,
 reports and books are hand-built."""
 from __future__ import annotations
@@ -24,7 +24,7 @@ S, C = model.STOCK_BOOK, model.CRYPTO_BOOK
 
 @pytest.fixture(autouse=True)
 def _utc(monkeypatch):
-    """The weekly message reads journal timestamps (stored in UTC) as local dates; the tests
+    """The weekly signals read journal timestamps (stored in UTC) as local dates; the tests
     that put a row on the edge of a week need the local day to be the UTC day."""
     monkeypatch.setenv("TZ", "UTC")
     time.tzset()
