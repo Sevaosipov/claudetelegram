@@ -27,6 +27,8 @@ import weekly
 from conftest import add_sec_purchase, add_sec_sale
 
 REAL_T212_SYNC = t212_account.sync        # the main_run fixture stubs it
+REAL_PICK_BUYS, REAL_WEEK_SIGNALS, REAL_FORMAT_SUMMARY = (       # ... and these three
+    signals_weekly.pick_buys, weekly.week_signals, weekly.format_summary)
 
 TODAY = dt.date.today()
 RECENT = (TODAY - dt.timedelta(days=1)).isoformat()
@@ -853,6 +855,28 @@ def test_main_picks_on_the_weeks_first_weekly_run_only(main_run):
     main_run.today = NEXT_FRI
     main_run()
     assert [c for c in calls if c[0] == "pick"] == [("pick", FRI), ("pick", NEXT_FRI)]      # a new ISO week
+
+
+def test_a_real_week_through_main_picks_sends_records_and_does_not_repeat_the_ticker_next_week(
+        main_run, monkeypatch):
+    """Nothing of the weekly flow is stubbed but the network: the scoring's BUY is picked, sent as a message,
+    recorded in buy_signals, followed by the summary -- and a week later the same ticker is not signalled again."""
+    monkeypatch.setattr(signals_weekly, "pick_buys", REAL_PICK_BUYS)
+    monkeypatch.setattr(weekly, "week_signals", REAL_WEEK_SIGNALS)
+    monkeypatch.setattr(weekly, "format_summary", REAL_FORMAT_SUMMARY)
+    calls = main_run()
+    sent = [c[1] for c in calls if c[0] == "send"]
+    assert sent == ["🟢 <b>AAA!</b>: покупка — 2 инсайдера из руководства; CEO среди покупателей; балл 70, стоп −10%",
+                    "📊 <b>Неделя 03.10–09.10</b>\nПозиций нет.\n"
+                    "Сигналов за неделю: покупок 1, на продажу 0, групповых выходов 0"]
+    conn = main_run.db()
+    assert conn.execute("SELECT ticker, score, sent_at FROM buy_signals").fetchall() == [("AAA", 70.0, "2026-10-09")]
+    calls.clear()
+    main_run.today = NEXT_FRI
+    main_run()
+    sent = [c[1] for c in calls if c[0] == "send"]
+    assert sent == ["📊 <b>Неделя 10.10–16.10</b>\nПозиций нет.\nСигналов за неделю не было."]      # AAA: signalled 7 days ago
+    assert main_run.db().execute("SELECT COUNT(*) FROM buy_signals").fetchone() == (1,)
 
 
 def test_main_picks_from_the_days_scores_and_keeps_the_picks_for_the_week(main_run):
