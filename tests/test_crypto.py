@@ -786,6 +786,51 @@ def test_no_price_history_means_no_trend(conn, monkeypatch):
     assert crypto.price_trend(conn, "BTC") is None and not crypto.trend_confirms(None)
 
 
+def _rising_bars(n=40):
+    return [(f"2026-08-{(i % 28) + 1:02d}", 100.0 + i) for i in range(n)]
+
+
+def test_the_trend_of_a_coin_yahoo_has_no_symbol_for_comes_from_the_multi_source_history(conn, monkeypatch):
+    import sources
+    asked = []
+    monkeypatch.setattr(crypto, "_yahoo_closes", lambda symbol: None)
+    monkeypatch.setattr(sources, "price_history",
+                        lambda asset, days=800: asked.append((asset.symbol, asset.kind)) or (_rising_bars(), "Bybit"))
+    trend = crypto.price_trend(conn, "HYPE")
+    assert asked == [("HYPE", "crypto")]
+    assert trend["above_ma20"] and trend["ret_7d"] == pytest.approx((139 / 132 - 1) * 100)
+    assert crypto.trend_confirms(trend)
+
+
+def test_a_coin_yahoo_prices_never_asks_the_other_sources(conn, monkeypatch):
+    import sources
+    monkeypatch.setattr(crypto, "_yahoo_closes", lambda symbol: [100.0] * 28)
+
+    def boom(asset, days=800):
+        raise AssertionError("the other sources were asked")
+    monkeypatch.setattr(sources, "price_history", boom)
+    assert crypto.price_trend(conn, "BTC") is not None
+
+
+def test_no_history_anywhere_means_no_trend(conn, monkeypatch):
+    import sources
+    monkeypatch.setattr(crypto, "_yahoo_closes", lambda symbol: None)
+    monkeypatch.setattr(sources, "price_history", lambda asset, days=800: (None, None))
+    assert crypto.price_trend(conn, "SUI") is None
+    monkeypatch.setattr(sources, "price_history", lambda asset, days=800: (_rising_bars(15), "Bybit"))
+    assert crypto.price_trend(conn, "SUI") is None            # under 21 closes is no trend
+
+
+def test_a_failing_history_source_means_no_trend_not_a_crash(conn, monkeypatch):
+    import sources
+
+    def down(asset, days=800):
+        raise ConnectionError("x")
+    monkeypatch.setattr(crypto, "_yahoo_closes", lambda symbol: None)
+    monkeypatch.setattr(sources, "price_history", down)
+    assert crypto.price_trend(conn, "HYPE") is None
+
+
 def test_falling_price_below_its_average_confirms_a_caution(conn, monkeypatch):
     _closes(monkeypatch, [100.0] * 20 + [99, 98, 97, 96, 95, 94, 93, 92])
     assert crypto.trend_confirms_down(crypto.price_trend(conn, "BTC"))

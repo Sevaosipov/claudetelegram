@@ -76,6 +76,95 @@ def test_isin_has_no_price_history(monkeypatch):
     assert sources.price_history(ISIN, 30) == (None, None)
 
 
+# ---------------------------------------------- a coin's history: depth beats order
+HYPE = assets.crypto_asset("HYPE")
+
+
+def _series(n, start=dt.date(2025, 8, 1)):
+    """n consecutive daily bars (iso date, close), oldest first."""
+    return [((start + dt.timedelta(days=i)).isoformat(), 10.0 + i) for i in range(n)]
+
+
+def _asked(monkeypatch, **results):
+    """_stub_history, plus a log of which providers were asked, in order."""
+    _stub_history(monkeypatch, **results)
+    log = []
+    for name, label in (("_yahoo_history", "Yahoo"), ("_binance_history", "Binance"),
+                        ("_bybit_history", "Bybit"), ("_kraken_history", "Kraken")):
+        inner = getattr(sources, name)
+        monkeypatch.setattr(sources, name, lambda *a, _i=inner, _l=label: log.append(_l) or _i(*a))
+    return log
+
+
+def test_the_minimum_depth_is_200_bars():
+    assert sources.CRYPTO_MIN_BARS == 200
+
+
+def test_a_coin_listed_days_ago_takes_the_exchange_that_has_its_history(monkeypatch):
+    """HYPE: Yahoo has no symbol, Binance listed it 11 days ago, Bybit has the whole year."""
+    _stub_history(monkeypatch, _yahoo_history=[], _binance_history=_series(11),
+                  _bybit_history=_series(421), _kraken_history=_series(300))
+    assert sources.price_history(HYPE, 420) == (_series(421), "Bybit")
+
+
+def test_a_first_source_with_enough_bars_wins_and_the_rest_are_not_asked(monkeypatch):
+    log = _asked(monkeypatch, _yahoo_history=_series(420), _binance_history=_series(421),
+                 _bybit_history=_series(421))
+    assert sources.price_history(BTC, 420) == (_series(420), "Yahoo")
+    assert log == ["Yahoo"]
+
+
+def test_exactly_200_bars_is_enough(monkeypatch):
+    _stub_history(monkeypatch, _yahoo_history=_series(200), _binance_history=_series(421))
+    assert sources.price_history(BTC, 420) == (_series(200), "Yahoo")
+    _stub_history(monkeypatch, _yahoo_history=_series(199), _binance_history=_series(421))
+    assert sources.price_history(BTC, 420) == (_series(421), "Binance")
+
+
+def test_when_every_source_is_short_the_longest_series_wins(monkeypatch):
+    log = _asked(monkeypatch, _yahoo_history=_series(40), _binance_history=_series(11),
+                 _bybit_history=_series(90), _kraken_history=_series(60))
+    assert sources.price_history(HYPE, 420) == (_series(90), "Bybit")
+    assert log == ["Yahoo", "Binance", "Bybit", "Kraken"]         # none was enough: all were asked
+
+
+def test_a_tie_between_short_series_goes_to_the_earlier_source(monkeypatch):
+    _stub_history(monkeypatch, _yahoo_history=_series(50), _binance_history=_series(50),
+                  _bybit_history=_series(49))
+    assert sources.price_history(BTC, 420) == (_series(50), "Yahoo")
+
+
+def test_a_failing_or_empty_source_does_not_hide_a_short_one(monkeypatch):
+    _stub_history(monkeypatch, _yahoo_history=ConnectionError("x"), _binance_history=[],
+                  _bybit_history=_series(11), _kraken_history=None)
+    assert sources.price_history(HYPE, 420) == (_series(11), "Bybit")
+
+
+def test_no_source_at_all_is_none(monkeypatch):
+    _stub_history(monkeypatch, _yahoo_history=[], _binance_history=ConnectionError("x"))
+    assert sources.price_history(HYPE, 420) == (None, None)
+
+
+def test_a_short_request_needs_only_that_many_bars(monkeypatch):
+    """The bar is min(days, 200): a 30-day request is satisfied by 30 bars."""
+    _stub_history(monkeypatch, _yahoo_history=_series(29), _binance_history=_series(30),
+                  _bybit_history=_series(400))
+    assert sources.price_history(BTC, 30) == (_series(30), "Binance")
+
+
+def test_a_stock_history_is_unchanged_the_first_answer_wins_however_short(monkeypatch):
+    log = _asked(monkeypatch, _yahoo_history=_series(5), _nasdaq_history=_series(400))
+    assert sources.price_history(NVDA, 420) == (_series(5), "Yahoo")
+    assert log == ["Yahoo"]
+
+
+def test_first_available_can_ask_for_a_minimum_size():
+    attempts = [("A", lambda: [1]), ("B", lambda: [1, 2]), ("C", lambda: [1, 2, 3]), ("D", lambda: [9] * 9)]
+    assert sources.first_available(attempts, min_size=3) == ([1, 2, 3], "C")
+    assert sources.first_available(attempts, min_size=10) == ([9] * 9, "D")       # none enough: the longest
+    assert sources.first_available(attempts) == ([1], "A")                         # no minimum: the first
+
+
 def test_current_price_falls_back_to_tradingview(monkeypatch):
     _stub_history(monkeypatch, _yahoo_history=ConnectionError("x"))
     monkeypatch.setattr(sources, "_tradingview_close", lambda asset: 42.0)

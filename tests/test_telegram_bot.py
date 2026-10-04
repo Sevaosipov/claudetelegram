@@ -208,6 +208,22 @@ def test_bought_and_sold_work_for_the_new_coins(conn, replies):
     assert replies[-1] == "Позиция CRYPTO:SUI закрыта."
 
 
+def test_bought_hype_without_a_price_is_priced_from_the_exchange_series_and_gets_a_stop(conn, sent, monkeypatch):
+    """HYPE has no Yahoo symbol: /bought HYPE takes the last completed bar of the multi-source series."""
+    import datetime as dt
+    import positions
+    import prices
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+    bars = [((yesterday - dt.timedelta(days=129 - i)).isoformat(), 40.0) for i in range(130)]
+    monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: None)
+    monkeypatch.setattr(prices, "_closes", lambda symbol, days: bars)
+    tb._handle_message(conn, "/bought HYPE")
+    [pos] = positions.open_positions(conn)
+    assert (pos.ticker, pos.entry_price, pos.stop_pct) == ("CRYPTO:HYPE", 40.0, 0.15)
+    assert sent[-1].startswith("Записал CRYPTO:HYPE по 40,00; стоп −15% от максимума; ")
+    assert "не отслеживается" not in sent[-1]
+
+
 def test_bought_with_price_opens_a_position(conn, replies):
     import positions
     tb._handle_message(conn, "/bought grab 18.40")

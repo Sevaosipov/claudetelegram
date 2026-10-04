@@ -125,9 +125,7 @@ def price_usd(conn, symbol: str, session: requests.Session | None = None) -> flo
 TREND_TTL_SECONDS = 12 * 3600
 
 
-def _daily_closes(symbol: str) -> list[float] | None:
-    """Daily USD closes, oldest first, or None. Crypto trades every day, so seven
-    closes back is seven calendar days back."""
+def _yahoo_closes(symbol: str) -> list[float] | None:
     try:
         import yfinance as yf
         hist = yf.Ticker(f"{symbol.upper()}-USD").history(period="3mo")["Close"].dropna()
@@ -135,6 +133,25 @@ def _daily_closes(symbol: str) -> list[float] | None:
         return None
     closes = [float(x) for x in hist]
     return closes if len(closes) >= 21 else None
+
+
+def _exchange_closes(symbol: str) -> list[float] | None:
+    """The same from the multi-source history (sources.price_history: Binance, Bybit, Kraken ...),
+    for a coin Yahoo has no symbol for (HYPE, SUI). Imported here: sources imports this module."""
+    try:
+        import assets
+        import sources
+        bars, _src = sources.price_history(assets.crypto_asset(symbol), 90)
+    except Exception:
+        return None
+    closes = [float(c) for _d, c in bars or []]
+    return closes if len(closes) >= 21 else None
+
+
+def _daily_closes(symbol: str) -> list[float] | None:
+    """Daily USD closes, oldest first, or None. Crypto trades every day, so seven
+    closes back is seven calendar days back. Yahoo's, else the other sources'."""
+    return _yahoo_closes(symbol) or _exchange_closes(symbol)
 
 
 def price_trend(conn, symbol: str) -> dict | None:
