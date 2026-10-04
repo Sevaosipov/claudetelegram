@@ -2485,7 +2485,8 @@ def test_the_readme_says_what_is_read_how_often_and_that_nothing_is_traded():
     section = " ".join(readme[start:readme.index("\n### ", start + 5)].split())
     for phrase in ("`/equity/positions`", "`/equity/account/summary`", "только чтение",     # what is read
                    "Каждые 15 минут", "ежедневном прогоне",                                # how often
-                   "📥 Слежу за вашими позициями", "📥 Вижу в Trading 212", "📤",            # the notifications
+                   "📥 Слежу за вашими позициями", "⚪ GME!: куплено в Trading 212",       # the notifications
+                   "⚪ GME!: продано в Trading 212 — слежение закрыто", "итог ≈",
                    "`/portfolio` — живой", "💼 Trading 212", "✍️ Вне Trading 212",
                    "python t212_account.py --check",
                    "никогда не размещает"):                                                # no orders, ever
@@ -2501,7 +2502,7 @@ def test_the_readme_says_how_a_holding_that_pre_dates_tracking_is_treated():
     for phrase in ("Для уже купленных бумаг правила выхода считаются с сегодняшнего дня.",   # the first message
                    "от цены на день первой синхронизации",                              # the stop's floor
                    "от средней цены покупки",                                           # the result stays real
-                   "Слежу: стоп и срок",                                                # R2: only what is watched
+                   "слежу: стоп и срок",                                                # R2: only what is watched
                    "не расходует"):                                                     # R3: --sync, --no-telegram
         assert phrase in section, phrase
     assert "может прийти сразу после первой синхронизации" not in section   # no burst of alerts any more
