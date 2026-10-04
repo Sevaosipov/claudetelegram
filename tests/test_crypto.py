@@ -545,6 +545,17 @@ def test_scanning_goes_on_with_the_coins_that_answered(sleeps, capsys):
         ("SOL", "P", 1_250_000, 182.40, "DFDV")]
 
 
+def test_the_backfill_reads_the_alts_too(conn, sleeps, monkeypatch):
+    """`crypto_treasury.py --backfill N` needs no new interface: its slices ask every coin's query."""
+    doc = "Over the week the Company purchased 1,250,000 SOL at an average price of $182.40."
+    session = _Efts({ct.QUERIES["SOL"]: _hits(_HIT_SOL)}, docs={ct.doc_url(_HIT_SOL): doc})
+    monkeypatch.setattr(ct, "new_session", lambda: session)
+    assert ct.backfill(conn, 6, today=dt.date(2026, 9, 21)) == 1                  # one weekly slice
+    assert session.asked == list(ct.QUERIES.values())
+    assert conn.execute("SELECT coin, side, units FROM crypto_treasury_txns").fetchall() == [("SOL", "P", 1_250_000)]
+    assert _HIT_SOL["_id"] in db.crypto_treasury_seen(conn)
+
+
 class _Args:
     crypto_days = 7
 

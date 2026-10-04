@@ -668,6 +668,30 @@ def test_the_coin_red_flags_apply_to_an_alt(conn):
     assert (hype.decision, hype.block) == ("block", "Hyperliquid exploit drains vault")
 
 
+def test_a_sol_etf_inflow_goes_through_the_whole_chain_to_a_high_risk_buy_line(conn):
+    """Farside rows -> the ETF finder -> the day's scores -> the week's pick -> the message."""
+    import cluster
+    import crypto_etf
+    import signals_weekly
+    import weekly
+    quiet = [1e6, -1e6] * 5                                                      # ten ordinary days, then $60m
+    amounts = quiet + [60e6]
+    db.save_etf_flows(conn, [crypto_etf.Flow("SOL", (TODAY - dt.timedelta(days=len(amounts) - i)).isoformat(),
+                                             "BSOL", usd) for i, usd in enumerate(amounts)])
+    signals = cluster.find_etf_flow_signals(conn, today=TODAY)                  # $60m on a short history: SOL's $50m bar
+    assert [(s.ticker, s.bullish) for s in signals] == [("CRYPTO:SOL", True)]
+    series = {"BTC-USD": _rising(), "SOL-USD": _rising(), "ETH-USD": _falling()}
+    scored = _score(conn, signals, series)
+    sol = _coin(scored, "SOL")
+    assert (sol.flows, sol.total, sol.decision) == (15, 75, "buy")
+    picks = signals_weekly.pick_buys(conn, TODAY, scored)
+    assert [p.ticker for p in picks] == ["CRYPTO:SOL", "CRYPTO:BTC"]                           # 75 before 60
+    texts = dict(weekly.week_signals(conn, TODAY, [signals_weekly.pick_record(p) for p in picks]))
+    assert texts["buy:CRYPTO:SOL"] == ("🟢 <b>SOL!</b>: покупка — выше 100-дн. средней; 20 дн. +4%; "
+                                       "балл 75, стоп −15%, высокий риск")
+    assert texts["buy:CRYPTO:BTC"] == "🟢 <b>BTC!</b>: покупка — выше 100-дн. средней; 20 дн. +4%; балл 60, стоп −15%"
+
+
 # ------------------------------------------------- the exit rules the user's positions read from here
 def test_the_exit_constants_and_the_activist_helper_positions_reads_are_here():
     assert model.FALLBACK_STOP == {"stock": 0.15, "crypto": 0.25}
