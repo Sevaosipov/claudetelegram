@@ -1,23 +1,44 @@
-"""The README's message examples are what the code renders (spec 2026-10-04-signal-message-style.md):
-change a format without the README, or the README without a format, and this fails. Offline -- the
-examples are rendered from the same stub data the README is written from."""
+"""The README's message examples are what the code renders (specs 2026-10-04-signal-message-style.md and
+2026-10-04-remove-model-portfolio.md): change a format without the README, or the README without a format, and
+this fails. Offline -- the examples are rendered from the same stub data the README is written from."""
 from __future__ import annotations
 
+import datetime as dt
 import html
 import re
+import time
 from pathlib import Path
 
-import paper_report
+import pytest
+
+import db
 import positions
+import signals_weekly
 import t212_account as ta
 import telegram_notify as tn
+import weekly
 
-README = Path(paper_report.__file__).parent / "README.md"
+README = Path(weekly.__file__).parent / "README.md"
 _TAGS = re.compile(r"</?b>")
+FRI = dt.date(2026, 10, 9)
+
+
+@pytest.fixture(autouse=True)
+def _utc(monkeypatch):
+    """The group exits read journal timestamps (stored in UTC) as local dates."""
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def _text() -> str:
+    return README.read_text(encoding="utf-8")
 
 
 def _section() -> str:
-    text = README.read_text(encoding="utf-8")
+    text = _text()
     start = text.index("### Как выглядят сообщения\n")
     return text[start:text.index("\n### ", start + 5)]
 
@@ -49,26 +70,44 @@ def _position(**overrides):
     return positions.Position(**base)
 
 
+def _hold(conn, ticker, result, *, alerted=None):
+    """A Trading 212 holding bought at 100 whose last stored price is `result` away from it."""
+    conn.execute("INSERT INTO positions (ticker, opened_at, entry_price, origin, quantity, t212_ticker, currency, "
+                 "close_alerted_at) VALUES (?,?,?,?,?,?,?,?)",
+                 (ticker, "2026-09-01", 100.0, "t212", 5.0, f"{ticker}_US_EQ", "USD", alerted))
+    conn.execute("INSERT INTO t212_prices (ticker, date, price) VALUES (?,?,?)",
+                 (ticker, FRI.isoformat(), round(100.0 * (1 + result), 4)))
+
+
+def _busy_week(conn):
+    """The README's week of 03.10-09.10: the account up 2,9%, 43 positions (the three best and the three worst
+    named), two buy signals, one sell alert and one group exit."""
+    for day, value in (("2026-10-02", 12_000.0), (FRI.isoformat(), 12_345.67)):
+        conn.execute("INSERT INTO t212_equity (date, total_value, currency) VALUES (?,?,'EUR')", (day, value))
+    for ticker, result in (("SMCI", 0.31), ("BBD", 0.124), ("GME", 0.081), ("DEF", -0.042), ("ABC", -0.09),
+                           ("XYZ", -0.225)):
+        _hold(conn, ticker, result, alerted="2026-10-07" if ticker == "XYZ" else None)
+    for i in range(37):                                        # the rest: nothing to name
+        _hold(conn, f"F{i:02d}", 0.0)
+    for ticker in ("NEW", "GME"):
+        signals_weekly.record_signal(conn, {"ticker": ticker, "kind": "stock", "score": 70.0}, FRI)
+    db.journal_signal(conn, {"source": "SEC", "kind": "exit", "ticker": "ZZZ", "company": "Z Corp",
+                             "members": '["Ann Lee"]'})
+    conn.execute("UPDATE signal_journal SET emitted_at = '2026-10-08 12:00:00'")
+    conn.commit()
+
+
 def test_the_readme_examples_are_what_the_code_renders(conn):
-    conn.execute("INSERT INTO paper_positions (book, ticker, source, symbol, currency, fill_date, cost_eur, "
-                 "net_eur, entry_close, entry_fx, last_value) VALUES ('MODEL-S', 'GME', 'SEC', 'GME', 'USD', "
-                 "'2026-09-25', 8000, 8000, 23.1, 1.16, 7216)")
-    pid = conn.execute("SELECT id FROM paper_positions").fetchone()[0]
-    buy = dict(id=1, book="MODEL-S", ticker="GME", status="pending", score=70.0, stop_pct=0.10,
-               created="2026-10-09", reason="балл 70: 2 инсайдера из руководства; CEO среди покупателей")
-    sale = dict(id=1, ticker="GME", close_reason="стоп: −10% от максимума", closed_date="2026-10-07",
-                cost_eur=8000.0, proceeds_eur=7216.0)
-    waiting = dict(position_id=pid, ticker="GME", reason="стоп: −10% от максимума")
+    pick = dict(ticker="GME", source="SEC", company="GameStop", kind="stock", score=70.0, stop_pct=0.10,
+                reasons=["2 инсайдера из руководства", "CEO среди покупателей", "первая покупка"], t212=False)
     stop = positions.CloseAlert(_position(), "trailing_stop", "−10% от максимума 25.80", 20.70)
     insider = positions.CloseAlert(_position(), "insider_sell", "Ryan Cohen — Form 4, 2026-10-01", 20.70)
     holding = ta.T212Position("GME_US_EQ", None, "US36467W1099", "USD", 10.0, 23.10, 24.05,
                               "2026-09-28T14:03:11.000+02:00", 207.3, 199.0, 8.30, "EUR")
     state = dict(close=1.2000, ma=1.1500, diff=0.35, atr=0.008)
     expected = [
-        paper_report._buy_text(conn, buy, {"GME": False}),
-        paper_report._sale_text(sale),
-        paper_report._pending_sale_text(conn, waiting),
-        paper_report._exit_text("XYZ", ["Anna Lee", "Bo Chen"]),
+        weekly.buy_text(pick),
+        weekly.exit_text("XYZ", ["Anna Lee", "Bo Chen"]),
         tn.format_close_alert(stop),
         tn.format_close_alert(insider),
         ta._new_text("GME", holding, "стоп, продажи инсайдеров, новости"),
@@ -76,35 +115,77 @@ def test_the_readme_examples_are_what_the_code_renders(conn):
         tn.format_carry_signal("FLAT", "LONG", state, reason="entry", level=1.152),
         tn.format_carry_signal("LONG", "FLAT", dict(state, close=1.16), reason="trailing stop", level=1.167),
     ]
-    signals, _summary = _blocks()
+    signals = _blocks()[0]
     assert signals == [_shown(text) for text in expected]
 
 
+def test_the_readme_summary_examples_are_what_the_code_renders(conn):
+    _busy_week(conn)
+    _signals, busy, quiet = _blocks()
+    assert busy == _shown(weekly.format_summary(conn, FRI, scoring_failed=True)).splitlines()
+    assert busy[1].startswith("Позиций 43: лучшие — SMCI +31,0%, BBD +12,4%, GME +8,1%; худшие — XYZ −22,5%")
+    fresh = db.connect(":memory:")
+    assert quiet == _shown(weekly.format_summary(fresh, FRI)).splitlines()
+    assert quiet == ["📊 Неделя 03.10–09.10", "Позиций нет.", "Сигналов за неделю не было."]
+
+
+def test_the_readme_has_three_example_blocks_and_the_summary_ones_follow_the_signals():
+    blocks = _blocks()
+    assert len(blocks) == 3 and blocks[0][0].startswith("🟢 GME!: покупка")
+    assert blocks[1][0].startswith("📊 Неделя ") and blocks[2][0].startswith("📊 Неделя ")
+
+
 def test_the_readme_summary_example_has_the_summarys_lines():
-    _signals, summary = _blocks()
-    assert [line.split(": ")[0].split(" (")[0].split(" ")[0] for line in summary] == [
-        "📊", "В", "Сигналов", "Ваш", "⚠️"]
-    assert summary[0].startswith("📊 Модель, неделя ") and " с начала, за неделю " in summary[0]
-    assert "; смесь 70/30 " in summary[0] and re.match(r"В портфеле \(\d+\): ", summary[1])
-    assert re.match(r"Сигналов за неделю: покупок \d+, продаж \d+, групповых выходов \d+$", summary[2])
-    assert re.match(r"Ваш счёт Trading 212: €[\d ]+ \(за неделю [+−]\d+,\d%\)$", summary[3])
-    assert summary[4] == paper_report.MODEL_FAILED_WARNING
+    _signals, summary, _quiet = _blocks()
+    assert [line.split(" ")[0] for line in summary] == ["📊", "Позиций", "Сигналов", "⚠️"]
+    assert re.match(r"📊 Неделя \d\d\.\d\d–\d\d\.\d\d: счёт Trading 212 €[\d ]+ \(за неделю [+−]\d+,\d%\)$", summary[0])
+    assert re.match(r"Позиций \d+: лучшие — .+; худшие — .+", summary[1])
+    assert re.match(r"Сигналов за неделю: покупок \d+, на продажу \d+, групповых выходов \d+$", summary[2])
+    assert summary[3] == weekly.SCORING_FAILED_WARNING
 
 
 def test_the_readme_has_no_trace_of_the_old_message_layouts():
-    text = README.read_text(encoding="utf-8")
+    text = _text()
     for old in ("🚪", "📤", "Вижу в Trading 212", "Ваши позиции", "«Закрыть»", "🚨 Продают те, кто покупал",
                 "format_week"):
         assert old not in text, old
 
 
-def test_the_readme_says_how_the_week_is_sent_and_resumed():
-    text = " ".join(README.read_text(encoding="utf-8").split())
-    for phrase in ("`weekly_sent_<ГГГГ>-W<нн>`", "`buy:<id заказа>`", "`sell:<id позиции>`",
-                   "`sellpending:<id заказа>`", "`exit:<id записи журнала>`",
-                   "досылает только недостающее", "Месячный отчёт", "сразу после недельной сводки",
-                   "по одному сообщению на сигнал"):
+def test_the_readme_has_no_trace_of_the_virtual_portfolio():
+    text = _text()
+    for gone in ("Модельный портфель", "модельный портфель", "модельного портфеля", "Модельного портфеля",
+                 "MODEL-S", "MODEL-C", "python paper.py", "paper_report", "maybe_send_monthly_report",
+                 "Месячный отчёт", "месячный отчёт", "месячного отчёта", "смесь 70/30", "смесью 70%",
+                 "S&P 500 / BTC", "182 дн", "«Пройдено»", "`/model`", "/model ", "в модели €",
+                 "модель тоже держит", "sellpending", "`sell:", "модель покупает", "покупок модели",
+                 "модель не торгует", "DayReport", "model.run", "«Книги и проверка»", "1% стоимости модели",
+                 "криптокармана", "не больше 12", "в одном секторе"):
+        assert gone not in text, gone
+
+
+def test_the_readme_says_how_the_week_is_picked_sent_and_resumed():
+    text = " ".join(_text().split())
+    for phrase in ("`weekly_sent_<ГГГГ>-W<нн>`", "`weekly_buys_<ГГГГ>-W<нн>`", "`model_buys_<ГГГГ>-W<нн>`",
+                   "`buy:<тикер>`", "`exit:<id записи журнала>`",
+                   "досылает только недостающее", "по одному сообщению на сигнал",
+                   "строка `buy_signals` пишется после отправки своего сообщения"):
         assert phrase in text, phrase
+
+
+def test_the_readme_says_which_buys_are_picked():
+    text = " ".join(_text().split())
+    for phrase in ("не больше пяти новых", "которых у вас нет", "за последние 30 дней",
+                   "ваш счёт Trading 212 — единственный портфель", "Бот ничего не покупает и не продаёт",
+                   "RESIGNAL_DAYS", "WEEKLY_BUY_LIMIT"):
+        assert phrase in text, phrase
+
+
+def test_the_readme_says_what_the_views_show_now():
+    text = " ".join(_text().split())
+    for phrase in ("«3) Мой портфель»", "«СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ»",
+                   "Таблицы `paper_*` остались в базе как архив"):
+        assert phrase in text, phrase
+    assert "3) Модельный портфель" not in text
 
 
 def test_the_readme_says_which_sell_alerts_have_a_second_line_and_how_it_is_written():
