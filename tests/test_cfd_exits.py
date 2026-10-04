@@ -364,7 +364,8 @@ def test_session_end_bar_still_lets_the_stop_and_targets_act_first():
     assert [(e.kind, e.price) for e in events] == [("stop", 96.0)]
     # a target inside the session-end bar fills at the target; the rest then closes at the close
     events, _ = run_both("E1", [b(100.5, 104.5, 100.2, 103.0)], session_end={0})
-    assert [(e.kind, e.label, e.price) for e in events] == [("tp", "TP1", 104.0), ("session", "SESSION", 103.0)]
+    assert [(e.kind, e.label, e.price) for e in events] == [
+        ("tp", "TP1", 104.0), ("session", "SESSION", 103.0)]
 
 
 def test_close_at_closes_everything_left_at_a_price():
@@ -640,7 +641,8 @@ def test_gold_ladder_closes_what_is_left_at_session_end():
     rows += [(403.5, 404.5, 401.0, 403.8)] * 4            # 12:00..15:00, quiet above the stop
     rows += [(403.8, 404.0, 402.5, 403.0)]                # 16:00: the session ends at this close
     t = gold_sim(rows, "E1")
-    assert [(p.label, p.price, p.fraction) for p in t.parts] == [("TP1", 404.0, 0.25), ("SESSION", 403.0, 0.75)]
+    assert [(p.label, p.price, p.fraction) for p in t.parts] == [
+        ("TP1", 404.0, 0.25), ("SESSION", 403.0, 0.75)]
     assert t.gross_r == pytest.approx(0.25 + 0.75 * 3 / 4)
     assert t.result_r == pytest.approx(0.8125 - 0.03)
 
