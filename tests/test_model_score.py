@@ -907,6 +907,26 @@ def test_score_coin_no_closes():
     assert c.stop_pct is None and c.last_close is None
 
 
+# ------------------------------------------------------------------ score_coin: the 60-day return (amendment R2)
+def test_a_coin_score_carries_its_60_day_return():
+    closes = _grow(150, 0.01)
+    c = ms.score_coin("SOL", closes, bullish_flow=False, caution=None, headlines=None)
+    assert c.ret60 == pytest.approx(closes[-1] / closes[-61] - 1) == pytest.approx(ms.coin_trend(closes)["ret60"])
+    c = ms.score_coin("SOL", _grow(150, -0.01), bullish_flow=False, caution=None, headlines=None)
+    assert c.ret60 < 0                                             # a fraction, negative when the coin fell
+
+
+def test_a_coin_with_too_little_history_has_no_60_day_return():
+    for closes in (_grow(120, 0.01), []):
+        assert ms.score_coin("SOL", closes, bullish_flow=False, caution=None, headlines=None).ret60 is None
+
+
+def test_the_return_is_not_part_of_the_score_and_a_hand_built_score_has_none():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None)
+    assert (c.trend, c.total, c.decision) == (60, 60, ms.BUY)
+    assert ms.CoinScore("SOL", "CRYPTO:SOL", 0, 0, 0, 0, False, False, None, None, ms.WATCH, [], None, None).ret60 is None
+
+
 # ------------------------------------------------------------------ score_coin: the bitcoin regime filter
 BTC_DOWN_REASON = "биткоин ниже 100-дн. средней — альты не покупаем"
 

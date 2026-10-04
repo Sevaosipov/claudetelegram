@@ -588,6 +588,23 @@ def test_all_thirteen_coins_are_scored_and_kept(conn):
     assert sorted(s.coin for s in kept) == sorted(model.COINS)
 
 
+def test_each_coin_score_has_the_60_day_return_of_its_own_closes_and_the_day_keeps_it(conn):
+    flat = _bars([100.0] * 200, YESTERDAY)
+    scored = _score_day(conn, [], {"BTC-USD": _rising(), "SOL-USD": _falling(), "XRP-USD": flat,
+                                   "LINK-USD": _rising(100)}).scored
+    by = {s.coin: s for s in scored if s.kind == "crypto"}
+    assert by["BTC"].ret60 == pytest.approx(1.002 ** 60 - 1)
+    assert by["SOL"].ret60 == pytest.approx(101.0 / 161.0 - 1) and by["XRP"].ret60 == 0.0      # 300 falling by 1 a day
+    assert by["LINK"].ret60 is None and by["DOGE"].ret60 is None                  # under 121 closes, and no prices at all
+    kept = {s.coin: s.ret60 for s in model.cached_scores(conn, TODAY) if s.kind == "crypto"}
+    assert kept == {c: by[c].ret60 for c in model.COINS}
+
+
+def test_a_stock_has_no_return_in_the_kept_scores(conn):
+    _score_day(conn, [_sig("AAA")], {"AAA": _stock_bars()})
+    assert not hasattr(next(s for s in model.cached_scores(conn, TODAY) if s.ticker == "AAA"), "ret60")
+
+
 def test_every_scored_coin_asks_for_its_own_prices_and_headlines(conn):
     fetched, asked = [], []
 

@@ -1,10 +1,11 @@
 """signals_weekly.py: which buy signals the weekly run sends (spec 2026-10-04-remove-model-portfolio.md;
-the coin limit and the high-risk flag: 2026-10-04-more-coins.md).
+the coin limit, which coins and the high-risk flag: 2026-10-04-more-coins.md and its Amendment).
 
 The bot holds no portfolio: it scores every fresh signal and, once a week, tells the user which of
 the scores say BUY. The user's own Trading 212 account is the only portfolio, so a signal is worth
 sending only for a name that is not in it, and only once a month for any one ticker; and of the five
-a week at most two are coins. pick_buys makes that choice from the day's scores; the weekly run
+a week at most two are coins -- BTC and ETH first, then the alts by score and, at equal scores, by their
+60-day return (coin_priority). pick_buys makes that choice from the day's scores; the weekly run
 (bot.py) keeps the picks, sends one message each (weekly.py words them) and writes a buy_signals row
 for every message that went out (record_signal).
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 
 import crypto
 import model
@@ -57,34 +59,54 @@ def recently_signalled(conn, today: dt.date) -> set[str]:
     return {r[0] for r in conn.execute("SELECT DISTINCT ticker FROM buy_signals WHERE sent_at >= ?", (since,))}
 
 
-def pick_buys(conn, today: dt.date, scored: list) -> list:
-    """The scores to signal this week: only a BUY, the highest total first (equal totals as they came),
-    not a name the user holds (held_names), not a ticker signalled in the last RESIGNAL_DAYS days
-    (recently_signalled), at most WEEKLY_BUY_LIMIT -- of which at most WEEKLY_COIN_LIMIT coins, the
-    highest-scoring ones; stocks fill the rest, and a week with fewer stocks has fewer picks rather
-    than a third coin. A coin that is skipped (held, signalled lately) does not use up one of the
-    two. The scores themselves are returned -- StockScore, CoinScore or the kept-score objects
-    model.cached_scores gives. Reads the database, writes nothing."""
-    held, recent = held_names(conn), recently_signalled(conn, today)
-    picks: list = []
-    coins = 0
-    for s in sorted((s for s in scored if s.decision == model_score.BUY), key=lambda s: s.total, reverse=True):
-        key = positions._asset_key(s.ticker, getattr(s, "source", None))
-        if key in held or s.ticker in recent or any(p.ticker == s.ticker for p in picks):
-            continue
-        if s.kind == "crypto":
-            if coins == WEEKLY_COIN_LIMIT:
-                continue
-            coins += 1
-        picks.append(s)
-        if len(picks) == WEEKLY_BUY_LIMIT:
-            break
-    return picks
+def _symbol(s) -> str:
+    return getattr(s, "coin", None) or crypto.symbol_of(s.ticker)
 
 
 def is_alt(s) -> bool:
     """Whether a score is an alt: a coin that is not BTC or ETH (model.MAJOR_COINS)."""
-    return s.kind == "crypto" and (getattr(s, "coin", None) or crypto.symbol_of(s.ticker)) not in model.MAJOR_COINS
+    return s.kind == "crypto" and _symbol(s) not in model.MAJOR_COINS
+
+
+def coin_priority(s) -> tuple:
+    """How a coin ranks for one of the week's WEEKLY_COIN_LIMIT coin places, lowest first: BTC and ETH
+    before every alt (model.MAJOR_COINS, in that order), then the alts by score, equal scores by the
+    coin's 60-day return (`ret60`), the highest first. A score with no return -- under 121 closes, or
+    one kept before the return was -- sorts after every alt that has one; equals stay as they came."""
+    symbol = _symbol(s)
+    if symbol in model.MAJOR_COINS:
+        return (0, model.MAJOR_COINS.index(symbol), 0.0, 0.0)
+    ret60 = getattr(s, "ret60", None)
+    known = isinstance(ret60, (int, float)) and math.isfinite(ret60)
+    return (1, 0, -s.total, -ret60 if known else math.inf)
+
+
+def pick_buys(conn, today: dt.date, scored: list) -> list:
+    """The scores to signal this week: only a BUY, not a name the user holds (held_names), not a ticker
+    signalled in the last RESIGNAL_DAYS days (recently_signalled), at most WEEKLY_BUY_LIMIT -- of which
+    at most WEEKLY_COIN_LIMIT coins.
+
+    The coin places are chosen first, among the coins left (coin_priority): BTC and ETH when they are
+    free and a BUY -- whatever the alts score -- then the alts by score, equal scores by the 60-day
+    return. A coin that is skipped (held, signalled lately, not a BUY) does not use up a place: BTC
+    out, the place goes to ETH, and the other to the best alt. The coins chosen then compete with the
+    stocks for the WEEKLY_BUY_LIMIT places by score as before: the picks come highest score first,
+    equal scores as they came for stocks, stocks before coins and coins by coin_priority; a week with
+    few stocks has fewer picks rather than a third coin. The scores themselves are returned --
+    StockScore, CoinScore or the kept-score objects model.cached_scores gives. Reads the database,
+    writes nothing."""
+    held, recent = held_names(conn), recently_signalled(conn, today)
+    free: list = []
+    seen: set[str] = set()
+    for s in sorted((s for s in scored if s.decision == model_score.BUY), key=lambda s: s.total, reverse=True):
+        key = positions._asset_key(s.ticker, getattr(s, "source", None))
+        if key in held or s.ticker in recent or s.ticker in seen:
+            continue
+        seen.add(s.ticker)
+        free.append(s)
+    stocks = [s for s in free if s.kind != "crypto"]
+    coins = sorted((s for s in free if s.kind == "crypto"), key=coin_priority)[:WEEKLY_COIN_LIMIT]
+    return sorted(stocks + coins, key=lambda s: s.total, reverse=True)[:WEEKLY_BUY_LIMIT]
 
 
 def pick_record(s) -> dict:

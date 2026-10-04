@@ -495,8 +495,19 @@ def _coin_score(coin, total):
         reasons=["выше 100-дн. средней", "покупают крупные игроки"], stop_pct=0.22, last_close=100.0)
 
 
-def test_the_week_keeps_two_coins_at_most_and_marks_the_alts_high_risk(conn):
+def test_the_week_keeps_bitcoin_and_ether_as_the_two_coins_before_higher_scoring_alts(conn):
     scored = [_coin_score(c, 90.0 - i) for i, c in enumerate(["SOL", "BTC", "XRP", "LINK", "ETH"])] + [
+        _score("S0", 66.0), _score("S1", 64.0), _score("S2", 62.0)]
+    bot._pick_week(conn, FRI, _report(scored=scored))
+    kept = db.get_cached_json(conn, PICKS_KEY)
+    assert [p["ticker"] for p in kept] == ["CRYPTO:BTC", "CRYPTO:ETH", "S0", "S1", "S2"]
+    assert [p.get("risk") for p in kept] == [None] * 5                           # no alt among them: no tag
+
+
+def test_the_week_keeps_two_coins_at_most_and_marks_the_alts_high_risk(conn):
+    eth = _coin_score("ETH", 86.0)
+    eth.decision = model_score.WATCH                                              # ether is not a buy: its place goes to an alt
+    scored = [_coin_score(c, 90.0 - i) for i, c in enumerate(["SOL", "BTC", "XRP", "LINK"])] + [eth] + [
         _score("S0", 66.0), _score("S1", 64.0), _score("S2", 62.0)]
     bot._pick_week(conn, FRI, _report(scored=scored))
     kept = db.get_cached_json(conn, PICKS_KEY)

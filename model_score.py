@@ -136,6 +136,9 @@ class CoinScore:
     stop_pct: float | None
     last_close: float | None
     kind: str = "crypto"
+    # The 60-day return as a fraction (coin_trend's ret60), None under 121 closes: it breaks the ties between
+    # alts for the week's coin places (signals_weekly.pick_buys); it is not part of the score.
+    ret60: float | None = None
 
 
 # ---------------------------------------------------------------- small helpers
@@ -473,4 +476,5 @@ def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: s
         total=total, trend_up=trend_up, trend_down=bool(trend and trend["down"]),
         caution=caution, block=block, decision=decision, reasons=reasons,
         stop_pct=stop_distance(closes, "crypto"),
-        last_close=closes[-1] if closes else None)
+        last_close=closes[-1] if closes else None,
+        ret60=trend["ret60"] if trend else None)

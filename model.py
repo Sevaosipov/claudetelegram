@@ -219,7 +219,7 @@ def _kept(s) -> dict:
            "reasons": list(s.reasons), "block": s.block, "stop_pct": s.stop_pct}
     if s.kind == "crypto":
         row.update(company=s.coin, source="CRYPTO", coin=s.coin, trend=s.trend, flows=s.flows,
-                   news=s.news, untradeable=None, t212=None)
+                   news=s.news, ret60=s.ret60, untradeable=None, t212=None)
     else:
         row.update(company=s.company, source=s.source, insiders=s.insiders, triggers=s.triggers,
                    momentum=s.momentum, news=s.news, untradeable=s.untradeable, t212=s.t212)

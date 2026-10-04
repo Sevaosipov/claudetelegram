@@ -200,3 +200,23 @@ rest of the spec stands.
 - Tests: a coin's good headlines score 0 and leave no reason line; a network "upgrade" is not news for a coin and
   +5 for a stock; negatives still subtract and good ones do not offset them; a red flag still blocks; the stock tests
   are untouched; no alt gets an edge from keyword news. The README line and the analyst method say it.
+
+### R2. Which two coins the week signals
+
+- The week's coin places (at most `WEEKLY_COIN_LIMIT = 2`, among the at most 5 picks) go first to BTC and ETH
+  (`model.MAJOR_COINS`, in that order) when they are a BUY and eligible -- whatever the alts score -- then to the alts by
+  total score, equal totals broken by the coin's 60-day return, the highest first. A score with no 60-day return sorts
+  last among equal totals (equals stay as they came).
+- A coin that is not eligible (held, signalled in the last 30 days, not a BUY) does not use up a place: BTC held or
+  signalled lately, and the places go to ETH and then the best alt; both majors out, to the two best alts.
+- The 60-day return is `CoinScore.ret60`, a fraction taken from `coin_trend` (None under 121 closes), and a field of
+  the cached-score JSON (`model_scored_<day>`); a kept score without it (written before it existed) has none.
+  It is not part of the score.
+- The chosen coins then compete with the stocks for the five places by score, as before: the picks are listed highest
+  score first, equal scores as they came for stocks, stocks before coins and coins in their own order. Stocks' ordering
+  is unchanged. A week with fewer stocks has fewer picks, not a third coin. The majors keep the coin places even when
+  five stocks outscore them: an alt does not take their place.
+- Tests: five alt BUYs at the same score give the two with the highest `ret60`; BTC and ETH BUY alongside higher-scoring
+  alts are the two picked; BTC held, or signalled within 30 days, gives its place to ETH and then the best alt; a major
+  that is not a BUY takes no place; a missing `ret60` sorts last; the return reaches the kept scores; the week's kept
+  picks (`weekly_buys_<week>`) follow the same rule. The README and the analyst method say it.
