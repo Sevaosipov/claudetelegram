@@ -71,6 +71,18 @@ def test_insider_sale_after_opening_closes(conn):
     assert alert.trigger == "insider_sell" and "PERSON BOSS" in alert.detail
 
 
+def test_an_insider_sale_alert_is_shown_with_its_date_as_dd_mm_and_stores_the_iso_one(conn):
+    import telegram_notify
+    _strong_journal(conn, "AAA", ["Boss Person"])
+    _open(conn)
+    add_sec_sale(conn, "AAA", "PERSON BOSS", 500_000, date=(TODAY - dt.timedelta(days=1)).isoformat())
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 90.0)
+    assert alert.detail == "PERSON BOSS — Form 4, 2026-09-22"              # the alert's own text is untouched
+    first, second = telegram_notify.format_close_alert(alert, html=False).splitlines()
+    assert first == "🔴 AAA!: продаёт инсайдер — пора продавать: вход 100,00 → сейчас 90,00, итог −10,0%"
+    assert second == "   PERSON BOSS — Form 4, 22.09"
+
+
 def test_sale_before_opening_does_not_count(conn):
     _strong_journal(conn, "AAA", ["Boss Person"])
     add_sec_sale(conn, "AAA", "Boss Person", 500_000, date=(TODAY - dt.timedelta(days=30)).isoformat())
@@ -223,6 +235,17 @@ def test_bafin_sale_after_opening_closes(conn):
     assert alert.trigger == "insider_sell" and "BaFin" in alert.detail
 
 
+def test_a_bafin_sale_is_shown_with_its_date_as_dd_mm(conn):
+    import telegram_notify
+    _strong_journal(conn, "DE0007164600", ["Boss Person"], source="BAFIN")
+    _open(conn, ticker="DE0007164600")
+    add_bafin_txn(conn, "DE0007164600", "Boss Person", 500_000,
+                  date=(TODAY - dt.timedelta(days=1)).strftime("%d.%m.%Y"), txn_type="S")
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=_no_price)
+    assert alert.detail.endswith("BaFin, 2026-09-22")
+    assert telegram_notify.format_close_alert(alert, html=False).splitlines()[-1].endswith("— BaFin, 22.09")
+
+
 def test_bafin_sale_before_opening_does_not_count(conn):
     _strong_journal(conn, "DE0007164600", ["Boss Person"], source="BAFIN")
     add_bafin_txn(conn, "DE0007164600", "Boss Person", 500_000,
@@ -256,6 +279,18 @@ def test_a_caution_confirmed_by_the_price_closes_a_coin(conn):
     assert alert.trigger == "caution" and alert.last_price == 79_900.0
     assert "отток из спот-ETF" in alert.detail and "-6.2% за 7 дн." in alert.detail
     assert "(€900 млн)" in alert.detail
+
+
+def test_a_caution_alert_is_shown_in_russian_numbers_and_stores_the_english_ones(conn):
+    import telegram_notify
+    _open(conn, "CRYPTO:BTC", 84_500.0, days_ago=5)
+    _caution_journal(conn, days_ago=1, value=1.05e9)
+    [alert] = positions.check_exits(conn, today=TODAY, price_fn=lambda t, s=None: 79_900.0,
+                                    trend_fn=_trend(_FALLING))
+    assert "(€1,050 млн)" in alert.detail and "-6.2% за 7 дн." in alert.detail     # untouched
+    first, second = telegram_notify.format_close_alert(alert, html=False).splitlines()
+    assert first == "🔴 BTC!: отток по монете — пора продавать: вход 84 500,00 → сейчас 79 900,00, итог −5,4%"
+    assert second == "   отток из спот-ETF (€1 050 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней"
 
 
 def test_an_unconfirmed_caution_does_not_close(conn):
@@ -596,6 +631,16 @@ def test_an_insider_sale_comes_before_the_trailing_stop(conn):
     add_sec_sale(conn, "AAA", "PERSON BOSS", 500_000, date=(TODAY - dt.timedelta(days=1)).isoformat())
     [alert] = _check(conn, price=50.0, bars=_held_bars([], [100.0]), news=_RED)
     assert alert.trigger == "insider_sell"
+
+
+def test_a_trailing_stop_alert_is_one_line_in_the_message(conn):
+    """Its own text («−10% от максимума 100,00») is still on the alert; the message does not repeat it."""
+    import telegram_notify
+    _open(conn, price=100.0, days_ago=10, stop=0.10)
+    [alert] = _check(conn, price=89.0, bars=_held_bars([], [100.0], days_ago=10))
+    assert alert.trigger == "trailing_stop" and "от максимума" in alert.detail
+    text = telegram_notify.format_close_alert(alert, html=False)
+    assert text == "🔴 AAA!: сработал стоп — пора продавать: вход 100,00 → сейчас 89,00, итог −11,0%"
 
 
 def test_a_confirmed_caution_comes_before_the_stop_and_the_trend(conn):

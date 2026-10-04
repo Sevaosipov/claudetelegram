@@ -185,5 +185,14 @@ example and said "i dont need this info". Binding; where it differs from the spe
    may still carry the peak level text.
 4. **Real positions** (Trading 212 holdings with a quantity) keep the money result as specified.
 5. **The weekly summary** keeps the portfolio value line as specified (that line is the summary's point).
+6. **The second line of a sell alert** for the user's own position (section 3) exists only for `insider_sell` (who
+   sold and when), `caution` (the outflow text) and `news` (the headline). `trailing_stop`, `time`, `dead_money`,
+   `trend_down` and `activist_cut` are one line: the main line says it all, and the user wants signals short.
+   This replaces the rule in section 3 that every alert carries its own detail on a second line, and the sentence
+   in item 3 about the peak level text.
+7. **In that second line** a date is `DD.MM` («Ryan Cohen — Form 4, 01.10») and a number is in the Russian format:
+   a comma decimal, a space between thousands, the real minus («−6,2%», «€1 050 млн»). It is done when the message
+   is built; the stored data and the alert's logic (`positions.py`) are unchanged. A news headline is somebody
+   else's text and is quoted as it is.
 
 Tests and the README examples follow the amendment.

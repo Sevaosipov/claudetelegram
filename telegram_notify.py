@@ -673,6 +673,49 @@ def _signal_name(pos) -> str:
     return positions.display_name(pos)
 
 
+# ---- the detail line of a sell alert
+# positions.py words an alert's detail for the log and the menu -- an ISO date, an English decimal point,
+# a comma between thousands. The message shows it the Russian way; the alert itself is not changed.
+_NUMBER = re.compile(r"(?<![\w.,])([-+−])?(\d{1,3}(?:,\d{3})+(?!\d)|\d+)(?:\.(\d+))?(?!\.?\d)")
+_ISO_DATE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+
+
+def _ru_number(m) -> str:
+    sign, whole, fraction = m.groups()
+    text = whole.replace(",", " ") + (f",{fraction}" if fraction else "")
+    return ("−" if sign == "-" else sign or "") + text
+
+
+def _short_date(m) -> str:
+    try:
+        return f"{dt.date.fromisoformat(m.group()):%d.%m}"
+    except ValueError:                  # 2026-13-45 is no date: left as it is
+        return m.group()
+
+
+def ru_text(text: str) -> str:
+    """`text` as the Russian message has its numbers and dates: a comma decimal, a space between
+    thousands, the real minus («-6.2%» is «−6,2%», «€1,050 млн» is «€1 050 млн»), and an ISO date
+    as DD.MM («2026-10-01» is «01.10»). A comma is a thousands separator only before exactly three
+    digits (a number already written the Russian way, «9,0%», stays); a date that is not an ISO
+    date is left alone. Numbers go first, so that the DD.MM it writes is not read as a decimal."""
+    return _ISO_DATE.sub(_short_date, _NUMBER.sub(_ru_number, text))
+
+
+# The triggers whose alert has a second line: who sold and when, what the outflow was, which headline.
+# For every other trigger the main line says it all.
+_DETAIL_TRIGGERS = ("insider_sell", "caution", "news")
+
+
+def alert_detail(alert) -> str | None:
+    """The second line of a sell alert, or None. Only an insider's sale, a coin's caution and bad
+    news have one -- the alert's own detail (positions.CloseAlert.detail), with its dates and numbers in
+    the Russian format (ru_text); a news headline is somebody else's text and is quoted as it is."""
+    if alert.trigger not in _DETAIL_TRIGGERS or not alert.detail:
+        return None
+    return alert.detail if alert.trigger == "news" else ru_text(alert.detail)
+
+
 def format_close_alert(alert, *, html: bool = True) -> str:
     """The sell alert on a position of the user's (/bought or the Trading 212 account), one message:
 
@@ -681,8 +724,9 @@ def format_close_alert(alert, *, html: bool = True) -> str:
 
     The dot is green when the result is zero or more and red when it is a loss or there is no
     price to tell it by (then «пора продавать: вход X» stands alone). A position with a quantity
-    gets its money result first (position_result), any other the percent. The alert's own detail
-    -- the insider and the date, the headline, the stop level -- is the second line, plain."""
+    gets its money result first (position_result), any other the percent. A second line, plain,
+    only for an insider's sale (who and when), a coin's caution (the outflow) and bad news (the
+    headline): see alert_detail. Every other alert is the one line."""
     pos = alert.position
     event = CLOSE_EVENT.get(alert.trigger, alert.trigger)
     details = f"пора продавать: вход {_price(pos.entry_price)}"
@@ -693,7 +737,8 @@ def format_close_alert(alert, *, html: bool = True) -> str:
     dot = DOT_GREEN if shown and shown[2] else DOT_RED
     line = signal_line(dot, _signal_name(pos), event, details, html=html,
                        result=shown[0] if shown else None, extra=shown[1] if shown else None)
-    return f"{line}\n   {_e(alert.detail, html)}" if alert.detail else line
+    detail = alert_detail(alert)
+    return f"{line}\n   {_e(detail, html)}" if detail else line
 
 
 def format_positions(positions: list, price_fn) -> str:

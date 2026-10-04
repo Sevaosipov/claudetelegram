@@ -59,7 +59,8 @@ def test_the_readme_examples_are_what_the_code_renders(conn):
     sale = dict(id=1, ticker="GME", close_reason="стоп: −10% от максимума", closed_date="2026-10-07",
                 cost_eur=8000.0, proceeds_eur=7216.0)
     waiting = dict(position_id=pid, ticker="GME", reason="стоп: −10% от максимума")
-    alert = positions.CloseAlert(_position(), "trailing_stop", "−10% от максимума 25.80", 20.70)
+    stop = positions.CloseAlert(_position(), "trailing_stop", "−10% от максимума 25.80", 20.70)
+    insider = positions.CloseAlert(_position(), "insider_sell", "Ryan Cohen — Form 4, 2026-10-01", 20.70)
     holding = ta.T212Position("GME_US_EQ", None, "US36467W1099", "USD", 10.0, 23.10, 24.05,
                               "2026-09-28T14:03:11.000+02:00", 207.3, 199.0, 8.30, "EUR")
     state = dict(close=1.2000, ma=1.1500, diff=0.35, atr=0.008)
@@ -68,7 +69,8 @@ def test_the_readme_examples_are_what_the_code_renders(conn):
         paper_report._sale_text(sale),
         paper_report._pending_sale_text(conn, waiting),
         paper_report._exit_text("XYZ", ["Anna Lee", "Bo Chen"]),
-        tn.format_close_alert(alert),
+        tn.format_close_alert(stop),
+        tn.format_close_alert(insider),
         ta._new_text("GME", holding, "стоп, продажи инсайдеров, новости"),
         ta._sold_text("GME", _position(), 24.05),
         tn.format_carry_signal("FLAT", "LONG", state, reason="entry", level=1.152),
@@ -103,3 +105,12 @@ def test_the_readme_says_how_the_week_is_sent_and_resumed():
                    "досылает только недостающее", "Месячный отчёт", "сразу после недельной сводки",
                    "по одному сообщению на сигнал"):
         assert phrase in text, phrase
+
+
+def test_the_readme_says_which_sell_alerts_have_a_second_line_and_how_it_is_written():
+    text = " ".join(_section().split())
+    for phrase in ("Вторая строка — только у «продаёт инсайдер» (кто и когда), «отток по монете» (текст оттока) "
+                   "и «плохие новости» (заголовок)", "остальные сигналы — одна строка",
+                   "дата — `ДД.ММ`", "запятая в десятичных", "заголовок новости — как есть"):
+        assert phrase in text, phrase
+    assert "уровень стопа" not in text and "−10% от максимума 25.80" not in text     # the stop level is not repeated

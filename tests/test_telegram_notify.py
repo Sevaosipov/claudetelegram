@@ -411,14 +411,89 @@ def _holding_pos(**overrides):
     ("news", "плохие новости"), ("activist_cut", "активист сократил долю")])
 def test_every_close_trigger_has_its_own_event(trigger, event):
     text = tn.format_close_alert(positions.CloseAlert(_pos(), trigger, "detail", 90.0), html=False)
-    assert text == f"🔴 AAA!: {event} — пора продавать: вход 100,00 → сейчас 90,00, итог −10,0%\n   detail"
+    assert text.splitlines()[0] == f"🔴 AAA!: {event} — пора продавать: вход 100,00 → сейчас 90,00, итог −10,0%"
 
 
-def test_the_close_alert_is_one_line_with_its_own_detail_indented_under_it():
+# The second line is the alert's own detail, and only three triggers have one worth the room: who sold
+# and when, what the outflow was, which headline. For the rest the main line says it all.
+_STOP_TEXT = "−10% от максимума 25.80"
+
+
+@pytest.mark.parametrize("trigger", ["trailing_stop", "time", "dead_money", "trend_down", "activist_cut"])
+def test_a_trigger_whose_main_line_says_it_all_is_one_line_whatever_detail_the_alert_has(trigger):
+    detail = f"{_STOP_TEXT}; 365 дн. в позиции; доля 9,0% → 6,0%"
+    for html in (True, False):
+        text = tn.format_close_alert(positions.CloseAlert(_pos(), trigger, detail, 90.0), html=html)
+        assert "\n" not in text
+        assert not any(gone in text for gone in ("максимума", "25", "365", "доля", "9,0"))
+
+
+@pytest.mark.parametrize("trigger, detail, shown", [
+    ("insider_sell", "Ryan Cohen — Form 4, 2026-10-01", "Ryan Cohen — Form 4, 01.10"),
+    ("caution", "отток из спот-ETF (€900 млн); цена подтверждает: -6.2% за 7 дн., ниже 20-дн. средней",
+     "отток из спот-ETF (€900 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней"),
+    ("news", "новости: SEC investigation into the CFO", "новости: SEC investigation into the CFO")])
+def test_an_insider_sale_a_caution_and_bad_news_carry_one_detail_line_indented_by_three_spaces(
+        trigger, detail, shown):
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), trigger, detail, 90.0), html=False)
+    first, second = text.split("\n")                                       # two lines, no more
+    assert first.startswith("🔴 AAA!: ") and second == f"   {shown}"
+
+
+@pytest.mark.parametrize("trigger", ["insider_sell", "caution", "news"])
+def test_a_detail_that_is_empty_is_no_second_line(trigger):
+    for detail in ("", None):
+        assert "\n" not in tn.format_close_alert(positions.CloseAlert(_pos(), trigger, detail, 90.0))
+
+
+@pytest.mark.parametrize("label", ["Form 4", "Form 144", "Oslo", "FI", "BaFin"])
+def test_an_insider_sale_says_who_and_when_with_the_date_as_dd_mm(label):
+    detail = f"Ann Lee — {label}, 2026-09-30"
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), "insider_sell", detail, 90.0), html=False)
+    assert text.splitlines()[1] == f"   Ann Lee — {label}, 30.09"
+
+
+@pytest.mark.parametrize("odd", ["Ann Lee — Form 144, 09/30/2026", "Ann Lee — Oslo, 30.09.2026",
+                                 "Ann Lee — Form 4, 2026-13-45", "Ann Lee — Form 4, 2026-9-3",
+                                 "Ann Lee — Form 4, 12026-09-301"])
+def test_a_date_that_is_not_an_iso_date_is_left_as_it_is(odd):
+    text = tn.format_close_alert(positions.CloseAlert(_pos(), "insider_sell", odd, 90.0), html=False)
+    assert text.splitlines()[1] == f"   {odd}"
+
+
+@pytest.mark.parametrize("text, russian", [
+    ("-6.2% за 7 дн.", "−6,2% за 7 дн."), ("+3.4%", "+3,4%"), ("(−6.2%)", "(−6,2%)"),
+    ("стоп 25.80", "стоп 25,80"), ("0.5", "0,5"), ("12", "12"),
+    ("(€1,050 млн)", "(€1 050 млн)"), ("€900,000,000", "€900 000 000"), ("1,050.5", "1 050,5"),
+    ("(€900 млн)", "(€900 млн)"), ("9,0% → 6,0%", "9,0% → 6,0%"), ("9,05", "9,05"),     # Russian already
+    ("ниже 20-дн. средней", "ниже 20-дн. средней"), ("Form 144", "Form 144"), ("1.2.3", "1.2.3"),
+    ("x-6.2", "x-6,2"),                                                              # a hyphen is not a minus
+    ("Ryan Cohen — Form 4, 2026-10-01", "Ryan Cohen — Form 4, 01.10"),              # a date is not a decimal
+    ("с 2026-10-01 по 2026-10-05: -6.2%", "с 01.10 по 05.10: −6,2%")])
+def test_the_detail_line_is_in_the_russian_format(text, russian):
+    assert tn.ru_text(text) == russian
+
+
+def test_the_numbers_of_a_caution_are_russian_at_the_message_level_only():
+    detail = "монеты заводят на биржи (€1,050 млн); цена подтверждает: -6.2% за 7 дн., ниже 20-дн. средней"
+    alert = positions.CloseAlert(_pos(ticker="CRYPTO:BTC", source="CRYPTO"), "caution", detail, 90.0)
+    assert tn.format_close_alert(alert, html=False).splitlines()[1] == (
+        "   монеты заводят на биржи (€1 050 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней")
+    assert alert.detail == detail                                           # the alert itself is untouched
+
+
+def test_a_news_headline_is_quoted_as_it_is():
+    """A headline is somebody else's text: its numbers and dates are not ours to reformat."""
+    headline = "новости: Probe of $2.5 million, 1,050 filings and 2026-10-01 hearing"
+    alert = positions.CloseAlert(_pos(), "news", headline, 90.0)
+    assert tn.format_close_alert(alert, html=False).splitlines()[1] == f"   {headline}"
+
+
+def test_the_insider_alert_is_one_line_with_who_and_when_indented_under_it():
     alert = positions.CloseAlert(_pos(), "insider_sell", "Ann Lee — Form 4, 2026-09-30", 90.0)
     text = tn.format_close_alert(alert)
     assert text == ("🔴 <b>AAA!</b>: продаёт инсайдер — пора продавать: вход 100,00 → сейчас 90,00, "
-                    "итог <b>−10,0%</b>\n   Ann Lee — Form 4, 2026-09-30")
+                    "итог <b>−10,0%</b>\n   Ann Lee — Form 4, 30.09")
     assert "🚪" not in text and "Ваши позиции" not in text                  # the old layout is gone
     assert tn.format_close_alert(positions.CloseAlert(_pos(), "time", "", 90.0)).count("\n") == 0
 
@@ -427,7 +502,7 @@ def test_a_holding_with_a_quantity_gets_the_money_result_first_in_its_own_curren
     text = tn.format_close_alert(positions.CloseAlert(_holding_pos(), "trailing_stop",
                                                       "−10% от максимума 25.80", 20.70))
     assert text == ("🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, "
-                    "итог <b>−$24,00</b> (−10,4%)\n   −10% от максимума 25.80")
+                    "итог <b>−$24,00</b> (−10,4%)")                         # the stop level is not repeated
     eur = _holding_pos(ticker="DE0007164600", source="T212", t212_ticker="SAPd_EQ", currency="EUR",
                        entry_price=120.0, quantity=5.0)
     assert tn.format_close_alert(positions.CloseAlert(eur, "time", "d", 108.0), html=False).splitlines()[0] == (
@@ -450,7 +525,9 @@ def test_a_gain_is_a_green_dot_and_a_loss_a_red_one():
 
 def test_an_alert_without_a_price_gives_the_entry_alone_and_a_red_dot():
     text = tn.format_close_alert(positions.CloseAlert(_pos(), "time", "400 дн. в позиции", None))
-    assert text == "🔴 <b>AAA!</b>: год в позиции — пора продавать: вход 100,00\n   400 дн. в позиции"
+    assert text == "🔴 <b>AAA!</b>: год в позиции — пора продавать: вход 100,00"
+    news = tn.format_close_alert(positions.CloseAlert(_pos(), "news", "новости: fraud", None), html=False)
+    assert news == "🔴 AAA!: плохие новости — пора продавать: вход 100,00\n   новости: fraud"
     assert "итог" not in tn.format_close_alert(positions.CloseAlert(_holding_pos(), "time", "d", None))
 
 
@@ -462,11 +539,11 @@ def test_a_holding_in_a_currency_with_no_sign_of_its_own_is_shown_with_its_code(
 
 def test_caution_close_alert_reads_as_such_and_names_the_coin_by_its_symbol():
     pos = _pos(ticker="CRYPTO:BTC", source="CRYPTO", opened_at="2026-09-20", entry_price=84_500.0)
-    alert = positions.CloseAlert(pos, "caution", "отток из спот-ETF (€900,000,000); цена "
+    alert = positions.CloseAlert(pos, "caution", "отток из спот-ETF (€900 млн); цена "
                                  "подтверждает: -6.2% за 7 дн., ниже 20-дн. средней", 79_900.0)
     first, second = tn.format_close_alert(alert, html=False).splitlines()
     assert first == "🔴 BTC!: отток по монете — пора продавать: вход 84 500,00 → сейчас 79 900,00, итог −5,4%"
-    assert second == "   отток из спот-ETF (€900,000,000); цена подтверждает: -6.2% за 7 дн., ниже 20-дн. средней"
+    assert second == "   отток из спот-ETF (€900 млн); цена подтверждает: −6,2% за 7 дн., ниже 20-дн. средней"
 
 
 def test_a_close_alert_names_a_trading_212_holding_by_its_symbol_not_its_isin():
@@ -488,6 +565,9 @@ def test_a_close_alert_escapes_what_it_shows_and_uses_only_bold():
     plain = tn.format_close_alert(positions.CloseAlert(pos, "news", "x & y", 90.0), html=False)
     assert plain == ("🔴 A&B<i>!: плохие новости — пора продавать: вход 100,00 → сейчас 90,00, итог −10,0%\n"
                      "   x & y")                                               # nothing escaped, no tags added
+    sale = tn.format_close_alert(positions.CloseAlert(pos, "insider_sell", "A<i> & Co — Form 4, 2026-10-01", 90.0))
+    assert sale.endswith("\n   A&lt;i&gt; &amp; Co — Form 4, 01.10")
+    assert set(_TAGS.findall(sale)) == {"<b>", "</b>"}
 
 
 def test_a_trigger_nobody_named_is_shown_as_it_is():
