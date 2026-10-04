@@ -219,6 +219,13 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
+def test_the_readme_says_the_menu_names_the_bitcoin_gate_and_units_are_plain():
+    text = " ".join(_text().split())
+    for phrase in ("у монеты в наблюдении — причина фильтра биткоина", "«биткоин ниже 100-дн. средней — альты не покупаем»",
+                   "Количество монет в логе, в `purchases_log.csv` и в досье — обычным числом, без «1.25e+06»"):
+        assert phrase in text, phrase
+
+
 def test_the_readme_says_edgar_down_stops_the_search_after_three_failed_queries():
     text = " ".join(_text().split())
     for phrase in ("после трёх неудавшихся запросов подряд (`MAX_CONSECUTIVE_FAILURES`) поиск останавливается и источник "

@@ -90,6 +90,13 @@ def symbol_for_text(text: str | None) -> str | None:
     return None
 
 
+def units_text(units: float) -> str:
+    """A coin count as a message states it: whole coins with thousands separators from 1,000
+    ("1,250,000", "27,562"), up to four significant digits under that ("12.5", "0.4321") -- never
+    "1.25e+06". The one format of the log line, the purchases CSV and the coin dossier."""
+    return f"{units:,.0f}" if units >= 1000 else f"{units:,.4g}"
+
+
 def usd_price(x: float) -> str:
     """A coin's price as a message states it: whole dollars from $100 ("$80,000"), cents above ten
     cents ("$182.40", "$2.45", "$0.24"), four decimals under that ("$0.0520")."""

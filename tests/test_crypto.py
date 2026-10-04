@@ -1015,6 +1015,46 @@ def test_a_sale_of_a_cheap_coin_names_its_average_price_in_cents(conn):
     assert btc.details == ["средняя цена $80,000 за BTC"]
 
 
+# ---- V7b: one plain format for units, in the log line, the purchases CSV and the dossier
+@pytest.mark.parametrize("units,text", [
+    (1_250_000, "1,250,000"), (27_562, "27,562"), (1355, "1,355"), (1000, "1,000"), (999, "999"), (12.5, "12.5"),
+    (0.4321, "0.4321"), (500_000_000, "500,000,000"), (1_500_000_000, "1,500,000,000"), (950.0, "950")])
+def test_units_are_a_plain_number_never_scientific(units, text):
+    assert crypto.units_text(units) == text and "e" not in crypto.units_text(units)
+
+
+def test_the_purchases_csv_states_units_in_the_same_plain_format(conn, tmp_path, sleeps, monkeypatch):
+    import csv
+
+    import passes
+    doc = ("Acme purchased 1,250,000 SOL at an average price of $182.40. Acme purchased 27,562 ETH at an average price "
+           "of $3,100. Acme purchased 12.5 BTC at an average price of $79,475. Acme acquired 500,000,000 DOGE at an "
+           "average price of $0.24.")
+    session = _Efts({ct.QUERIES["SOL"]: _hits(_HIT_SOL)}, docs={ct.doc_url(_HIT_SOL): doc})
+    monkeypatch.setattr(ct, "new_session", lambda: session)
+    monkeypatch.setattr("cik_map.CikMap", lambda: None)
+    monkeypatch.setattr(passes, "CSV_PATH", tmp_path / "purchases_log.csv")
+    assert passes.run_crypto_treasury_pass(conn, _Args()) == 4
+    rows = {r["issuer_or_asset"]: r["amount"] for r in csv.DictReader((tmp_path / "purchases_log.csv").open(encoding="utf-8"))}
+    assert rows["SOL"] == "1,250,000 SOL ($228,000,000)"
+    assert rows["ETH"].startswith("27,562 ETH") and rows["BTC"].startswith("12.5 BTC")
+    assert rows["DOGE"] == "500,000,000 DOGE ($120,000,000)"
+    assert not any("e+" in amount for amount in rows.values())
+
+
+def test_the_dossier_states_units_in_the_same_plain_format(conn):
+    import crypto_research
+    db.save_crypto_treasury_txn(conn, ct.TreasuryTxn("acc", "DeFi Dev", "DFDV", "1", "SOL", "P", 1_250_000, 182.40, None,
+                                                     (TODAY - dt.timedelta(days=2)).isoformat(), "8-K", "u"))
+    db.save_crypto_treasury_txn(conn, ct.TreasuryTxn("acc2", "Acme", "ACME", "2", "SOL", "S", 12.5, None, None,
+                                                     (TODAY - dt.timedelta(days=1)).isoformat(), "8-K", "u"))
+    lines = crypto_research._bot_lines({"treasury": crypto_research._treasury(conn, "SOL"), "ticker": "SOL", "etf_flows": [],
+                                        "political": [], "onchain": []})
+    assert any("DeFi Dev (DFDV) купила 1,250,000 SOL" in line for line in lines)
+    assert any("Acme (ACME) продала 12.5 SOL" in line for line in lines)
+    assert not any("e+" in line for line in lines)
+
+
 def test_the_treasury_log_line_reads_for_an_alt_as_it_does_for_bitcoin():
     def line(coin, units, avg):
         return telegram_notify.format_treasury_line(

@@ -12,6 +12,7 @@ import requests
 
 import bafin
 import cluster
+import crypto
 import crypto_etf
 import crypto_onchain
 import crypto_treasury
@@ -477,7 +478,7 @@ def run_crypto_treasury_pass(conn, args) -> int:
                     "role": "company treasury" + ("" if t.side == "P" else " (sale)"),
                     "issuer_or_asset": t.coin,
                     "ticker": t.ticker or "",
-                    "amount": f"{t.units:,.4g} {t.coin}"
+                    "amount": f"{crypto.units_text(t.units)} {t.coin}"
                               + (f" (${t.value_usd:,.0f})" if t.value_usd else ""),
                     "url": t.source_url,
                 })

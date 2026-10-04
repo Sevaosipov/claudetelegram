@@ -327,3 +327,11 @@ query failed still raises (the earlier rule, which now matters only for fewer th
 dropped with the failed source; the next run searches the window again (a document is marked seen only once read). This refines the
 earlier rule "failed only when every query failed". Tests: three failures in a row stop after nine requests; alternating failures go
 on to the end; two failures then an answer start the count again; the daily pass reports the source failed after three coins.
+
+### V7. Small: the menu names the bitcoin gate; units are plain numbers
+
+- The menu's scored line (`telegram_notify._score_line`, so the menu's «Сигналы» and every other `format_scored`) shows, for a WATCH
+  coin whose reasons carry the bitcoin filter, that reason as its why -- «биткоин ниже 100-дн. средней — альты не покупаем» or «нет данных по
+  биткоину — альты не покупаем» -- like a block's reason; a block's own reason wins, and a coin watched for any other reason is unchanged.
+- One format for a coin count -- `crypto.units_text`: whole coins with thousands separators from 1,000, four significant digits under that,
+  never "1.25e+06" -- in the log line, the purchases CSV (`purchases_log.csv`, column `amount`) and the coin dossier (`crypto_research`).
