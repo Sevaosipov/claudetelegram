@@ -219,6 +219,13 @@ def test_the_readme_says_how_the_alts_are_held_back():
     assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
+def test_the_readme_says_an_unpriced_sale_is_valued_at_the_current_price_before_the_floor():
+    text = " ".join(_text().split())
+    for phrase in ("Продажа без суммы", "количество × текущая цена монеты", "должна пройти тот же порог",
+                   "если цены нет — продажа отбрасывается"):
+        assert phrase in text, phrase
+
+
 def test_the_readme_says_one_bad_price_does_not_cancel_the_week():
     text = " ".join(_text().split())
     for phrase in ("Одна плохая цена не отменяет неделю", "закрытие, которое не положительное число (0, отрицательное, пустое), "

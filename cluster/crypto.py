@@ -11,7 +11,9 @@ links them to each other and to congressional buys of the same coin for free.
 
 Like the other finders these are pure SQL plus fx: coin values that need a live price
 (an on-chain move is measured in coins, not money) are filled in by enrich_signals,
-the one network step.
+the one network step. The one exception is a company sale no filing priced: whether it is
+big enough to be a caution depends on its value, so _sale_signals values it at the coin's
+current price (crypto.price_usd, which reads its hour cache first) before the floor.
 """
 
 from __future__ import annotations
@@ -201,21 +203,30 @@ def _sale_signals(conn, rows: list[dict], today: dt.date,
         if r["side"] != "S" or r["filed"] < since:
             continue
         g = grouped.setdefault((r["acc"], r["coin"]), {"r": r, "units": 0.0, "usd": 0.0,
-                                                       "known": True, "avgs": []})
+                                                       "unpriced_units": 0.0, "avgs": []})
         g["units"] += r["units"]
         if r["usd"] is None:
-            g["known"] = False
+            g["unpriced_units"] += r["units"]
         else:
             g["usd"] += r["usd"]
         if r["avg"]:
             g["avgs"].append(r["avg"])
+    spot: dict[str, float | None] = {}      # a coin's current price, asked once per call
     signals = []
     for (acc, coin), g in grouped.items():
         r = g["r"]
-        # Unknown is not small: a sale with no stated value is kept and valued at
-        # spot by enrich_signals.
-        value_eur = fx.to_eur(g["usd"], "USD", conn) if g["known"] else None
-        if value_eur is not None and value_eur < coin_bar(TREASURY_SALE_MIN_EUR, coin):
+        # A sale no filing put a price on is valued here, before the floor, at its units x the coin's
+        # current USD price (crypto.price_usd reads its hour cache before it asks CoinGecko): it
+        # must clear the coin's sale floor like any other. With no price to be had it is dropped.
+        usd = g["usd"]
+        if g["unpriced_units"]:
+            if coin not in spot:
+                spot[coin] = crypto.price_usd(conn, coin)
+            if not spot[coin]:
+                continue
+            usd += g["unpriced_units"] * spot[coin]
+        value_eur = fx.to_eur(usd, "USD", conn)
+        if value_eur < coin_bar(TREASURY_SALE_MIN_EUR, coin):
             continue
         keys = [f"{acc}|{coin}|S"]
         if not ignore_alert_state and not _is_new(conn, "CRYPTO_TREASURY", keys):

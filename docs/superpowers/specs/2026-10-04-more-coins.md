@@ -286,3 +286,15 @@ no history (`Prices.bars`). Tests: a 0.0 / negative / NaN / missing close (at th
 dropped and the coin scores normally; an all-bad series is a coin with no history; a coin whose prices, headlines or caution
 check raise is left out and logged while the others and `complete` are unaffected; bitcoin's own failure leaves it out and the
 alts wait; the single-coin look returns nothing instead of raising.
+
+### V3. A company sale without a price is valued before the floor
+
+In the sale-caution rule (`cluster/crypto._sale_signals`), a sale row with no USD amount -- no total, no average price, and no
+earlier filing of the coin that stated one -- is valued at units x the coin's current USD price (the existing helper
+`crypto.price_usd`, which reads its hour cache before it asks CoinGecko; a seam in the tests), converted to EUR, and must clear the
+per-coin sale floor (EUR 10M for BTC and ETH, 5M for the alts) like any other sale. A filing with priced and unpriced rows takes
+the stated amounts as they are and the unpriced units at spot. With no price available the sale is dropped. This replaces the
+earlier rule "unknown is not small: kept and valued later by `enrich_signals`" for sales, for every coin: the signal's
+`total_value` is now always known. The price is asked once per coin per call, and never for a priced sale. Tests: "sold 400 LINK"
+unpriced gives no caution; an unpriced alt sale worth EUR 6M gives one (valued), EUR 4M none; no price available drops the sale;
+BTC and ETH must clear EUR 10M; a mixed filing; the real helper's cache path; the offline guard drops instead of raising.

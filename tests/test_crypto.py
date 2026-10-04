@@ -773,11 +773,98 @@ def test_the_bitcoin_and_ether_sale_floor_is_still_10m(conn, coin):
     assert sig.ticker == f"CRYPTO:{coin}" and sig.window_end == _days_ago(2)
 
 
-def test_an_alt_sale_with_no_stated_value_is_kept_and_valued_later(conn):
-    """Unknown is not small, as for bitcoin: no price, no total -- the sale stays, to be valued at spot."""
-    _add_treasury(conn, 5_000_000, avg=None, side="S", filed=_days_ago(3), coin="DOGE")
+# ---- V3: a sale with no price is valued at the coin's current price before the floor
+@pytest.fixture
+def spot(monkeypatch):
+    """The price helper (crypto.price_usd) as a seam: `spot.prices` is what it answers, `spot.asked` what it was asked."""
+    import types as _types
+    run = _types.SimpleNamespace(prices={}, asked=[])
+
+    def price_usd(conn, symbol, session=None):
+        run.asked.append(symbol)
+        return run.prices.get(symbol)
+    monkeypatch.setattr(crypto, "price_usd", price_usd)
+    return run
+
+
+def _unpriced_sale(conn, coin, units, acc=None, filed=None):
+    _add_treasury(conn, units, avg=None, side="S", filed=filed or _days_ago(3), coin=coin, acc=acc or f"u-{coin}-{units}")
+
+
+def test_an_unpriced_sale_of_400_link_is_no_caution(conn, spot):
+    spot.prices["LINK"] = 20.0                                    # $8,000
+    _unpriced_sale(conn, "LINK", 400)
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+    assert spot.asked == ["LINK"]
+
+
+def test_an_unpriced_alt_sale_worth_6m_euro_is_a_caution_and_is_valued(conn, spot):
+    spot.prices["LINK"] = 20.0
+    _unpriced_sale(conn, "LINK", 348_000)                         # $6.96m = EUR 6m at the fixture's 1.16
     [sig] = cluster.find_treasury_signals(conn, today=TODAY)
-    assert sig.ticker == "CRYPTO:DOGE" and sig.total_value is None and sig.units == 5_000_000
+    assert not sig.bullish and sig.ticker == "CRYPTO:LINK" and sig.units == 348_000
+    assert sig.total_value == pytest.approx(6e6)                  # valued here, not left for enrich_signals
+
+
+def test_an_unpriced_alt_sale_worth_4m_euro_is_not(conn, spot):
+    spot.prices["LINK"] = 20.0
+    _unpriced_sale(conn, "LINK", 232_000)                         # EUR 4m: under the alt floor of 5m
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_an_unpriced_sale_with_no_price_available_is_dropped(conn, spot):
+    _unpriced_sale(conn, "DOGE", 5_000_000_000)                   # a fortune in doge -- but nobody can say what it is worth
+    assert cluster.find_treasury_signals(conn, today=TODAY) == [] and spot.asked == ["DOGE"]
+
+
+@pytest.mark.parametrize("coin,units,caution", [("BTC", 100, False), ("BTC", 200, True), ("ETH", 3_000, False),
+                                                ("ETH", 5_000, True)])
+def test_an_unpriced_bitcoin_or_ether_sale_must_clear_its_own_floor_of_10m(conn, spot, coin, units, caution):
+    spot.prices.update(BTC=80_000.0, ETH=3_000.0)                 # 100 BTC = EUR 6.9m, 200 = 13.8m; 3,000 ETH = 7.8m, 5,000 = 12.9m
+    _unpriced_sale(conn, coin, units)
+    assert [s.ticker for s in cluster.find_treasury_signals(conn, today=TODAY)] == ([f"CRYPTO:{coin}"] if caution else [])
+
+
+def test_a_priced_sale_never_asks_for_the_price(conn, spot):
+    _add_treasury(conn, 200, side="S", filed=_days_ago(3))        # $16m at its own stated $80,000
+    assert len(cluster.find_treasury_signals(conn, today=TODAY)) == 1 and spot.asked == []
+
+
+def test_a_filing_with_a_priced_and_an_unpriced_row_values_the_unpriced_one_at_spot(conn, spot):
+    spot.prices["LINK"] = 20.0
+    _add_treasury(conn, 100, avg=None, total=1_800.0, side="S", filed=_days_ago(3), coin="LINK", acc="mixed")   # its own total
+    _add_treasury(conn, 290_000, avg=None, side="S", filed=_days_ago(3), coin="LINK", acc="mixed")              # $5.8m at spot
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.units == 290_100 and sig.total_value == pytest.approx((1_800 + 5_800_000) / 1.16)
+
+
+def test_a_price_some_filing_stated_for_the_coin_is_still_used_before_the_current_price(conn, spot):
+    """_treasury_rows' own fallback (the latest average price any filing stated) stays: the price helper is for sales no
+    filing could put a value on."""
+    spot.prices["LINK"] = 1_000.0                                  # would make it huge -- and must not be asked
+    _add_treasury(conn, 10, avg=18.0, side="P", filed=_days_ago(40), coin="LINK", acc="p")       # a purchase that states $18
+    _unpriced_sale(conn, "LINK", 232_000)                          # 232,000 x $18 = $4.2m = EUR 3.6m: under the floor
+    assert cluster.find_treasury_signals(conn, today=TODAY) == [] and spot.asked == []
+
+
+def test_the_price_of_a_coin_is_asked_once_however_many_sales_are_unpriced(conn, spot):
+    spot.prices["LINK"] = 20.0
+    _unpriced_sale(conn, "LINK", 400, acc="a")
+    _unpriced_sale(conn, "LINK", 500, acc="b")
+    _unpriced_sale(conn, "LINK", 348_000, acc="c")
+    assert [s.ticker for s in cluster.find_treasury_signals(conn, today=TODAY)] == ["CRYPTO:LINK"]
+    assert spot.asked == ["LINK"]
+
+
+def test_the_real_price_helper_reads_its_hour_cache_so_no_network_is_needed(conn):
+    db.save_cached_value(conn, "crypto_price_usd_LINK", 20.0)
+    _unpriced_sale(conn, "LINK", 348_000)
+    assert [s.ticker for s in cluster.find_treasury_signals(conn, today=TODAY)] == ["CRYPTO:LINK"]
+
+
+def test_with_no_cache_and_no_network_an_unpriced_sale_is_dropped_not_raised(conn):
+    _unpriced_sale(conn, "LINK", 348_000)                          # the offline guard refuses the CoinGecko call
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
 
 
 def test_a_sale_of_a_cheap_coin_names_its_average_price_in_cents(conn):
