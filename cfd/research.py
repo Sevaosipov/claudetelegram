@@ -645,6 +645,9 @@ def main(argv: Sequence[str] | None = None, *, fetch: data.Fetch | None = None,
         enabled = ", ".join(gate.enabled_classes) or "none"
         print(f"{setup}: exit {outcome.decision.chosen[setup]}, gate {gate.summary()}, "
               f"enabled: {enabled}")
+    missing = [f"{c.symbol} ({c.interval})" for c in outcome.results.coverage if c.bars == 0]
+    if missing:      # the verdict above rests on a partial universe: re-run (the cache keeps the rest)
+        print("WARNING: no data for " + ", ".join(missing) + " -- the outcome covers the rest only")
     pairs = ", ".join(f"{s}/{k}" for s, k in outcome.decision.enabled) or "none"
     print(f"enabled: {pairs}")
     print(f"written: {Path(out_dir if out_dir is not None else OUT_DIR)}")

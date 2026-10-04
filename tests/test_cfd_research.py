@@ -754,6 +754,24 @@ def test_cli_run_prints_the_exit_the_gate_and_the_enabled_classes(capsys, tmp_pa
     assert (tmp_path / "out" / "enabled.json").exists()
 
 
+def test_cli_warns_when_a_series_has_no_data(capsys, tmp_path):
+    good = synthetic_fetch()
+
+    def flaky(symbol, interval):
+        if symbol == "EURGBP=X":
+            raise RuntimeError("rate limited")
+        return good(symbol, interval)
+    rc = research.main(["--run"], fetch=flaky, now=NOW_RUN, out_dir=tmp_path / "out",
+                       cache_dir=tmp_path / "cache", universe=SUBSET[:3])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WARNING: no data for EURGBP=X (1d)" in out
+    # and a complete run says nothing of the kind
+    rc = research.main(["--run"], fetch=good, now=NOW_RUN, out_dir=tmp_path / "out2",
+                       cache_dir=tmp_path / "cache2", universe=SUBSET[:3])
+    assert "WARNING" not in capsys.readouterr().out
+
+
 def test_cli_refresh_flag_refetches(tmp_path):
     calls: list = []
     common = dict(fetch=synthetic_fetch(calls), now=NOW_RUN, out_dir=tmp_path / "out",
