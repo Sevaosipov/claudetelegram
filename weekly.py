@@ -25,6 +25,7 @@ from telegram_notify import DOT_GREEN, DOT_RED, signed_pct
 
 WEEK_DAYS = 6               # the week is today - 6 days ... today
 MAX_REASONS = 2             # a buy names this many of its reasons
+RISK_TAG = "высокий риск"   # the last words of an alt's buy
 MAX_SELLERS = 5             # a group exit names this many sellers, then «и ещё N»
 BEST_WORST = 3              # the summary names this many best and this many worst positions
 SCORING_FAILED_WARNING = "⚠️ Оценка сигналов на этой неделе не отработала — покупок не было."
@@ -34,8 +35,9 @@ SCORING_FAILED_WARNING = "⚠️ Оценка сигналов на этой н�
 def buy_text(pick: dict) -> str:
     """«🟢 GME!: покупка — 2 инсайдера из руководства; CEO среди покупателей; балл 70, стоп −10%»: a picked
     buy (signals_weekly.pick_record) -- its first two reasons, its score and its stop, and «нет на
-    Trading 212» when the score says the broker does not list it. A coin is named by its symbol. What the
-    pick does not have is left out. There is no money in it: the bot holds nothing."""
+    Trading 212» when the score says the broker does not list it. A coin is named by its symbol; an alt
+    (a pick with `risk`) ends with «, высокий риск». What the pick does not have is left out. There is
+    no money in it: the bot holds nothing."""
     reasons = [r for r in (pick.get("reasons") or []) if r][:MAX_REASONS]
     score = pick.get("score")
     head = reasons + ([f"балл {score:.0f}"] if score is not None else [])
@@ -44,6 +46,8 @@ def buy_text(pick: dict) -> str:
         tail.append(f"стоп −{pick['stop_pct'] * 100:.0f}%")
     if pick.get("t212") is False:
         tail.append("нет на Trading 212")
+    if pick.get("risk"):
+        tail.append(RISK_TAG)
     details = ", ".join((["; ".join(head)] if head else []) + tail)
     return telegram_notify.signal_line(DOT_GREEN, crypto.symbol_of(pick["ticker"]), "покупка", details or None)
 
