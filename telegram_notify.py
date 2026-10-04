@@ -245,8 +245,9 @@ def format_treasury_line(t) -> str:
     verb = "bought" if t.side == "P" else "sold"
     who = f"{t.company} ({t.ticker})" if t.ticker else t.company
     value = f" = ${t.value_usd:,.0f}" if t.value_usd else ""
-    price = f" @ ${t.avg_price_usd:,.0f}" if t.avg_price_usd else ""
-    return (f"🪙 Treasury: {who} {verb} {t.units:,.4g} {t.coin}{price}{value}\n"
+    price = f" @ {crypto.usd_price(t.avg_price_usd)}" if t.avg_price_usd else ""
+    units = f"{t.units:,.0f}" if t.units >= 1000 else f"{t.units:,.4g}"        # 1,250,000 SOL, not 1.25e+06
+    return (f"🪙 Treasury: {who} {verb} {units} {t.coin}{price}{value}\n"
             f"   {t.form} filed {datefmt.fmt(t.filed_date)}\n"
             f"   {t.source_url}")
 

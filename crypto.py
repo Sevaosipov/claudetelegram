@@ -90,6 +90,14 @@ def symbol_for_text(text: str | None) -> str | None:
     return None
 
 
+def usd_price(x: float) -> str:
+    """A coin's price as a message states it: whole dollars from $100 ("$80,000"), cents above ten
+    cents ("$182.40", "$2.45", "$0.24"), four decimals under that ("$0.0520")."""
+    if x >= 100:
+        return f"${x:,.0f}"
+    return f"${x:,.2f}" if x >= 0.1 else f"${x:,.4f}"
+
+
 def yf_symbol(t: str) -> str:
     """The Yahoo Finance symbol for a ticker this project stores. Crypto quotes as
     BTC-USD; share classes as BRK-B rather than the BRK.B the filings use."""

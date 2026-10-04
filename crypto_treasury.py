@@ -7,14 +7,18 @@ approximately $79,475 per bitcoin") or, in Strategy's case, in a small table
 ("BTC Purchased ... 950 $ 75.7 $ 79,670"). So this module:
 
   1. asks EDGAR full-text search (efts.sec.gov, free, no key) which 8-K/6-K
-     documents filed in a date range mention bitcoin or ether at all -- a few dozen
-     a fortnight, most of them miners describing production;
+     documents filed in a date range mention one of the thirteen coins at all
+     (QUERIES: bitcoin, ether, solana, XRP, BNB, dogecoin, AVAX, hyperliquid,
+     litecoin, ethena, chainlink, TRX/TRON, SUI) -- a few dozen a fortnight for
+     bitcoin, most of them miners describing production;
   2. fetches each new document once and regexes the transactions back out.
 
 Only an explicit past-tense trade with a unit count is extracted. A miner "acquired
 1,000 bitcoin mining machines" is not a bitcoin purchase, "may purchase up to" is not
 a purchase, and a document that merely mentions bitcoin yields nothing -- a missed
-filing costs one signal, a fabricated one costs trust in all the others.
+filing costs one signal, a fabricated one costs trust in all the others. An alt's full
+name (solana, dogecoin ...) is read in any case, as bitcoin's is; its ticker only in
+upper case ("5,000,000 HYPE tokens", not "hype" or "link" or "sol": ordinary words).
 
 The same sentence routinely appears twice in one accession (the 8-K body and its
 EX-99.1 press release), so rows are keyed by the trade, not by the document.
@@ -35,7 +39,12 @@ DOC_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{adsh}/{filename}"
 FORMS = "8-K,6-K"
 # One query per coin: EFTS scores rather than filters, so a combined query ranks a
 # long tail of passing mentions above the filings that matter.
-QUERIES = {"BTC": '"bitcoin"', "ETH": '"ether" OR "ethereum"'}
+QUERIES = {
+    "BTC": '"bitcoin"', "ETH": '"ether" OR "ethereum"',
+    "SOL": '"solana"', "XRP": '"XRP"', "BNB": '"BNB"', "DOGE": '"dogecoin"', "AVAX": '"AVAX"',
+    "HYPE": '"hyperliquid"', "LTC": '"litecoin"', "ENA": '"ethena"', "LINK": '"chainlink"',
+    "TRX": '"TRX" OR "TRON"', "SUI": '"SUI"',
+}
 PAGE_SIZE = 100
 MAX_PAGES = 5
 REQUEST_PAUSE_SECONDS = 0.15   # SEC fair access: <=10 req/s across its hosts
@@ -48,16 +57,34 @@ RETRY_PAUSES_SECONDS = (2, 5)
 
 # Sanity bounds on a parsed per-coin price. A misread thousands separator turns
 # $79,475 into $79 or $79,475,000; either is rejected rather than stored.
-PLAUSIBLE_PRICE_USD = {"BTC": (1_000, 1_000_000), "ETH": (50, 100_000)}
+PLAUSIBLE_PRICE_USD = {
+    "BTC": (1_000, 1_000_000), "ETH": (50, 100_000), "SOL": (5, 5_000), "XRP": (0.05, 100),
+    "BNB": (20, 20_000), "DOGE": (0.005, 20), "AVAX": (1, 2_000), "HYPE": (1, 5_000),
+    "LTC": (5, 5_000), "ENA": (0.02, 100), "LINK": (1, 2_000), "TRX": (0.01, 20), "SUI": (0.1, 500),
+}
 
+# What a matched word means, lower-cased. The patterns below decide WHICH words match and in what
+# case: an alt's full name in any case, as bitcoin's always was; its ticker only in upper case --
+# "link", "hype", "sol" and "sui" are ordinary words in a filing -- optionally followed by
+# "tokens" or "coins". BTC, ETH and their names keep matching in any case.
 _COIN_WORDS = {"bitcoin": "BTC", "bitcoins": "BTC", "btc": "BTC",
-               "ether": "ETH", "ethereum": "ETH", "eth": "ETH"}
+               "ether": "ETH", "ethereum": "ETH", "eth": "ETH",
+               "solana": "SOL", "sol": "SOL", "xrp": "XRP", "bnb": "BNB",
+               "dogecoin": "DOGE", "doge": "DOGE", "avalanche": "AVAX", "avax": "AVAX",
+               "hyperliquid": "HYPE", "hype": "HYPE", "litecoin": "LTC", "ltc": "LTC",
+               "ethena": "ENA", "ena": "ENA", "chainlink": "LINK", "link": "LINK",
+               "trx": "TRX", "tron": "TRX", "sui": "SUI"}
+_ALT_NAMES = "solana|dogecoin|litecoin|avalanche|chainlink|hyperliquid|ethena"
+_ALT_TICKERS = "SOL|XRP|BNB|DOGE|AVAX|HYPE|LTC|ENA|LINK|TRX|TRON|SUI"
+# Scoped flags: the patterns below are compiled with IGNORECASE (the verbs), `(?-i:...)` turns it off.
+_COIN_PATTERN = rf"(?i:bitcoins?|BTC|ether|ETH|ethereum|{_ALT_NAMES})|(?-i:{_ALT_TICKERS})"
+_TABLE_COIN_PATTERN = rf"(?i:BTC|ETH|{_ALT_NAMES})|(?-i:{_ALT_TICKERS})"
 _NUM = r"\d[\d,]*(?:\.\d+)?"
 _PROSE_RE = re.compile(
     rf"\b(?P<verb>purchased|acquired|bought|sold)\s+"
     rf"(?:an?\s+(?:aggregate|total)\s+(?:of\s+)?)?(?:approximately\s+|about\s+|roughly\s+)?"
     rf"(?P<units>{_NUM})\s+(?:(?:additional|more)\s+)?"
-    rf"(?P<coin>bitcoins?|BTC|ether|ETH|ethereum)\b"
+    rf"(?P<coin>{_COIN_PATTERN})\b(?:\s+(?:tokens?|coins?)\b)?"
     # "1,000 bitcoin mining machines" is hardware, not bitcoin.
     rf"(?!\s*(?:mining|miners?|machines?|rigs?|ATMs?|hash|-denominated|treasury\s+compan))",
     re.IGNORECASE,
@@ -70,7 +97,7 @@ _TOTAL_RE = re.compile(
     rf"total\s+(?:cost|consideration)\s+of)\s+(?:approximately\s+|about\s+)?(?:US)?\$\s?"
     rf"(?P<total>{_NUM})\s*(?P<mult>million|billion|thousand|[mb]n?\b)?", re.IGNORECASE)
 # Strategy's weekly table, flattened to text: header row, then "units $ agg $ avg".
-_TABLE_HEAD_RE = re.compile(r"\b(?P<coin>BTC|ETH)\s+(?:Purchased|Acquired)\b", re.IGNORECASE)
+_TABLE_HEAD_RE = re.compile(rf"\b(?P<coin>{_TABLE_COIN_PATTERN})\s+(?:Purchased|Acquired)\b", re.IGNORECASE)
 _TABLE_ROW_RE = re.compile(rf"(?P<units>{_NUM})\s+\$\s*(?P<agg>{_NUM})\s+\$\s*(?P<avg>{_NUM})")
 _MULT = {"thousand": 1e3, "million": 1e6, "m": 1e6, "mn": 1e6, "billion": 1e9, "b": 1e9, "bn": 1e9}
 _MINED_RE = re.compile(r"\b(?:mined|produced|production)\b", re.IGNORECASE)
@@ -83,7 +110,7 @@ class TreasuryTxn:
     company: str
     ticker: str | None
     cik: str
-    coin: str               # "BTC" / "ETH"
+    coin: str               # a key of QUERIES: "BTC", "ETH", "SOL" ...
     side: str               # "P" purchase / "S" sale
     units: float
     avg_price_usd: float | None
@@ -161,7 +188,7 @@ def parse_text(text: str) -> list[dict]:
         row = _TABLE_ROW_RE.search(window)
         if not row:
             continue
-        coin = h.group("coin").upper()
+        coin = _COIN_WORDS[h.group("coin").lower()]
         units, agg, avg = (_num(row.group(g)) for g in ("units", "agg", "avg"))
         header = window[: row.start()].lower()
         mult = 1e6 if "in millions" in header else 1e9 if "in billions" in header else 1.0
@@ -213,23 +240,50 @@ def _get(session: requests.Session, url: str, params: dict | None = None) -> req
     raise AssertionError("unreachable")
 
 
+def _search_one(q: str, start: dt.date, end: dt.date, session: requests.Session,
+                hits: dict[str, dict]) -> None:
+    """The pages of one coin's query, each hit added to `hits` (keyed by doc id) as its page is
+    read. Each request is _get's -- retried after a pause on a transient failure -- and followed by
+    the fair-access pause."""
+    for page in range(MAX_PAGES):
+        resp = _get(session, EFTS_URL, params={
+            "q": q, "forms": FORMS, "dateRange": "custom",
+            "startdt": start.isoformat(), "enddt": end.isoformat(),
+            "from": page * PAGE_SIZE,
+        })
+        resp.raise_for_status()
+        batch = resp.json().get("hits", {}).get("hits", [])
+        for h in batch:
+            hits.setdefault(h["_id"], h)
+        time.sleep(REQUEST_PAUSE_SECONDS)
+        if len(batch) < PAGE_SIZE:
+            break
+
+
 def search(start: dt.date, end: dt.date, session: requests.Session) -> list[dict]:
-    """EFTS hits (one per document) for every coin query, de-duplicated by doc id."""
+    """EFTS hits (one per document) for every coin query, de-duplicated by doc id.
+
+    One coin's query failing does not lose the others. A query that still fails after _get's
+    retries (HTTP error, dropped connection, an answer that is not JSON) is reported on stderr and
+    skipped -- the hits its earlier pages gave are kept -- and the search goes on with the next coin.
+    It raises, with the first failure, only when EVERY query failed, so bot._run_source reports the
+    source as failed rather than as quiet. A document a failed query missed is found on a later
+    run: the trailing window is searched every day, and a document is marked seen only once read.
+
+    (Before the alts were added the search ran bitcoin's query and then ether's, and the first
+    failure -- after the same retries -- ended it: the other coin's hits were thrown away and the
+    whole pass raised. With thirteen queries a single bad answer must not cost the day's filings.)"""
     hits: dict[str, dict] = {}
-    for q in QUERIES.values():
-        for page in range(MAX_PAGES):
-            resp = _get(session, EFTS_URL, params={
-                "q": q, "forms": FORMS, "dateRange": "custom",
-                "startdt": start.isoformat(), "enddt": end.isoformat(),
-                "from": page * PAGE_SIZE,
-            })
-            resp.raise_for_status()
-            batch = resp.json().get("hits", {}).get("hits", [])
-            for h in batch:
-                hits.setdefault(h["_id"], h)
-            time.sleep(REQUEST_PAUSE_SECONDS)
-            if len(batch) < PAGE_SIZE:
-                break
+    failed: list[Exception] = []
+    for coin, q in QUERIES.items():
+        try:
+            _search_one(q, start, end, session, hits)
+        except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+            failed.append(e)
+            print(f"[crypto_treasury] {coin} query failed: {type(e).__name__}: {str(e)[:120]}",
+                  file=sys.stderr)
+    if failed and len(failed) == len(QUERIES):
+        raise failed[0]
     return list(hits.values())
 
 

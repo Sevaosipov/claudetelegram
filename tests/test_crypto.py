@@ -170,6 +170,136 @@ def test_implausible_price_is_rejected():
     assert ct.parse_text("Acme purchased 100 bitcoin at an average price of $79 per bitcoin.") == []
 
 
+# ---- the alts: one positive and one negative per coin
+ALTS = ("SOL", "XRP", "BNB", "DOGE", "AVAX", "HYPE", "LTC", "ENA", "LINK", "TRX", "SUI")
+
+
+def test_the_queries_cover_the_thirteen_coins():
+    assert ct.QUERIES == {
+        "BTC": '"bitcoin"', "ETH": '"ether" OR "ethereum"', "SOL": '"solana"', "XRP": '"XRP"', "BNB": '"BNB"',
+        "DOGE": '"dogecoin"', "AVAX": '"AVAX"', "HYPE": '"hyperliquid"', "LTC": '"litecoin"',
+        "ENA": '"ethena"', "LINK": '"chainlink"', "TRX": '"TRX" OR "TRON"', "SUI": '"SUI"'}
+    assert list(ct.QUERIES) == list(THIRTEEN)
+
+
+def test_every_coin_has_a_query_words_and_price_bounds():
+    assert set(ct.PLAUSIBLE_PRICE_USD) == set(ct.QUERIES) == set(ct._COIN_WORDS.values()) == set(THIRTEEN)
+
+
+def test_the_plausible_price_bounds():
+    assert ct.PLAUSIBLE_PRICE_USD == {
+        "BTC": (1_000, 1_000_000), "ETH": (50, 100_000), "SOL": (5, 5_000), "XRP": (0.05, 100),
+        "BNB": (20, 20_000), "DOGE": (0.005, 20), "AVAX": (1, 2_000), "HYPE": (1, 5_000),
+        "LTC": (5, 5_000), "ENA": (0.02, 100), "LINK": (1, 2_000), "TRX": (0.01, 20), "SUI": (0.1, 500)}
+
+
+@pytest.mark.parametrize("text,coin,units,avg", [
+    ("purchased 1,250,000 SOL at an average price of $182.40", "SOL", 1_250_000, 182.40),
+    ("acquired 25,000,000 XRP at an average price of $2.45 per XRP", "XRP", 25_000_000, 2.45),
+    ("purchased 480,000 BNB at an average price of approximately $850.25", "BNB", 480_000, 850.25),
+    ("acquired 500,000,000 DOGE at an average price of $0.24", "DOGE", 500_000_000, 0.24),
+    ("purchased 2,000,000 AVAX at an average price of $31.40", "AVAX", 2_000_000, 31.40),
+    ("acquired 5,000,000 HYPE tokens", "HYPE", 5_000_000, None),
+    ("acquired 5,000,000 HYPE tokens at an average price of $38.20", "HYPE", 5_000_000, 38.20),
+    ("purchased 929,548 LTC at an average price of $95.10", "LTC", 929_548, 95.10),
+    ("acquired 400,000,000 ENA at an average price of $0.62", "ENA", 400_000_000, 0.62),
+    ("purchased 1,500,000 LINK at an average price of $18.30", "LINK", 1_500_000, 18.30),
+    ("acquired 365,000,000 TRX at an average price of $0.31", "TRX", 365_000_000, 0.31),
+    ("acquired 365,000,000 TRON at an average price of $0.31", "TRX", 365_000_000, 0.31),
+    ("purchased 108,000,000 SUI tokens at an average price of $3.62", "SUI", 108_000_000, 3.62),
+    ("purchased 20,000 LINK coins", "LINK", 20_000, None),
+])
+def test_an_alt_purchase_is_parsed(text, coin, units, avg):
+    [t] = ct.parse_text(f"Acme Corp. {text}.")
+    assert (t["coin"], t["side"], t["units"], t["avg"]) == (coin, "P", units, avg)
+
+
+@pytest.mark.parametrize("text,coin", [
+    ("purchased 1,000 Solana", "SOL"), ("acquired 1,000 solana tokens", "SOL"),
+    ("bought 7,000 Dogecoin", "DOGE"), ("purchased 1,000 LITECOIN", "LTC"), ("purchased 90 Avalanche", "AVAX"),
+    ("acquired 3,000 Chainlink", "LINK"), ("acquired 5,000 Hyperliquid", "HYPE"), ("acquired 800 Ethena", "ENA"),
+])
+def test_a_full_name_matches_in_any_case(text, coin):
+    [t] = ct.parse_text(text)
+    assert t["coin"] == coin
+
+
+def test_an_alt_sale_is_a_sale():
+    [t] = ct.parse_text("Acme sold 250,000 SOL at an average price of $190.00 for total consideration of $47.5 million.")
+    assert (t["coin"], t["side"], t["units"], t["avg"], t["total"]) == ("SOL", "S", 250_000, 190.0, 47_500_000)
+
+
+@pytest.mark.parametrize("text", [
+    "purchased 10,000 sol",                              # a ticker is upper case only
+    "purchased 1,250,000 Sol at an average price of $182.40",
+    "bought 5,000 xrp", "purchased 100 bnb", "acquired 100 doge", "purchased 100 avax",
+    "purchased 5 hype", "purchased 100 ltc", "acquired 100 ena", "bought 100 link", "bought 100 Link",
+    "acquired 100 trx", "acquired 100 tron", "acquired 100 Tron", "purchased 100 sui", "purchased 100 Sui",
+    "generated hype", "the hype around the token",
+    "the link to the press release", "a link between the two", "sold sui generis rights",
+    "purchased 100 shares of SOL Corp", "purchased up to 500,000 SOL", "may purchase 500 SOL",
+    "holds 2,000,000 SOL", "mined 100 DOGE", "purchased 5,000 SOL mining rigs",
+    "acquired 1,000 LTC miners", "acquired 5 LINK machines",
+    "the Company has purchased SOL and other tokens",    # no unit count
+])
+def test_not_an_alt_purchase(text):
+    assert ct.parse_text(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Acme purchased 1,250,000 SOL at an average price of $18,240.",      # a misread thousands separator
+    "Acme purchased 1,250,000 SOL at an average price of $1.82.",
+    "Acme acquired 500,000,000 DOGE at an average price of $240.",
+    "Acme acquired 25,000,000 XRP at an average price of $245.",
+    "Acme purchased 480,000 BNB at an average price of $8.50.",
+    "Acme purchased 5,000,000 HYPE at an average price of $0.38.",
+    "Acme purchased 108,000,000 SUI at an average price of $3,620.",
+])
+def test_an_alt_price_outside_its_plausible_bounds_is_rejected(text):
+    assert ct.parse_text(text) == []
+
+
+def test_an_implausible_alt_total_is_dropped_but_the_trade_is_kept():
+    [t] = ct.parse_text("Acme acquired 1,000,000 SOL for approximately $1 million.")        # $1 a coin
+    assert (t["coin"], t["units"], t["total"]) == ("SOL", 1_000_000, None)
+    [t] = ct.parse_text("Acme acquired 1,000,000 SOL for approximately $182 million.")      # $182 a coin
+    assert t["total"] == pytest.approx(182e6)
+
+
+def test_bitcoin_and_ether_words_are_still_found_in_any_case():
+    assert [t["coin"] for t in ct.parse_text("Acme bought 5 btc. Acme purchased 6 ETH. Acme bought 7 Ether.")] == [
+        "BTC", "ETH", "ETH"]
+
+
+def test_two_alts_in_one_document_are_two_trades():
+    text = "Acme purchased 1,000 SOL at an average price of $180.00. Acme purchased 5,000 LINK at an average price of $18.00."
+    assert [(t["coin"], t["units"]) for t in ct.parse_text(text)] == [("SOL", 1000), ("LINK", 5000)]
+
+
+_SOL_TABLE = ("SOL Update On October 1, 2026, Acme announced updates with respect to its holdings: During Period "
+              "September 24, 2026 to September 30, 2026 SOL Purchased (1) Aggregate Purchase Price (in millions) (2) "
+              "Average Purchase Price (2) Aggregate SOL Holdings 120,000 $ 21.9 $ 182.40 2,100,000 $ 380.0 $ 181.00 "
+              "(1) The purchases were made using USD Cash.")
+
+
+def test_a_weekly_table_for_an_alt_is_parsed_like_strategys():
+    [t] = ct.parse_text(_SOL_TABLE)
+    assert (t["coin"], t["side"], t["units"], t["avg"], t["total"]) == ("SOL", "P", 120_000, 182.40, 21_900_000)
+
+
+def test_a_table_head_ticker_is_upper_case_only():
+    assert ct.parse_text(_SOL_TABLE.replace("SOL Purchased", "sol Purchased")) == []
+    assert ct.parse_text(_SOL_TABLE.replace("SOL Purchased", "Solana Purchased"))[0]["coin"] == "SOL"
+
+
+def test_a_table_for_an_alt_with_a_price_out_of_bounds_is_rejected():
+    assert ct.parse_text(_SOL_TABLE.replace("$ 182.40", "$ 18,240").replace("21.9", "2,188,800")) == []
+
+
+def test_a_table_that_disagrees_with_itself_is_rejected_for_an_alt_too():
+    assert ct.parse_text(_SOL_TABLE.replace("$ 21.9", "$ 90.0")) == []
+
+
 def test_total_with_a_multiplier():
     [t] = ct.parse_text("Acme bought approximately 120 BTC for approximately $9.6 million.")
     assert t["total"] == pytest.approx(9_600_000)
@@ -279,7 +409,13 @@ def sleeps(monkeypatch):
     return got
 
 
-def test_efts_search_retries_a_transient_server_error(sleeps):
+@pytest.fixture
+def two_queries(monkeypatch):
+    """The two coin queries the scripted sessions below were written for: bitcoin, then ether."""
+    monkeypatch.setattr(ct, "QUERIES", {"BTC": ct.QUERIES["BTC"], "ETH": ct.QUERIES["ETH"]})
+
+
+def test_efts_search_retries_a_transient_server_error(sleeps, two_queries):
     session = _Session(_resp(500), _resp(200, {"hits": {"hits": [_HIT]}}),   # bitcoin
                        _resp(200, {"hits": {"hits": []}}))                   # ether
     assert ct.search(dt.date(2026, 9, 15), dt.date(2026, 9, 21), session) == [_HIT]
@@ -313,12 +449,125 @@ def test_a_missing_document_is_not_retried(sleeps, monkeypatch):
     (_resp(500), requests.HTTPError), (requests.ConnectionError("reset"), requests.ConnectionError),
 ])
 def test_a_persistent_failure_still_raises(failure, raised, sleeps):
-    """So bot._run_source reports the source as failed rather than as quiet."""
-    session = _Session(failure, failure, failure)
+    """So bot._run_source reports the source as failed rather than as quiet: every coin's query
+    fails, each after its three attempts."""
+    n = len(ct.QUERIES)
+    session = _Session(*[failure] * (3 * n))
     with pytest.raises(raised):
         ct.search(dt.date(2026, 9, 15), dt.date(2026, 9, 21), session)
-    assert session.calls == 3
-    assert sleeps == list(ct.RETRY_PAUSES_SECONDS)
+    assert session.calls == 3 * n
+    assert sleeps == list(ct.RETRY_PAUSES_SECONDS) * n
+
+
+# ------------------------------------------------------ treasury: one coin's query failing
+_HIT_SOL = {"_id": "0002-26-2:ex99.htm", "_source": {
+    "ciks": ["0001234567"], "display_names": ["DEFI DEV  (DFDV)  (CIK 0001234567)"],
+    "file_date": "2026-09-22", "form": "8-K"}}
+_NO_HITS = {"hits": {"hits": []}}
+_START, _END = dt.date(2026, 9, 15), dt.date(2026, 9, 21)
+
+
+class _Efts:
+    """EFTS and the archive in one stand-in. `by_query` maps a query text to what EFTS answers for it --
+    a payload, a Response, an exception to raise, or a function of the request params (for paging); any
+    other query answers with no hits. `docs` maps a document URL to its text."""
+    def __init__(self, by_query=None, docs=None):
+        self.by_query, self.docs, self.asked = by_query or {}, docs or {}, []
+
+    def get(self, url, params=None, timeout=None):
+        if url != ct.EFTS_URL:
+            return _resp(200, self.docs[url]) if url in self.docs else _resp(404)
+        self.asked.append(params["q"])
+        reply = self.by_query.get(params["q"], _NO_HITS)
+        if callable(reply):
+            reply = reply(params)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply if isinstance(reply, requests.Response) else _resp(200, reply)
+
+
+def _hits(*hits):
+    return {"hits": {"hits": list(hits)}}
+
+
+def test_every_coins_query_is_asked_and_the_hits_are_deduplicated(sleeps):
+    session = _Efts({ct.QUERIES["BTC"]: _hits(_HIT), ct.QUERIES["SOL"]: _hits(_HIT, _HIT_SOL)})
+    assert ct.search(_START, _END, session) == [_HIT, _HIT_SOL]            # one hit per document
+    assert session.asked == list(ct.QUERIES.values())
+    assert len(session.asked) == 13 and sleeps == [ct.REQUEST_PAUSE_SECONDS] * 13
+
+
+def test_one_coins_query_failing_does_not_lose_the_other_coins_filings(sleeps, capsys):
+    session = _Efts({ct.QUERIES["BTC"]: _hits(_HIT), ct.QUERIES["ETH"]: _resp(500),
+                     ct.QUERIES["SOL"]: _hits(_HIT_SOL)})
+    assert ct.search(_START, _END, session) == [_HIT, _HIT_SOL]
+    assert "[crypto_treasury] ETH query failed: HTTPError" in capsys.readouterr().err
+    assert session.asked.count(ct.QUERIES["ETH"]) == 3                      # its three attempts, then on
+    assert session.asked[-1] == ct.QUERIES["SUI"]                           # the last coin was still asked
+
+
+@pytest.mark.parametrize("failure", [_resp(503), requests.ConnectionError("reset"),
+                                     requests.Timeout("read timed out"), _resp(200, "<html>not json</html>")])
+def test_any_failure_of_one_query_is_skipped(failure, sleeps, capsys):
+    session = _Efts({ct.QUERIES["DOGE"]: failure, ct.QUERIES["SOL"]: _hits(_HIT_SOL)})
+    assert ct.search(_START, _END, session) == [_HIT_SOL]
+    assert "DOGE query failed" in capsys.readouterr().err
+
+
+def test_the_source_fails_only_when_every_query_failed(sleeps):
+    down = {q: _resp(500) for q in ct.QUERIES.values()}
+    with pytest.raises(requests.HTTPError):
+        ct.search(_START, _END, _Efts(down))
+    down.pop(ct.QUERIES["LINK"])                                            # one coin still answers
+    assert ct.search(_START, _END, _Efts(down)) == []
+    down[ct.QUERIES["LINK"]] = _hits(_HIT_SOL)
+    assert ct.search(_START, _END, _Efts(down)) == [_HIT_SOL]
+
+
+def test_a_failure_after_a_first_page_keeps_that_pages_hits(sleeps, monkeypatch):
+    monkeypatch.setattr(ct, "PAGE_SIZE", 2)
+    other = {"_id": "0003-26-3:ex99.htm", "_source": _HIT_SOL["_source"]}
+
+    def paged(params):
+        return _hits(_HIT_SOL, other) if params["from"] == 0 else _resp(500)
+    session = _Efts({ct.QUERIES["SOL"]: paged, ct.QUERIES["BTC"]: _hits(_HIT)})
+    assert ct.search(_START, _END, session) == [_HIT, _HIT_SOL, other]
+
+
+def test_scanning_goes_on_with_the_coins_that_answered(sleeps, capsys):
+    """The bitcoin query is down; a solana filing is still found, fetched and parsed."""
+    doc = "Over the week the Company purchased 1,250,000 SOL at an average price of $182.40."
+    session = _Efts({ct.QUERIES["BTC"]: _resp(500), ct.QUERIES["SOL"]: _hits(_HIT_SOL)},
+                    docs={ct.doc_url(_HIT_SOL): doc})
+    [(doc_id, txns)] = ct.scan_new_filings(_START, _END, set(), session=session)
+    assert doc_id == _HIT_SOL["_id"]
+    assert [(t.coin, t.side, t.units, t.avg_price_usd, t.ticker) for t in txns] == [
+        ("SOL", "P", 1_250_000, 182.40, "DFDV")]
+
+
+class _Args:
+    crypto_days = 7
+
+
+def test_the_daily_pass_stores_the_alt_trades_of_the_queries_that_answered(conn, sleeps, monkeypatch):
+    import passes
+    doc = "Over the week the Company purchased 1,250,000 SOL at an average price of $182.40."
+    session = _Efts({ct.QUERIES["BTC"]: _resp(500), ct.QUERIES["SOL"]: _hits(_HIT_SOL)},
+                    docs={ct.doc_url(_HIT_SOL): doc})
+    monkeypatch.setattr(ct, "new_session", lambda: session)
+    monkeypatch.setattr("cik_map.CikMap", lambda: None)
+    assert bot._run_source("CRYPTO_TREASURY", passes.run_crypto_treasury_pass, conn, _Args()) == 1
+    assert conn.execute("SELECT coin, side, units FROM crypto_treasury_txns").fetchall() == [("SOL", "P", 1_250_000)]
+    assert _HIT_SOL["_id"] in db.crypto_treasury_seen(conn)
+
+
+def test_the_daily_pass_is_reported_failed_only_when_every_query_failed(conn, sleeps, monkeypatch, capsys):
+    import passes
+    monkeypatch.setattr(ct, "new_session",
+                        lambda: _Efts({q: requests.ConnectionError("reset") for q in ct.QUERIES.values()}))
+    monkeypatch.setattr("cik_map.CikMap", lambda: None)
+    assert bot._run_source("CRYPTO_TREASURY", passes.run_crypto_treasury_pass, conn, _Args()) is None
+    assert "[CRYPTO_TREASURY] pass failed: ConnectionError" in capsys.readouterr().err
 
 
 # ------------------------------------------------------ treasury: signals
@@ -343,6 +592,121 @@ def test_a_big_week_of_company_buying_is_a_signal(conn):
     assert sig.total_value == pytest.approx(80_000_000 / 1.16)
     assert sig.details[0] == "$80.0 млн за неделю"
     assert "порог по умолчанию: мало истории" in sig.details
+
+
+# ---- the floors are per coin: €50m (week) and €10m (sale) for BTC and ETH, €10m and €5m for the alts
+def _add_worth(conn, coin, eur, side="P", filed=None, acc=None):
+    """A trade of `coin` worth `eur` euros (at the fixture's 1.16 dollars) as the filing's own total."""
+    _add_treasury(conn, 1_000, avg=None, total=eur * 1.16, side=side, filed=filed, coin=coin,
+                  acc=acc or f"acc-{coin}-{side}-{filed}-{eur}")
+
+
+def test_the_treasury_floors_are_per_coin_dicts_with_a_default():
+    from cluster import crypto as cc
+    assert cc.TREASURY_WEEK_FLOOR_EUR == {"BTC": 50e6, "ETH": 50e6, "default": 10e6}
+    assert cc.TREASURY_SALE_MIN_EUR == {"BTC": 10e6, "ETH": 10e6, "default": 5e6}
+
+
+@pytest.mark.parametrize("coin", ALTS)
+def test_an_alt_week_of_12m_is_a_signal(conn, coin):
+    _add_worth(conn, coin, 12e6)
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.bullish and sig.ticker == f"CRYPTO:{coin}" and sig.total_value == pytest.approx(12e6)
+    assert sig.details[0] == "$13.9 млн за неделю"
+
+
+@pytest.mark.parametrize("coin", ALTS)
+def test_an_alt_week_of_8m_is_not(conn, coin):
+    _add_worth(conn, coin, 8e6)
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+def test_the_alt_floor_is_met_at_exactly_10m(conn):
+    _add_worth(conn, "SOL", 10e6)
+    assert [s.ticker for s in cluster.find_treasury_signals(conn, today=TODAY)] == ["CRYPTO:SOL"]
+
+
+@pytest.mark.parametrize("coin", ["BTC", "ETH"])
+def test_the_bitcoin_and_ether_week_floor_is_still_50m(conn, coin):
+    _add_worth(conn, coin, 12e6)
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+    _add_worth(conn, coin, 37e6, acc="more")                             # €49m in all
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+    _add_worth(conn, coin, 1e6, acc="more2")                             # €50m
+    assert [s.ticker for s in cluster.find_treasury_signals(conn, today=TODAY)] == [f"CRYPTO:{coin}"]
+
+
+def test_each_coin_is_judged_against_its_own_floor(conn):
+    _add_worth(conn, "BTC", 20e6)                                        # under bitcoin's floor
+    _add_worth(conn, "SOL", 12e6)
+    _add_worth(conn, "ETH", 60e6)
+    assert sorted(s.ticker for s in cluster.find_treasury_signals(conn, today=TODAY)) == ["CRYPTO:ETH", "CRYPTO:SOL"]
+
+
+def test_the_alt_floor_still_applies_when_the_week_is_judged_against_its_history(conn):
+    for k in range(1, 21):
+        _add_worth(conn, "SOL", 2e6, filed=_weeks_ago(k))                # twenty quiet weeks
+    _add_worth(conn, "SOL", 9e6, acc="now")                              # the best week yet -- under €10m
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+    _add_worth(conn, "SOL", 2e6, acc="now2")                             # €11m
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.details[0] == "$12.8 млн за неделю — больше, чем в 100% из 20 недель"
+
+
+def test_a_routine_alt_week_for_a_weekly_buyer_is_not_a_signal(conn):
+    for k in range(1, 21):
+        _add_worth(conn, "SOL", 12e6, filed=_weeks_ago(k))
+    _add_worth(conn, "SOL", 12e6, acc="now")                             # the same again
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+@pytest.mark.parametrize("coin", ALTS)
+def test_an_alt_sale_of_6m_is_a_caution(conn, coin):
+    _add_worth(conn, coin, 6e6, side="S", filed=_days_ago(3))
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert not sig.bullish and sig.ticker == f"CRYPTO:{coin}" and sig.total_value == pytest.approx(6e6)
+
+
+@pytest.mark.parametrize("coin", ALTS)
+def test_an_alt_sale_of_4m_is_not(conn, coin):
+    _add_worth(conn, coin, 4e6, side="S", filed=_days_ago(3))
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+
+
+@pytest.mark.parametrize("coin", ["BTC", "ETH"])
+def test_the_bitcoin_and_ether_sale_floor_is_still_10m(conn, coin):
+    _add_worth(conn, coin, 6e6, side="S", filed=_days_ago(3))
+    assert cluster.find_treasury_signals(conn, today=TODAY) == []
+    _add_worth(conn, coin, 10e6, side="S", filed=_days_ago(2))
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.ticker == f"CRYPTO:{coin}" and sig.window_end == _days_ago(2)
+
+
+def test_an_alt_sale_with_no_stated_value_is_kept_and_valued_later(conn):
+    """Unknown is not small, as for bitcoin: no price, no total -- the sale stays, to be valued at spot."""
+    _add_treasury(conn, 5_000_000, avg=None, side="S", filed=_days_ago(3), coin="DOGE")
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.ticker == "CRYPTO:DOGE" and sig.total_value is None and sig.units == 5_000_000
+
+
+def test_a_sale_of_a_cheap_coin_names_its_average_price_in_cents(conn):
+    _add_treasury(conn, 40_000_000, avg=0.24, side="S", filed=_days_ago(3), coin="DOGE")    # $9.6m
+    [sig] = cluster.find_treasury_signals(conn, today=TODAY)
+    assert sig.details == ["средняя цена $0.24 за DOGE"]
+    _add_treasury(conn, 200, avg=80_000.0, side="S", filed=_days_ago(3), acc="btc")         # a bitcoin sale: whole dollars
+    btc = next(s for s in cluster.find_treasury_signals(conn, today=TODAY) if s.ticker == "CRYPTO:BTC")
+    assert btc.details == ["средняя цена $80,000 за BTC"]
+
+
+def test_the_treasury_log_line_reads_for_an_alt_as_it_does_for_bitcoin():
+    def line(coin, units, avg):
+        return telegram_notify.format_treasury_line(
+            ct.TreasuryTxn("acc", "Acme Corp", "ACME", "1", coin, "P", units, avg, None, "2026-09-22", "8-K", "u"))
+    assert line("SOL", 1_250_000, 182.40).startswith("🪙 Treasury: Acme Corp (ACME) bought 1,250,000 SOL @ $182 = $228,000,000\n")
+    assert line("LINK", 1_500_000, 18.30).startswith("🪙 Treasury: Acme Corp (ACME) bought 1,500,000 LINK @ $18.30 = $27,450,000\n")
+    assert line("DOGE", 500_000_000, 0.24).startswith("🪙 Treasury: Acme Corp (ACME) bought 500,000,000 DOGE @ $0.24 = $120,000,000\n")
+    assert line("BTC", 1355, 79475.0).startswith("🪙 Treasury: Acme Corp (ACME) bought 1,355 BTC @ $79,475 = $107,688,625\n")
+    assert line("BTC", 12.5, 79475.0).startswith("🪙 Treasury: Acme Corp (ACME) bought 12.5 BTC @ $79,475")
 
 
 def test_a_trade_without_a_filing_date_is_ignored(conn):
