@@ -60,8 +60,8 @@ def signal_line(dot: str, name: str, event: str, details: str | None = None, *,
     """`{dot} <b>{name}!</b>: {event} — {details}`, and for a close `, итог <b>{result}</b>{extra}`.
 
     `extra` follows the bold result as it is (a leading space and its brackets are the caller's:
-    « (−10,4%)»). `label` is what the result is called -- «итог», «итог ≈» (a result on the last
-    price known), «сейчас» (a sale still waiting). A part that is None or empty is left out, and
+    « (−10,4%)»). `label` is what the result is called -- «итог», or «итог ≈» (a result on the last
+    price known). A part that is None or empty is left out, and
     `extra` goes with the result alone. Every part is escaped; with html=False there are no tags
     and nothing is escaped (the log, the menu)."""
     text = f"{_e(dot, html)} {_b(f'{name}!', html)}: {_e(event, html)}"
@@ -719,7 +719,6 @@ def format_close_alert(alert, *, html: bool = True) -> str:
     """The sell alert on a position of the user's (/bought or the Trading 212 account), one message:
 
         🔴 <b>GME!</b>: сработал стоп — пора продавать: вход 23,10 → сейчас 20,70, итог <b>−$24,00</b> (−10,4%)
-           −10% от максимума 25.80
 
     The dot is green when the result is zero or more and red when it is a loss or there is no
     price to tell it by (then «пора продавать: вход X» stands alone). A position with a quantity

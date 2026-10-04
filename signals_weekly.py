@@ -22,16 +22,27 @@ MAX_REASONS = 3             # the reasons kept with a signal (its message shows 
 def held_names(conn) -> set[tuple[str, str, str]]:
     """What the user holds now, as positions._asset_key names it: every open position of either origin
     (/bought or the Trading 212 account) -- a coin by its symbol, a stock by its ticker, an Oslo or
-    Stockholm listing with its venue (Oslo's NRC is not the US NRC). A Trading 212 holding keyed by the
-    ISIN of an Oslo listing holds that listing too: Oslo's insider signals name the company by its
-    Oslo ticker."""
+    Stockholm listing with its venue (Oslo's NRC is not the US NRC). A Trading 212 holding keyed by its
+    ISIN is also held under the name the signals use: the Oslo ticker of an Oslo listing, and the market
+    symbol of a US instrument (one Yahoo could not price, so the sync keyed it by ISIN)."""
     held = set()
     for pos in positions.open_positions(conn):
         held.add(positions._asset_key(pos.ticker, pos.source))
-        oslo = positions.oslo_ticker(conn, pos.ticker) if pos.source == positions.T212_SOURCE else None
+        if pos.source != positions.T212_SOURCE:
+            continue
+        oslo = positions.oslo_ticker(conn, pos.ticker)
         if oslo:
             held.add(positions._asset_key(oslo, "NORWAY"))
+        us = _us_market_symbol(conn, pos.t212_ticker)
+        if us:
+            held.add(positions._asset_key(us, None))
     return held
+
+
+def _us_market_symbol(conn, t212_ticker: str | None) -> str:
+    """The symbol a US Trading 212 instrument trades under (META for FB_US_EQ), "" for any other."""
+    import t212_account
+    return t212_account._market_symbol(conn, t212_ticker)
 
 
 def recently_signalled(conn, today: dt.date) -> set[str]:

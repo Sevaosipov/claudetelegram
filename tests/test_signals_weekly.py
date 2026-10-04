@@ -12,6 +12,7 @@ import pytest
 import db
 import model
 import model_score
+import positions
 import signals_weekly
 
 TODAY = dt.date(2026, 10, 9)          # a Friday: the weekly run's day
@@ -286,3 +287,15 @@ def test_picking_reads_and_writes_nothing(conn):
     signals_weekly.pick_buys(conn, TODAY, [_stock("AAA"), _stock("BBB"), _stock("CCC")])
     after = [conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("positions", "buy_signals", "kv_cache")]
     assert before == after
+
+
+def test_a_us_holding_trading_212_keys_by_isin_is_held_under_its_market_symbol(conn):
+    """A US instrument Yahoo could not price is keyed by its ISIN (source T212): the SEC signal for
+    its market symbol must still see it as held -- by the instrument list's symbol, or the code's own."""
+    conn.execute("INSERT INTO t212_instruments (ticker, isin, type, short_name, currency) VALUES (?,?,?,?,?)",
+                 ("FB_US_EQ", "US30303M1027", "STOCK", "META", "USD"))
+    _hold(conn, "US30303M1027", positions.T212_SOURCE, origin="t212", t212_ticker="FB_US_EQ")
+    _hold(conn, "US36467W1099", positions.T212_SOURCE, origin="t212", t212_ticker="GME_US_EQ")
+    held = signals_weekly.held_names(conn)
+    assert positions._asset_key("META", None) in held and positions._asset_key("GME", None) in held
+    assert positions._asset_key("FB", None) not in held          # the old code is not the symbol

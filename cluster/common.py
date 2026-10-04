@@ -172,7 +172,7 @@ ILLIQUID_BELOW_EUR = 250_000
 W_FULL_UNWIND = 20.0         # every buyer in the cluster has now sold, not just some
 # A crypto signal has no company to measure against, so what it scores on is having
 # cleared its finder's size bar at all, plus how far past EUR 1m the move was. A
-# score of 35 (a bar nothing in the daily run applies: the model portfolio scores
+# score of 35 (a bar nothing in the daily run applies: model_score.py scores
 # signals by its own rules) is passed by ETF days and exchange flows at their
 # thresholds and by treasury buys from roughly EUR 90m.
 W_CRYPTO_BASE = 20.0

@@ -769,11 +769,12 @@ def main():
         # The week's buy signals are picked once, on the first full run from Friday to Sunday whose scoring
         # got all the way through; the week's buys key is set when the picks are kept (_pick_week), so any
         # other pass picks again on the next run of the window. A failed pick is reported like a failed source.
+        # The account is read before the pick: a name bought since the last sync is held, not signalled.
+        _sync_t212(conn, args)
         if (not filtered and report is not None and report.complete
                 and _weekly_due(conn, today, BUYS_KEY)):
             _run_source("PICKS", _pick_week, conn, today, report)
         _journal(conn, rest + exits, report)
-        _sync_t212(conn, args)
         closes = positions.check_exits(conn)
         for a in closes:
             print(telegram_notify.format_close_alert(a, html=False))

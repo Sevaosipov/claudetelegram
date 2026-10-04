@@ -559,9 +559,9 @@ def _pct(x: float) -> str:
 
 def _model_exit(conn, pos: Position, today: dt.date, price: float | None, closes_of,
                 news_fn) -> tuple[str, str] | None:
-    """The model's exits (model.py) for a position that no insider or caution rule closed:
-    (trigger, detail) for the first that holds, else None -- in the model's order, with the
-    model's constants. The headlines are fetched only when every rule before them has
+    """The remaining exit rules for a position that no insider or caution rule closed:
+    (trigger, detail) for the first that holds, else None -- stop, trend, dead money, a year held,
+    news, with the constants kept in model.py. The headlines are fetched only when every rule before them has
     passed."""
     import model
     import prices

@@ -1165,11 +1165,12 @@ def test_bought_takes_the_latest_buy_side_row(conn, monkeypatch):
 
 
 # ------------------------------------------------------------------ the Trading 212 sync in the daily run
-def test_main_syncs_trading_212_after_the_journal_and_right_before_the_exits(main_run):
-    """A holding bought or sold in the account today is opened or closed before the exits are
-    checked, so the check sees the account as it is."""
+def test_main_syncs_trading_212_before_the_pick_and_the_exits(main_run):
+    """A holding bought or sold in the account today is opened or closed before the week's buy
+    signals are picked (a name just bought is held, not signalled) and before the exits are checked."""
     calls = main_run()
-    assert main_run.syncs == [calls.index("check_exits")] == [4]    # collect, score, pick, journal, then the sync
+    assert main_run.syncs == [2]                                    # collect, score, then the sync
+    assert calls.index("check_exits") > 2
     assert main_run.sync_silent == [False]                          # its messages go to Telegram
 
 
@@ -1253,7 +1254,8 @@ def test_the_real_sync_without_a_key_leaves_the_daily_run_as_it_was(main_run, mo
 def test_a_holding_the_daily_sync_finds_is_opened_and_announced_before_the_exits(main_run, monkeypatch):
     _real_sync(monkeypatch)
     calls = main_run()
-    assert calls.index(("journal", [main_run.buy_sig, main_run.exit_sig], main_run.report)) \
-        < calls.index(_FIRST_MESSAGE) < calls.index("check_exits")
+    assert calls.index("score") < calls.index(_FIRST_MESSAGE) \
+        < calls.index(("journal", [main_run.buy_sig, main_run.exit_sig], main_run.report)) \
+        < calls.index("check_exits")
     [pos] = positions.open_positions(main_run.db())
     assert (pos.ticker, pos.origin, pos.quantity) == ("GME", "t212", 10.0)
