@@ -2,10 +2,10 @@
 ticker, the adjusted-close series behind a trailing stop or a score's momentum, and the small
 helpers that read such a series.
 
-It was the price half of the virtual-book engine (paper.py, removed with the model portfolio,
-spec 2026-10-04-remove-model-portfolio.md). What stays is generic: model.py scores a stock on
-its closes, positions.py watches the user's own positions on them, and the analyst reads them for
-a ticker it is asked about. Nothing here touches the database or a real account.
+It was the price half of the virtual-book engine (paper.py, removed together with the virtual
+portfolio, spec 2026-10-04-remove-model-portfolio.md). What stays is generic: model.py scores a
+stock on its closes, positions.py watches the user's own positions on them, and the analyst reads
+them for a ticker it is asked about. Nothing here touches the database or a real account.
 
 Values are measured on adjusted closes (dividends and splits included).
 """

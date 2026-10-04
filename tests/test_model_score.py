@@ -1,6 +1,6 @@
-"""model_score.py: the pure 0-100 score for stocks and coins, the stop distance and the
-position size. Offline and DB-free: signals are SimpleNamespace stand-ins carrying the
-same attributes as ClusterSignal / StakeSignal, buyers are cluster.roles.Buyer."""
+"""model_score.py: the pure 0-100 score for stocks and coins and the stop distance. Offline and DB-free:
+signals are SimpleNamespace stand-ins carrying the same attributes as ClusterSignal / StakeSignal, buyers
+are cluster.roles.Buyer."""
 from __future__ import annotations
 
 import types
@@ -848,37 +848,16 @@ def test_score_coin_no_closes():
     assert c.stop_pct is None and c.last_close is None
 
 
-# ------------------------------------------------------------------ position_size
-def test_position_size_stock_risk_and_cap_meet_at_ten_percent_stop():
-    assert ms.position_size(100_000, 30_000, 0.10, "stock") == pytest.approx(10_000)
-
-
-def test_position_size_wider_stock_stop_shrinks_the_position():
-    assert ms.position_size(100_000, 30_000, 0.25, "stock") == pytest.approx(4_000)
-
-
-def test_position_size_tight_stock_stop_is_capped_at_ten_percent_of_model():
-    assert ms.position_size(100_000, 30_000, 0.05, "stock") == pytest.approx(10_000)
-
-
-def test_position_size_crypto_is_capped_by_the_sleeve():
-    assert ms.position_size(100_000, 30_000, 0.15, "crypto") == pytest.approx(min(6666.6667, 10_500))
-    assert ms.position_size(100_000, 30_000, 0.05, "crypto") == pytest.approx(10_500)
-
-
-def test_position_size_without_a_usable_stop_is_zero():
-    assert ms.position_size(100_000, 30_000, None, "stock") == 0.0
-    assert ms.position_size(100_000, 30_000, 0.0, "crypto") == 0.0
-    assert ms.position_size(100_000, 30_000, -0.1, "stock") == 0.0
-
-
 # ------------------------------------------------------------------ constants
+def test_the_position_sizing_of_the_virtual_portfolio_is_gone():
+    for gone in ("position_size", "RISK_PER_TRADE", "STOCK_CAP", "COIN_CAP", "MIN_ORDER_EUR"):
+        assert not hasattr(ms, gone), gone
+
+
 def test_constants_match_the_spec():
     assert (ms.STOCK_BUY, ms.STOCK_WATCH, ms.COIN_BUY) == (60.0, 45.0, 60.0)
     assert (ms.MIN_MCAP_EUR, ms.MIN_ADV_EUR, ms.MIN_CLOSES) == (20e6, 100_000, 21)
     assert ms.STOP_MULT == 3.0
     assert ms.STOP_MIN == {"stock": 0.10, "crypto": 0.15}
     assert ms.STOP_MAX == {"stock": 0.25, "crypto": 0.35}
-    assert (ms.RISK_PER_TRADE, ms.STOCK_CAP, ms.COIN_CAP, ms.MIN_ORDER_EUR) == \
-        (0.01, 0.10, 0.35, 500.0)
     assert (ms.BUY, ms.WATCH, ms.SKIP, ms.BLOCK) == ("buy", "watch", "skip", "block")

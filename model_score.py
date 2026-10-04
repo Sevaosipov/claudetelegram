@@ -1,10 +1,11 @@
-"""model_score.py: the model portfolio's one strategy, as pure functions.
+"""model_score.py: the scoring strategy, as pure functions.
 
-Every stock and coin gets a score from 0 to 100; the score decides whether to buy, and
-the stock's or coin's own volatility decides the stop and the position size. Nothing
-here touches the network or the database: signals, price closes (oldest first) and
-headlines come in as arguments, so the whole strategy is testable on hand-built data
-and model.py can feed it anything (spec 2026-09-30, sections 1-3).
+Every stock and coin gets a score from 0 to 100; the score decides whether it is worth a buy
+signal, and the stock's or coin's own volatility decides the stop. Nothing here touches the
+network or the database: signals, price closes (oldest first) and headlines come in as
+arguments, so the whole strategy is testable on hand-built data and model.py can feed it
+anything (spec 2026-09-30, sections 1-3; the position sizing it once had went with the virtual
+portfolio, spec 2026-10-04-remove-model-portfolio.md).
 
 The stock score is insiders + triggers + momentum + news, each part capped so that no
 single ingredient can buy on its own -- an activist 13D alone (30-50) or politicians
@@ -31,10 +32,6 @@ MIN_CLOSES = 21               # 20 daily changes: the least history a stop can b
 STOP_MULT = 3.0               # stop distance = this many typical daily moves ...
 STOP_MIN = {"stock": 0.10, "crypto": 0.15}   # ... never tighter than the ordinary noise
 STOP_MAX = {"stock": 0.25, "crypto": 0.35}   # ... never so wide the loss is unbounded
-RISK_PER_TRADE = 0.01         # of the model's value, lost if the stop is hit
-STOCK_CAP = 0.10              # of the model's value
-COIN_CAP = 0.35               # of the crypto sleeve's value
-MIN_ORDER_EUR = 500.0
 BUY, WATCH, SKIP, BLOCK = "buy", "watch", "skip", "block"
 
 INSIDERS_CAP = 60
@@ -459,16 +456,3 @@ def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: s
         caution=caution, block=block, decision=decision, reasons=reasons,
         stop_pct=stop_distance(closes, "crypto"),
         last_close=closes[-1] if closes else None)
-
-
-# ---------------------------------------------------------------- sizing
-def position_size(model_value: float, sleeve_value: float, stop: float | None,
-                  kind: str) -> float:
-    """EUR to buy: what loses RISK_PER_TRADE of the model if the stop is hit, but no more
-    than the per-name cap (a share of the model for stocks, of the crypto sleeve for coins).
-    Without a usable stop there is nothing to size from: 0, which callers skip as «мало»."""
-    if stop is None or stop <= 0:
-        return 0.0
-    risk = RISK_PER_TRADE * model_value / stop
-    cap = STOCK_CAP * model_value if kind == "stock" else COIN_CAP * sleeve_value
-    return min(risk, cap)

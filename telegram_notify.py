@@ -771,11 +771,6 @@ def money(x: float, currency: str | None = "EUR") -> str:
     return f"{minus}{sign}{amount}" if sign else f"{minus}{amount} {currency}"
 
 
-def money_eur(x: float) -> str:
-    """«€9 800»: a space between thousands, a real minus sign."""
-    return money(x, "EUR")
-
-
 def signed_pct(x: float | None) -> str:
     """A fraction as «+1,2%» (comma decimal, real minus sign); «—» for None."""
     if x is None:

@@ -309,7 +309,7 @@ def test_condensed_stock_reply_names_fallback_sources():
 # --------------------------------------------------------- caution signals
 #
 # A bearish coin signal is journaled as `caution` and reads as an outflow when shown (the
-# menu's Сигналы); it is never in Telegram: the weekly signals (paper_report.week_signals) and
+# menu's Сигналы); it is never in Telegram: the weekly signals (weekly.week_signals) and
 # the daily close alerts (bot._send_closes) do not carry it.
 
 def _caution_signal():
@@ -931,7 +931,6 @@ def test_the_account_line_alone():
                                                (1234.0, "USD", "$1 234"), (-5.0, "SEK", "−5 SEK")])
 def test_money_in_a_currency(x, currency, text):
     assert tn.money(x, currency) == text
-    assert tn.money_eur(9800.4) == "€9 800" and tn.money_eur(-9800.4) == "−€9 800"
 
 
 def test_a_trading_212_holding_shows_the_days_since_it_was_bought_there():

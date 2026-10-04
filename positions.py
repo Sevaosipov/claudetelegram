@@ -367,8 +367,7 @@ def _insider_sale(conn, pos: Position) -> str | None:
     if not keys:
         return None
     # Oslo's rows name a company by its Oslo ticker; a Trading 212 holding of it, by the ISIN.
-    # (model.py hands in a namespace of a book's position, which has no source.)
-    oslo = oslo_ticker(conn, pos.ticker) if getattr(pos, "source", None) == T212_SOURCE else None
+    oslo = oslo_ticker(conn, pos.ticker) if pos.source == T212_SOURCE else None
     for label, sql in _SALE_QUERIES:
         key = oslo if label == "Oslo" and oslo else pos.ticker
         for person, date in conn.execute(sql, (key, pos.opened_at)):
