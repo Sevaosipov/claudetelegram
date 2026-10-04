@@ -848,6 +848,58 @@ def test_score_coin_no_closes():
     assert c.stop_pct is None and c.last_close is None
 
 
+# ------------------------------------------------------------------ score_coin: the bitcoin regime filter
+BTC_DOWN_REASON = "биткоин ниже 100-дн. средней — альты не покупаем"
+
+
+def test_the_gate_reason_is_the_one_the_spec_words():
+    assert ms.ALT_GATE_REASON == BTC_DOWN_REASON
+
+
+def test_an_alt_uptrend_is_a_buy_while_bitcoin_is_above_its_100_day_average():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None, btc_up=True)
+    assert c.decision == ms.BUY and c.total == 60 and c.trend_up
+    assert BTC_DOWN_REASON not in c.reasons
+
+
+def test_an_alt_that_would_buy_is_watch_with_the_reason_while_bitcoin_is_below():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=True, caution=None, headlines=None, btc_up=False)
+    assert c.decision == ms.WATCH
+    assert c.reasons[-1] == BTC_DOWN_REASON
+    assert (c.trend, c.flows, c.total, c.trend_up) == (60, 15, 75, True)       # the score itself is not touched
+    assert c.block is None and c.caution is None
+
+
+def test_without_a_bitcoin_reading_nothing_is_gated():
+    """btc_up=None: BTC and ETH, and every caller that has no regime to apply."""
+    c = ms.score_coin("ETH", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None)
+    assert c.decision == ms.BUY and BTC_DOWN_REASON not in c.reasons
+    c = ms.score_coin("ETH", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None, btc_up=None)
+    assert c.decision == ms.BUY
+
+
+def test_the_gate_does_not_touch_a_block():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution="спот-ETF США — цена подтверждает",
+                      headlines=None, btc_up=False)
+    assert c.decision == ms.BLOCK and BTC_DOWN_REASON not in c.reasons
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None,
+                      headlines=_titles("Exchange hack drains reserves"), btc_up=False)
+    assert c.decision == ms.BLOCK and BTC_DOWN_REASON not in c.reasons
+
+
+def test_the_gate_says_nothing_about_a_coin_that_would_not_buy_anyway():
+    c = ms.score_coin("SOL", _grow(150, -0.01), bullish_flow=False, caution=None, headlines=None, btc_up=False)
+    assert c.decision == ms.WATCH and BTC_DOWN_REASON not in c.reasons
+    c = ms.score_coin("SOL", _UP_TWO_OF_THREE, bullish_flow=False, caution=None, headlines=None, btc_up=False)
+    assert c.total == 45 and c.decision == ms.WATCH and BTC_DOWN_REASON not in c.reasons
+
+
+def test_a_short_history_stays_watch_with_its_own_reason_whatever_bitcoin_does():
+    for btc_up in (True, False, None):
+        c = ms.score_coin("SOL", _grow(100, 0.01), bullish_flow=False, caution=None, headlines=None, btc_up=btc_up)
+        assert c.decision == ms.WATCH and c.reasons == ["мало истории"]
+
+
 # ------------------------------------------------------------------ constants
 def test_the_position_sizing_of_the_virtual_portfolio_is_gone():
     for gone in ("position_size", "RISK_PER_TRADE", "STOCK_CAP", "COIN_CAP", "MIN_ORDER_EUR"):

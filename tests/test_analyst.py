@@ -813,6 +813,27 @@ def test_context_matches_a_coin_by_symbol_or_by_key(conn, dossier):
     assert "МОДЕЛЬ: свежего сигнала" in analyst.context(conn, "ETH", scored=[_coin("BTC")])
 
 
+@pytest.mark.parametrize("coin", model.COINS)
+def test_context_has_the_model_line_of_each_of_the_thirteen_coins(conn, dossier, coin):
+    scored = [_coin(c, 70.0 if c == coin else 10.0) for c in model.COINS]
+    for key in (coin, f"CRYPTO:{coin}", coin.lower()):
+        assert "МОДЕЛЬ: балл 70 — покупка" in analyst.context(conn, key, scored=scored), key
+
+
+def test_context_says_an_alt_is_only_watched_while_bitcoin_is_down(conn, dossier):
+    sol = _coin("SOL", 75.0, model_score.WATCH, reasons=["выше 100-дн. средней", model_score.ALT_GATE_REASON])
+    out = analyst.context(conn, "SOL", scored=[sol])
+    assert "МОДЕЛЬ: балл 75 — наблюдение" in out
+    assert "• биткоин ниже 100-дн. средней — альты не покупаем" in out
+
+
+def test_the_portfolio_watchlist_names_the_alts_too(conn):
+    scored = [_coin("SOL", 58.0, model_score.WATCH, reasons=["выше 100-дн. средней"]),
+              _coin("HYPE", 40.0, model_score.WATCH, reasons=["мало истории"])]
+    out = analyst.portfolio(conn, scored=scored)
+    assert "CRYPTO:SOL — 58: выше 100-дн. средней" in out and "CRYPTO:HYPE — 40: мало истории" in out
+
+
 def test_context_shows_why_a_score_is_only_watch_and_the_block(conn, dossier):
     out = analyst.context(conn, "NVDA", scored=[
         _stock("NVDA", 66.0, model_score.WATCH, untradeable="компания меньше €20 млн", t212=False)])

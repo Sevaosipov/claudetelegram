@@ -35,6 +35,14 @@ def _close(ticker="CCC"):
 
 
 # --------------------------------------------------------------- format_scored
+def test_the_scored_list_shows_all_thirteen_coins():
+    scored = [_coin(c, 60.0 if c == "SOL" else 0.0, model_score.BUY if c == "SOL" else model_score.WATCH)
+              for c in model.COINS]
+    lines = tn.format_scored(scored).splitlines()
+    assert [line.split()[1] for line in lines[1:]] == [f"CRYPTO:{c}" for c in model.COINS]
+    assert lines[1 + model.COINS.index("SOL")].startswith("🟢 CRYPTO:SOL 60:")
+
+
 def test_scored_header_and_empty_message():
     text = tn.format_scored([_stock()])
     assert text.splitlines()[0] == "СИГНАЛЫ — оценка модели (покупка от 60, наблюдение 45–59)"

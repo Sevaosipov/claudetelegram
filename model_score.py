@@ -41,6 +41,8 @@ NEWS_MIN, NEWS_MAX = -30, 10
 NEWS_NEGATIVE_POINTS, NEWS_POSITIVE_POINTS = -10, 5
 COIN_TREND_STEP = 15          # above the 100-day average, and each positive 20/60/120-day return
 COIN_BULLISH_FLOW, COIN_CAUTION = 15, -20
+# An alt (any coin but BTC and ETH) is bought only while bitcoin itself is above its 100-day average.
+ALT_GATE_REASON = "биткоин ниже 100-дн. средней — альты не покупаем"
 
 # How many management buyers earn what; the last entry is "that many or more".
 _COUNT_POINTS = {1: 22, 2: 34, 3: 42, 4: 46}
@@ -409,9 +411,16 @@ def coin_trend(closes: list[float]) -> dict | None:
 
 
 def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: str | None,
-               headlines: list[dict] | None) -> CoinScore:
-    """Score BTC or ETH: trend (0-60), flows (-20..+15) and news (-30..+10). A coin buys
-    only in an uptrend; a red-flag headline or a price-confirmed caution blocks it."""
+               headlines: list[dict] | None, btc_up: bool | None = None) -> CoinScore:
+    """Score a coin: trend (0-60), flows (-20..+15) and news (-30..+10). A coin buys
+    only in an uptrend; a red-flag headline or a price-confirmed caution blocks it.
+
+    `btc_up` is the bitcoin regime filter for an alt: False -- bitcoin's close is not above its
+    100-day average (coin_trend(...)["above_ma100"]) -- turns a would-be BUY into WATCH, with
+    ALT_GATE_REASON among the reasons; the score itself is not touched. None -- BTC and ETH, or
+    any caller with no regime to apply -- is not gated, and neither is True. A BLOCK stays a
+    block, and a coin that would not buy anyway (no uptrend, under the bar, too little history)
+    has nothing for the gate to stop."""
     trend = coin_trend(closes)
     news, red = news_part(headlines, coin=True)
 
@@ -447,6 +456,9 @@ def score_coin(coin: str, closes: list[float], *, bullish_flow: bool, caution: s
         decision = BLOCK
     elif trend_up and total >= COIN_BUY:
         decision = BUY
+        if btc_up is False:
+            decision = WATCH
+            reasons.append(ALT_GATE_REASON)
     else:
         decision = WATCH
 
