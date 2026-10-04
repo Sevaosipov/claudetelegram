@@ -663,10 +663,33 @@ def test_the_regime_is_bitcoins_close_against_its_100_day_mean_and_nothing_else(
     assert _coin(scored, "BTC").decision == "watch"                                  # its own trend is not up for 60
 
 
-def test_without_a_bitcoin_history_the_alts_are_not_bought(conn):
-    scored = _score(conn, [], {"SOL-USD": _rising()})                               # BTC-USD: nothing
+def test_without_a_bitcoin_history_the_alts_are_not_bought_and_the_reason_says_there_is_no_data(conn):
+    scored = _score(conn, [], {"SOL-USD": _rising()})                               # BTC-USD: nothing at all
     sol = _coin(scored, "SOL")
-    assert (sol.total, sol.decision) == (60, "watch") and "альты не покупаем" in sol.reasons[-1]
+    assert (sol.total, sol.decision) == (60, "watch")
+    assert sol.reasons[-1] == "нет данных по биткоину — альты не покупаем"
+    assert "биткоин ниже" not in " ".join(sol.reasons)
+
+
+@pytest.mark.parametrize("closes", [100, 120])
+def test_bitcoin_with_too_little_history_to_read_a_trend_is_no_data_not_down(conn, closes):
+    """coin_trend is None under 121 closes: the alts still wait, but the reason is not «ниже 100-дн.»."""
+    scored = _score(conn, [], {"BTC-USD": _rising(closes), "SOL-USD": _rising()})
+    sol = _coin(scored, "SOL")
+    assert (sol.decision, sol.reasons[-1]) == ("watch", "нет данных по биткоину — альты не покупаем")
+    assert _coin(scored, "BTC").reasons == ["мало истории"]                         # bitcoin's own reason is its own
+
+
+def test_bitcoin_down_and_bitcoin_up_keep_their_own_readings(conn):
+    down = _coin(_score(conn, [], {"BTC-USD": _falling(), "SOL-USD": _rising()}), "SOL")
+    assert (down.decision, down.reasons[-1]) == ("watch", "биткоин ниже 100-дн. средней — альты не покупаем")
+    up = _coin(_score(conn, [], {"BTC-USD": _rising(121), "SOL-USD": _rising()}), "SOL")      # 121 closes: a trend can be read
+    assert up.decision == "buy" and "альты не покупаем" not in " ".join(up.reasons)
+
+
+def test_ether_is_not_gated_whatever_bitcoin_has(conn):
+    eth = _coin(_score(conn, [], {"ETH-USD": _rising()}), "ETH")                    # no bitcoin at all
+    assert eth.decision == "buy" and "биткоин" not in " ".join(eth.reasons)
 
 
 def test_an_alt_with_too_little_history_stays_watch_with_its_own_reason(conn):

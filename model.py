@@ -187,11 +187,13 @@ def _score_coins(conn, candidates, prices, today, news_fn, trend_fn) -> list:
     """The thirteen coins' scores. The bitcoin regime filter is applied here: an alt is a BUY only when
     bitcoin's own close is above its 100-day average (model_score.coin_trend), else it is WATCH with
     model_score.ALT_GATE_REASON. BTC and ETH are not gated. Bitcoin with no usable history (under 121
-    completed closes) is not "up": the alts wait."""
+    completed closes, so no trend to read) is not "up" either: the alts wait, for
+    model_score.ALT_GATE_NO_DATA_REASON."""
     since = (today - dt.timedelta(days=CAUTION_DAYS)).isoformat()
     flows = [c for c in candidates if hasattr(c, "crypto_kind") and _flow_is_fresh(c, since)]
     btc_trend = model_score.coin_trend(_coin_closes(prices, "BTC"))
     btc_up = bool(btc_trend and btc_trend["above_ma100"])
+    btc_known = btc_trend is not None
     scored = []
     for coin in COINS:
         ticker = crypto.ticker(coin)
@@ -202,7 +204,8 @@ def _score_coins(conn, candidates, prices, today, news_fn, trend_fn) -> list:
             caution = f"{bearish.company} — цена подтверждает"
         scored.append(model_score.score_coin(
             coin, _coin_closes(prices, coin), bullish_flow=any(c.bullish for c in mine), caution=caution,
-            headlines=news_fn(ticker, "CRYPTO"), btc_up=None if coin in MAJOR_COINS else btc_up))
+            headlines=news_fn(ticker, "CRYPTO"), btc_up=None if coin in MAJOR_COINS else btc_up,
+            btc_known=btc_known))
     return scored
 
 

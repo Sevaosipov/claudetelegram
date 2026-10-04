@@ -235,3 +235,13 @@ momentum and news), so they no longer compete for the places:
 - Tests: five stock BUYs at 70+ and BTC and ETH BUY at 60 give three stocks, BTC and ETH; one eligible coin gives four stocks and
   it; none gives five stocks; an alt scoring 99 does not take a major's place; the alts take the places the majors leave.
   README, analyst method and `weekly.py` say it.
+
+### R4. Bitcoin with too little history: its own reason
+
+When bitcoin has too little history to tell (`coin_trend(BTC closes)` is None: under 121 completed closes, or none), an alt
+is still not bought -- it is WATCH, as with bitcoin below its average -- but the reason is «нет данных по биткоину — альты не
+покупаем», not «биткоин ниже 100-дн. средней — альты не покупаем» (which stays the reason when bitcoin is known to be below its
+average). `score_coin` gets a second keyword, `btc_known: bool = True`, next to `btc_up`; `model._score_coins` passes
+`btc_known = coin_trend(...) is not None`. As before the reason is added only when the gate turned a would-be BUY into WATCH;
+BTC and ETH are not gated. Tests: no bitcoin at all, and bitcoin with 100 and 120 closes, give the no-data reason; bitcoin
+known down gives the old one; 121 closes can be read; ETH is not gated; `score_coin` cases. README and the analyst method say it.

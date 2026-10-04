@@ -212,9 +212,11 @@ def test_the_readme_says_how_the_alts_are_held_back():
                    "сначала акции по убыванию балла, затем монеты: BTC и ETH, потом альты"):
         assert phrase in text, phrase
     assert "соревнуются с акциями" not in text
-    from model_score import ALT_GATE_REASON
+    from model_score import ALT_GATE_NO_DATA_REASON, ALT_GATE_REASON
     from weekly import RISK_TAG
     assert ALT_GATE_REASON in text and RISK_TAG in text
+    assert ALT_GATE_NO_DATA_REASON in text and "нет данных по биткоину" in text
+    assert "Если по биткоину нет истории (меньше 121 закрытия), он тоже не «вверх» — альты ждут, но причина другая" in text
 
 
 def test_the_readme_says_a_coins_good_headlines_add_no_points():

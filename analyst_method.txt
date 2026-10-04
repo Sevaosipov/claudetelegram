@@ -66,7 +66,8 @@ project's files. The commands find the keys they need themselves.
      adds no points (a network «upgrade» is not news about the price), while a red flag still blocks.
      An alt is a buy only while bitcoin is above its 100-day average,
      otherwise it is «наблюдение» with the reason «биткоин ниже 100-дн. средней — альты не
-     покупаем»; a buy signal on an alt ends «высокий риск», and a week brings at most two coin
+     покупаем» (or «нет данных по биткоину — альты не покупаем» when bitcoin has too little
+     history to tell); a buy signal on an alt ends «высокий риск», and a week brings at most two coin
      signals: BTC and ETH first when they are a buy and not already held or signalled, then the
      alts by score, equal scores by the 60-day return. Those two places are reserved: the stocks
      fill the other three (or all five when no coin qualifies), and the stock signals are sent

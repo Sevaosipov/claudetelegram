@@ -931,8 +931,45 @@ def test_the_return_is_not_part_of_the_score_and_a_hand_built_score_has_none():
 BTC_DOWN_REASON = "биткоин ниже 100-дн. средней — альты не покупаем"
 
 
+BTC_NO_DATA_REASON = "нет данных по биткоину — альты не покупаем"
+
+
 def test_the_gate_reason_is_the_one_the_spec_words():
     assert ms.ALT_GATE_REASON == BTC_DOWN_REASON
+    assert ms.ALT_GATE_NO_DATA_REASON == BTC_NO_DATA_REASON                    # amendment R4
+
+
+def test_an_alt_is_still_not_bought_when_bitcoin_has_too_little_history_and_the_reason_says_so():
+    c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=True, caution=None, headlines=None,
+                      btc_up=False, btc_known=False)
+    assert c.decision == ms.WATCH and c.reasons[-1] == BTC_NO_DATA_REASON
+    assert BTC_DOWN_REASON not in c.reasons
+    assert (c.trend, c.flows, c.total) == (60, 15, 75)                         # the score is not touched
+
+
+def test_a_known_bitcoin_below_its_average_keeps_its_own_reason():
+    for kw in ({"btc_up": False}, {"btc_up": False, "btc_known": True}):
+        c = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None, **kw)
+        assert c.decision == ms.WATCH and c.reasons[-1] == BTC_DOWN_REASON and BTC_NO_DATA_REASON not in c.reasons
+
+
+def test_the_no_data_gate_has_nothing_to_stop_on_a_coin_that_would_not_buy_anyway_and_never_unblocks():
+    down = ms.score_coin("SOL", _grow(150, -0.01), bullish_flow=False, caution=None, headlines=None,
+                         btc_up=False, btc_known=False)
+    assert down.decision == ms.WATCH and BTC_NO_DATA_REASON not in down.reasons
+    blocked = ms.score_coin("SOL", _grow(150, 0.01), bullish_flow=False, caution="x", headlines=None,
+                            btc_up=False, btc_known=False)
+    assert blocked.decision == ms.BLOCK and BTC_NO_DATA_REASON not in blocked.reasons
+    short = ms.score_coin("SOL", _grow(100, 0.01), bullish_flow=False, caution=None, headlines=None,
+                          btc_up=False, btc_known=False)
+    assert short.reasons == ["мало истории"]
+
+
+def test_bitcoin_being_known_or_not_changes_nothing_without_the_gate():
+    for btc_up in (None, True):
+        c = ms.score_coin("ETH", _grow(150, 0.01), bullish_flow=False, caution=None, headlines=None,
+                          btc_up=btc_up, btc_known=False)
+        assert c.decision == ms.BUY and BTC_NO_DATA_REASON not in c.reasons and BTC_DOWN_REASON not in c.reasons
 
 
 def test_an_alt_uptrend_is_a_buy_while_bitcoin_is_above_its_100_day_average():
