@@ -222,10 +222,11 @@ def period_of(klass: str, day: dt.date) -> str | None:
 def take_trades(bars: Sequence[data.Bar], signals: Sequence[setups.Signal], exit_kind: str, *,
                 costs: ins.Costs, entry: str, atr: Sequence[float | None],
                 session: data.Session | None = None,
-                e0_target_r: float | None = None) -> tuple[list[exits.Trade], Counts]:
+                e0_target_r: float | None = None, **sim_kw) -> tuple[list[exits.Trade], Counts]:
     """Walk the signals in order, one open trade at a time: a signal read before the previous trade
     exited is blocked (read at the close of the exit bar is allowed); a skipped entry takes no slot;
-    a trade still open at the end of the data blocks everything after it."""
+    a trade still open at the end of the data blocks everything after it. `sim_kw` goes to
+    exits.simulate untouched (round 2's trail, time stop, exit condition and R bound)."""
     counts = Counts(signals=len(signals))
     trades: list[exits.Trade] = []
     busy_until = -1
@@ -234,7 +235,7 @@ def take_trades(bars: Sequence[data.Bar], signals: Sequence[setups.Signal], exit
             counts.blocked += 1
             continue
         trade = exits.simulate(bars, sig, exit_kind, costs=costs, entry=entry, session=session,
-                               atr=atr, e0_target_r=e0_target_r)
+                               atr=atr, e0_target_r=e0_target_r, **sim_kw)
         if trade.status == "closed":
             trades.append(trade)
             counts.closed += 1
