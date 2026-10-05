@@ -1,4 +1,4 @@
-"""cfd/indicators.py: ATR, EMA, SMA, ADX and the rolling highest/lowest the setups are built on --
+"""cfd/indicators.py: ATR, EMA, SMA, ADX, RSI and the rolling highest/lowest the setups are built on --
 pure functions, each returning a list aligned with its input (None until there is enough history).
 
 The smoothing is Wilder's where the spec says so (ATR and ADX, §1.2), done the way Pine's ta.atr
@@ -85,6 +85,33 @@ def _rma(values: Sequence[float | None], length: int) -> list[float | None]:
     for i in range(seed + 1, len(values)):
         prev = (prev * (length - 1) + values[i]) / length   # type: ignore[operator]
         out[i] = prev
+    return out
+
+
+def rsi(closes: Sequence[float], n: int = 14) -> list[float | None]:
+    """Wilder's relative strength index of a close series (Pine's ta.rsi): the average gain and the
+    average loss of the close-to-close changes are Wilder-smoothed (an RMA seeded with the simple
+    average of the first `n` changes), and RSI = 100 - 100 / (1 + average gain / average loss). The
+    first value is at index `n`. Like Pine, a window without losses reads 100 (also when there were
+    no gains either) and one without gains reads 0. H4 (IDX-DIP) reads RSI(2)."""
+    _check(n)
+    gains: list[float | None] = [None] * len(closes)
+    losses: list[float | None] = [None] * len(closes)
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gains[i] = change if change > 0 else 0.0
+        losses[i] = -change if change < 0 else 0.0
+    up, down = _rma(gains, n), _rma(losses, n)
+    out: list[float | None] = [None] * len(closes)
+    for i in range(len(closes)):
+        if up[i] is None or down[i] is None:
+            continue
+        if down[i] == 0:                                      # type: ignore[operator]
+            out[i] = 100.0
+        elif up[i] == 0:                                      # type: ignore[operator]
+            out[i] = 0.0
+        else:
+            out[i] = 100.0 - 100.0 / (1.0 + up[i] / down[i])  # type: ignore[operator]
     return out
 
 
