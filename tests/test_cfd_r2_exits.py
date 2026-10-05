@@ -613,7 +613,8 @@ GOLDEN_DAILY = {
     (22, "E2", "^GSPC"): (261, 252, 0, 9, -3.10605328, 18.40186752, 21.5079208, 7012, 116383),
 }
 GOLDEN_E0_TARGET5 = {21: (223, 33.67667587), 22: (258, 32.10843279)}       # (closed, total R)
-GOLDEN_GOLD = {                                                              # (signals, closed, total R, sum of exit bars)
+# (signals, closed, total R, sum of exit bars)
+GOLDEN_GOLD = {
     "E0": (261, 261, 16.90676263, 408687),
     "E1": (261, 261, 21.70650054, 408703),
     "E2": (261, 261, 21.70650054, 408703),

@@ -287,7 +287,8 @@ def test_h4_pays_the_long_financing_rate_it_is_long_only():
                                          daily(H4_ROWS, start=dt.datetime(2023, 1, 1, tzinfo=UTC)))
     # 0.020 a night (the long rate), not the 0.005 of a short: 16 nights of EL at 0.005 would cost less
     el = next(r for r in rows if r.exit_kind == "EL")
-    short_rate_result = 0.25 * 0.5 + 0.25 * 1.0 + 0.5 * (248.0 - 244.5) / H4_R - (0.030 + 16 * 0.005) / 100 * 244.5 / H4_R
+    gross = 0.25 * 0.5 + 0.25 * 1.0 + 0.5 * (248.0 - 244.5) / H4_R
+    short_rate_result = gross - (0.030 + 16 * 0.005) / 100 * 244.5 / H4_R
     assert el.result_r != pytest.approx(short_rate_result)
 
 
@@ -899,7 +900,8 @@ def test_run_is_deterministic_and_reads_the_caches_the_second_time(tmp_path):
     b = research2.run(fetch=synthetic_fetch(calls), rates_fetch=fake_fred(fred_calls),
                       out_dir=tmp_path / "b", **kwargs)
     assert len(calls) == n_bars and len(fred_calls) == n_rates                     # all from the caches
-    assert (tmp_path / "a" / "BACKTEST_REPORT_R2.md").read_text() == (tmp_path / "b" / "BACKTEST_REPORT_R2.md").read_text()
+    report_a = (tmp_path / "a" / "BACKTEST_REPORT_R2.md").read_text()
+    assert report_a == (tmp_path / "b" / "BACKTEST_REPORT_R2.md").read_text()
     assert a.decision.enabled == b.decision.enabled
     research2.run(fetch=synthetic_fetch(calls), rates_fetch=fake_fred(fred_calls), out_dir=tmp_path / "c",
                   refresh=True, **kwargs)
