@@ -17,6 +17,17 @@ five bars vs the 4-hour EMA50 of the previous completed 4-hour bar) and in the s
   filter:   ADX(14) >= 20
   stop:     the lowest low of the last 5 bars - 0.5 ATR
 and the short side is the mirror image.
+
+Round 2 (docs/cfd/PREREGISTRATION_R2.md) adds two more, with the same shape (bars in, signals out):
+  IDX-DIP (H4)   `idx_dip`: long only, close > SMA200 and RSI(2) < 10 at the close of bar t; the stop,
+                 fixed at the signal, is the close - 2.5 ATR.
+  CARRY-FX (H5)  `carry_states` and `carry_fx`: the carry-gated trend of carry_strategy.py (its frozen
+                 2.5 % band and 200-day average) with the rates of the two currencies given per bar.
+                 The state at each close is LONG / SHORT / FLAT; a signal is a change from FLAT (or
+                 from the opposite side) into LONG or SHORT, with the stop at the close -/+ 6 ATR.
+                 The exits of H5 leave when the state stops being the trade's side, so the state
+                 series is public.
+BO-D is reused as it is for H3 (CR-BO) on other instruments.
 """
 from __future__ import annotations
 
@@ -40,6 +51,13 @@ SMA_LEN = 200                # BO-D: the trend side
 BREAKOUT_STOP_ATR = 2.5
 HTF_HOURS = 4                # PB-H1-GOLD: the higher timeframe is 4 hours ...
 HTF_EMA_LEN = 50             # ... and its EMA has this length
+RSI_LEN = 2                  # IDX-DIP: RSI(2) ...
+RSI_MAX = 10.0               # ... under this
+DIP_STOP_ATR = 2.5           # IDX-DIP: stop = signal close - 2.5 ATR
+CARRY_UPPER = 1.025          # CARRY-FX: long above 1.025 * SMA200 (carry_strategy.BAND_PCT = 2.5)
+CARRY_LOWER = 0.975          # ... short below 0.975 * SMA200
+CARRY_STOP_ATR = 6.0         # CARRY-FX: stop = signal close -/+ 6 ATR (carry_strategy.TRAIL_ATR)
+LONG, SHORT, FLAT = "long", "short", "flat"      # the states of CARRY-FX
 
 
 @dataclass(frozen=True)
@@ -113,6 +131,71 @@ def bo_d(bars: Sequence[Bar], *, min_bars: int = MIN_BARS_BEFORE_SIGNAL) -> list
             out.append(Signal(i, "long", c - BREAKOUT_STOP_ATR * a, a))
         elif c < prev_ll and c < avg:
             out.append(Signal(i, "short", c + BREAKOUT_STOP_ATR * a, a))
+    return out
+
+
+# ---------------------------------------------------------------- IDX-DIP (round 2, H4)
+def idx_dip(bars: Sequence[Bar], *, min_bars: int = MIN_BARS_BEFORE_SIGNAL) -> list[Signal]:
+    """Buying a sharp dip in a rising equity index, long only: at the close of bar t the close is
+    above the 200-day average and Wilder's RSI(2) of the closes is under 10 (both strict). The stop,
+    fixed at the signal, is the close - 2.5 ATR (R is measured from the actual entry, the next open)."""
+    closes = ind.closes(bars)
+    atr = ind.atr(bars, ATR_LEN)
+    sma = ind.sma(closes, SMA_LEN)
+    rsi = ind.rsi(closes, RSI_LEN)
+    out: list[Signal] = []
+    for i in range(max(min_bars, 1), len(bars)):
+        a, avg, r = atr[i], sma[i], rsi[i]
+        if a is None or avg is None or r is None:
+            continue
+        c = closes[i]
+        if c > avg and r < RSI_MAX:
+            out.append(Signal(i, "long", c - DIP_STOP_ATR * a, a))
+    return out
+
+
+# ---------------------------------------------------------------- CARRY-FX (round 2, H5)
+def carry_states(bars: Sequence[Bar], base_rates: Sequence[float | None],
+                 quote_rates: Sequence[float | None]) -> list[str]:
+    """The state at the close of every bar: "long" when the close is above 1.025 * SMA200 and the
+    base currency's rate is above the quote currency's; "short" when it is below 0.975 * SMA200 and
+    the base rate is below the quote rate; otherwise "flat" (also while the average or either rate is
+    missing, and when the rates are equal). `base_rates` and `quote_rates` hold, for each bar, the
+    rate in force on its date (rates.Rates.rate_on), so they have the length of `bars`."""
+    if not len(bars) == len(base_rates) == len(quote_rates):
+        raise ValueError("bars, base_rates and quote_rates must have the same length")
+    closes = ind.closes(bars)
+    sma = ind.sma(closes, SMA_LEN)
+    out: list[str] = []
+    for c, avg, base, quote in zip(closes, sma, base_rates, quote_rates):
+        if avg is None or base is None or quote is None:
+            out.append(FLAT)
+        elif c > avg * CARRY_UPPER and base > quote:
+            out.append(LONG)
+        elif c < avg * CARRY_LOWER and base < quote:
+            out.append(SHORT)
+        else:
+            out.append(FLAT)
+    return out
+
+
+def carry_fx(bars: Sequence[Bar], base_rates: Sequence[float | None],
+             quote_rates: Sequence[float | None], *,
+             min_bars: int = MIN_BARS_BEFORE_SIGNAL) -> list[Signal]:
+    """The entries of the carry-gated trend: a signal at the close of bar t when the state
+    (`carry_states`) changes from flat, or from the opposite side, into long or short. The stop,
+    fixed at the signal, is the close -/+ 6 ATR; R is measured from the actual entry, the next open.
+    The state series itself, which the exits of H5 read, is `carry_states` of the same arguments."""
+    states = carry_states(bars, base_rates, quote_rates)
+    closes = ind.closes(bars)
+    atr = ind.atr(bars, ATR_LEN)
+    out: list[Signal] = []
+    for i in range(max(min_bars, 1), len(bars)):
+        state, a = states[i], atr[i]
+        if state == FLAT or state == states[i - 1] or a is None:
+            continue
+        stop = closes[i] - CARRY_STOP_ATR * a if state == LONG else closes[i] + CARRY_STOP_ATR * a
+        out.append(Signal(i, state, stop, a))
     return out
 
 
