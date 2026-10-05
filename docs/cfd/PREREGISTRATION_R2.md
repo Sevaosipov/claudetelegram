@@ -151,3 +151,20 @@ beside it.
 - `docs/cfd/enabled.json` gains the round-2 outcome:
   `{"round2": {"enabled": ["CR-BO", …], "exit": {"CR-BO": "E1", …}, "run_at": …}}`. The round-1 keys stay as they
   are.
+
+## Amendments before the first run (2026-10-05, no round-2 backtest has been executed)
+
+The builder found three places where the text above was ambiguous or would distort the data. They are settled
+here, before any result exists:
+
+- **A1. H5's hold condition is the original's.** "The state stops being the trade's side" means the hold condition
+  of `carry_strategy.py`:
+  - a long is held while close > SMA200 and rate(base) > rate(quote);
+  - a short is held while close < SMA200 and rate(base) < rate(quote).
+
+  The 2.5 % band applies to entries only. H5 is defined as the user's rule, not re-tuned; leaving on a fall back
+  inside the band would be a different rule.
+- **A2. H5 uses ATR(20)** for its stop and its trailing stop: the original's `ATR_LEN`. H3 and H4 keep ATR(14).
+- **A3. Crypto hygiene.** The rule that drops a bar whose high or low is more than 15 % from its close was written
+  for bad FX ticks. Alt-coins move that far on real days, and those are the breakout days under test. For crypto
+  symbols the threshold is 60 %. Every other hygiene rule is unchanged.
