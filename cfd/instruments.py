@@ -9,6 +9,13 @@ financing table -- because gold and silver pay different round trips but the sam
 only indices charge by side.
 
 Costs are percentages of price (0.015 means 0.015 %). Single-stock CFDs are out of scope (§1.1).
+
+Round 2 (docs/cfd/PREREGISTRATION_R2.md) adds, without moving a round-1 value: the eleven alt coins
+of H3 (`ALT_COINS`, a round trip of 0.40 % instead of bitcoin's 0.25 %, the same financing), the
+index and FX universes of H4 and H5 (`INDEX_UNIVERSE`, `FX_UNIVERSE`, both taken from the round-1
+table), the base currency of an FX pair, and H5's own financing of 0.004 % a night
+(`carry_fx_costs`). The alts are not in `UNIVERSE`: round 1 iterates it, and its 23 instruments are
+frozen.
 """
 from __future__ import annotations
 
@@ -36,6 +43,7 @@ ROUND_TRIP_PCT = {
     "energy": 0.060,
     "indices": 0.030,
     "crypto": 0.250,
+    "crypto_alt": 0.400,        # round 2, H3: alts trade wider than bitcoin
 }
 # (long, short) per night held
 FINANCING_PCT = {
@@ -45,6 +53,8 @@ FINANCING_PCT = {
     "energy": (0.020, 0.020),
     "indices": (0.020, 0.005),
     "crypto": (0.060, 0.060),
+    # round 2, H5: about 1.5 % a year, the broker's markup alone (the carry earned is not credited)
+    "fx_carry": (0.004, 0.004),
 }
 
 # ---------------------------------------------------------------- unit labels (live messages)
@@ -92,6 +102,14 @@ class Instrument:
         long_, short = FINANCING_PCT[self.financing_key]
         return Costs(ROUND_TRIP_PCT[self.cost_key], long_, short)
 
+    @property
+    def base(self) -> str:
+        """The base currency of an FX pair (EUR of EURUSD, USD of USDJPY); `quote` is the other.
+        Only FX pairs have one: H5 (CARRY-FX) compares the interest rates of the two."""
+        if self.gate_class != "FX":
+            raise ValueError(f"{self.name} is not an FX pair: it has no base currency")
+        return self.name[:3]
+
 
 def _fx(symbol: str, klass: str, quote: str) -> Instrument:
     key = "fx_major" if klass == FX_MAJOR else "fx_cross"
@@ -130,8 +148,31 @@ UNIVERSE: tuple[Instrument, ...] = (
     Instrument("ETH-USD", "ETHUSD", CRYPTO, "crypto", "crypto", "USD", UNIT_CRYPTO),
 )
 
-_BY_SYMBOL = {i.symbol: i for i in UNIVERSE}
-_BY_NAME = {i.name: i for i in UNIVERSE}
+# ---------------------------------------------------------------- round 2 (PREREGISTRATION_R2.md)
+def _alt(symbol: str, ticker: str) -> Instrument:
+    return Instrument(symbol, f"{ticker}USD", CRYPTO, "crypto_alt", "crypto", "USD", UNIT_CRYPTO)
+
+
+# H3 (CR-BO): the eleven coins the bot follows besides BTC and ETH, in the pre-registration's order
+ALT_COINS: tuple[Instrument, ...] = (
+    _alt("SOL-USD", "SOL"),
+    _alt("XRP-USD", "XRP"),
+    _alt("BNB-USD", "BNB"),
+    _alt("DOGE-USD", "DOGE"),
+    _alt("AVAX-USD", "AVAX"),
+    _alt("LTC-USD", "LTC"),
+    _alt("LINK-USD", "LINK"),
+    _alt("TRX-USD", "TRX"),
+    _alt("ENA-USD", "ENA"),
+    _alt("HYPE32196-USD", "HYPE"),
+    _alt("SUI20947-USD", "SUI"),
+)
+# H4 (IDX-DIP): the six indices; H5 (CARRY-FX): the eleven FX pairs (majors and crosses)
+INDEX_UNIVERSE: tuple[Instrument, ...] = tuple(i for i in UNIVERSE if i.klass == INDICES)
+FX_UNIVERSE: tuple[Instrument, ...] = tuple(i for i in UNIVERSE if i.gate_class == "FX")
+
+_BY_SYMBOL = {i.symbol: i for i in UNIVERSE + ALT_COINS}
+_BY_NAME = {i.name: i for i in UNIVERSE + ALT_COINS}
 
 
 def by_symbol(symbol: str) -> Instrument:
@@ -145,3 +186,14 @@ def by_name(name: str) -> Instrument:
 def gold_intraday_costs() -> Costs:
     """PB-H1-GOLD pays the XAUUSD round trip and no financing: it is flat the same day (§1.4)."""
     return Costs(ROUND_TRIP_PCT["xauusd"], 0.0, 0.0)
+
+
+def carry_fx_costs(inst: Instrument) -> Costs:
+    """H5 (CARRY-FX): the pair's round-1 round trip (0.015 % a major, 0.030 % a cross) and its own
+    financing of 0.004 % a night on either side. The trade holds the higher-yielding currency, so it
+    in practice earns the rate difference less the broker's markup; charging the markup with no credit
+    for the carry is the conservative reading (PREREGISTRATION_R2.md)."""
+    if inst.gate_class != "FX":
+        raise ValueError(f"{inst.name} is not an FX pair: H5 trades FX pairs only")
+    long_, short = FINANCING_PCT["fx_carry"]
+    return Costs(ROUND_TRIP_PCT[inst.cost_key], long_, short)
