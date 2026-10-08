@@ -39,6 +39,10 @@ _PAIR = {
     "CHF": "EURCHF=X",
     "ISK": "EURISK=X",
     "PLN": "EURPLN=X",
+    # quote currencies of the CFD instruments (cfd/plan.py sizes a trade from its stop in the quote)
+    "JPY": "EURJPY=X",
+    "AUD": "EURAUD=X",
+    "NZD": "EURNZD=X",
 }
 
 # Used only when a live rate can't be fetched (offline, Yahoo hiccup). Measured
@@ -54,6 +58,9 @@ _FALLBACK_PER_EUR = {
     "CHF": 0.94,
     "ISK": 138.80,
     "PLN": 4.31,
+    "JPY": 172.0,
+    "AUD": 1.78,
+    "NZD": 1.96,
 }
 
 CACHE_TTL_SECONDS = 24 * 3600

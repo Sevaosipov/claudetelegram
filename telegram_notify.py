@@ -1178,3 +1178,104 @@ def format_cfd_status(settings, open_signals: list, closed_signals: list, today:
         lines.append("Открытых нет.")
     lines.append(_cfd_record(closed_signals) if closed_signals else "Закрытых пока нет.")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ the user's own CFD trades (cfd/plan.py)
+CFD_PLAN_RULE = ("на каждой цели закрывается четверть; стоп после TP1 — на вход, после TP2 — на TP1, "
+                 "после TP3 — на TP2")
+_CFD_STOP_AT = ("сработал исходный стоп", "сработал стоп на входе", "сработал стоп на TP1",
+                "сработал стоп на TP2")
+
+
+def _plan_price(plan, x: float) -> str:
+    """A price of a plan with the precision its instrument is quoted in: five decimals for an FX pair
+    (three with the yen), a coin's or an index's as cfd_price has it."""
+    from cfd import instruments as ins
+    inst = ins.by_symbol(plan.symbol)
+    if inst.gate_class != "FX":
+        return cfd_price(x)
+    return f"{x:,.{3 if inst.quote == 'JPY' else 5}f}".replace(",", " ").replace(".", ",")
+
+
+def _plan_unit(plan) -> str:
+    from cfd import instruments as ins
+    inst = ins.by_symbol(plan.symbol)
+    return plan.name.removesuffix("USD") if inst.klass == ins.CRYPTO else inst.unit
+
+
+def _plan_qty(plan, qty: float | None) -> str:
+    return f"{quantity(qty)} {_plan_unit(plan)}" if qty else "меньше минимального шага"
+
+
+def _plan_result(plan, result_r: float) -> tuple[str, str | None, bool]:
+    """A result as signal_line shows it: the money with R in brackets when the plan has a risk in euro,
+    R alone otherwise; and whether it is a gain."""
+    if plan.risk_eur is not None:
+        money_ = result_r * plan.risk_eur
+        return money_cents(money_), f" ({_cfd_r(result_r, 2)})", round(money_, 2) >= 0
+    return _cfd_r(result_r, 2), None, round(result_r, 2) >= 0
+
+
+def format_cfd_plan(plan, settings, *, qty_per_1000: float | None = None, why_not: str | None = None,
+                    html: bool = True) -> str:
+    """The answer to /cfd plan: the trade with its four stages, the risk and the quantity, the rule of
+    the stages, and whether it is followed (`why_not`: why it is not). `plan` is cfd.plan.Plan."""
+    long = plan.side == "long"
+    sign = 1 if long else -1
+    levels = " · ".join(f"TP{k} {_plan_price(plan, plan.entry + sign * k * plan.r)}" for k in range(1, 5))
+    if plan.risk_eur is not None:
+        sizing = f"риск {_cfd_pct(plan.risk_pct)}% = {_cfd_eur(plan.risk_eur)}, объём {_plan_qty(plan, plan.qty)}"
+    else:
+        sizing = (f"риск {_cfd_pct(settings.risk_pct)}%, объём на {CFD_REFERENCE_BALANCE} баланса: "
+                  f"{_plan_qty(plan, qty_per_1000)} (/cfd balance — задать свой)")
+    line = signal_line(DOT_GREEN if long else DOT_RED, plan.name,
+                       f"{'покупка' if long else 'продажа'} по {_plan_price(plan, plan.entry)}",
+                       f"стоп {_plan_price(plan, plan.stop0)}; {levels}; {sizing}", html=html)
+    if why_not:
+        follow = f"Не отслеживаю: {why_not}."
+    else:
+        follow = f"№{plan.id} — слежу за ценой, напишу на каждой цели и на стопе. /cfd cancel {plan.id} — перестать."
+        if plan.offset:
+            follow += (f" Цены — по фьючерсу {plan.symbol}, поправка к вашей цене "
+                       f"{'+' if plan.offset > 0 else '−'}{_price(abs(plan.offset))}.")
+    return "\n".join([line, _e(CFD_PLAN_RULE[0].upper() + CFD_PLAN_RULE[1:] + ".", html), _e(follow, html)])
+
+
+def format_cfd_plan_notice(notice, *, html: bool = True) -> str:
+    """The message of one event of a followed trade (cfd.plan.PlanNotice): a stage taken, or the stop."""
+    plan = notice.plan
+    result, extra, gain = _plan_result(plan, notice.result_r)
+    price = _plan_price(plan, notice.price)
+    if notice.kind == "tp" and plan.status == "open":
+        return signal_line(DOT_GREEN, plan.name, f"взят TP{notice.k} {price}",
+                           f"закройте четверть, стоп на {_plan_price(plan, notice.stop)}",
+                           result=result, extra=extra, label="закрыто на", html=html)
+    if notice.kind == "tp":
+        return signal_line(DOT_GREEN, plan.name, f"взят TP{notice.k} {price}", "сделка закрыта",
+                           result=result, extra=extra, html=html)
+    return signal_line(DOT_GREEN if gain else DOT_RED, plan.name, _CFD_STOP_AT[notice.k],
+                       f"закрыто по {price}", result=result, extra=extra, html=html)
+
+
+def _cfd_plan_line(plan, html: bool) -> str:
+    long = plan.side == "long"
+    stage = f"взят TP{plan.stage}" if plan.stage else "целей пока нет"
+    return (f"{DOT_GREEN if long else DOT_RED} №{plan.id} {_b(plan.name, html)} — "
+            f"{'покупка' if long else 'продажа'} по {_plan_price(plan, plan.entry)}, "
+            f"стоп {_plan_price(plan, plan.stop)}, {stage}")
+
+
+def format_cfd_plans(open_plans: list, closed_plans: list, *, html: bool = True) -> str:
+    """The part of /cfd about the user's own trades: the ones followed now, and the total of the closed
+    ones. Empty when there was never one."""
+    if not open_plans and not closed_plans:
+        return ""
+    lines = [_b("Мои сделки (/cfd plan)", html)]
+    lines += [_cfd_plan_line(p, html) for p in open_plans] or ["Открытых нет."]
+    if closed_plans:
+        total = f"Закрытые: {len(closed_plans)}, всего {_cfd_r(sum(p.result_r for p in closed_plans), 2)}"
+        sized = [p for p in closed_plans if p.risk_eur is not None]
+        if sized:
+            total += f" ({money_cents(sum(p.result_r * p.risk_eur for p in sized))})"
+        lines.append(total)
+    return "\n".join(lines)

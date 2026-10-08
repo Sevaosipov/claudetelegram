@@ -97,6 +97,7 @@ import sources
 import t212_account
 import telegram_notify
 from cfd import live as cfd_live
+from cfd import plan as cfd_plan
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "disclosures.db"
@@ -134,6 +135,8 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "TradingView и данными бота.\n"
              "/portfolio — ваш счёт Trading 212 и позиции /bought.\n"
              "/cfd — CFD-сигналы по 13 монетам (эксперимент): открытые, итоги, настройки.\n"
+             "/cfd plan XAUUSD buy 4461.80 stop 4449.10 — ваша CFD-сделка: 4 цели, риск и объём, "
+             "сообщение на каждой цели и на стопе.\n"
              "Сигналы на покупку приходят по пятницам, сигнал на продажу по вашим позициям — сразу.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
@@ -551,10 +554,20 @@ def _sync_t212(conn) -> int:
     return T212_KEY_RETRY_SECONDS if kind in ("unauthorized", "forbidden") else T212_SYNC_SECONDS
 
 
+def _track_cfd_plans(conn) -> None:
+    """One pass over the user's open CFD trades (cfd/plan.py: a message at each stage and at the close).
+    Whatever it raises is logged and the polling goes on."""
+    try:
+        cfd_plan.run(conn)
+    except Exception as e:
+        print(f"[telegram_bot] CFD plans failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=time.time,
            sleep=time.sleep, rounds: int | None = None) -> None:
     """The always-on loop: long-poll Telegram, and sync the Trading 212 account at start and then
-    every T212_SYNC_SECONDS (between two polls, so at most one long poll or one answer late). A
+    every T212_SYNC_SECONDS (between two polls, so at most one long poll or one answer late), and
+    follow the user's open CFD trades every cfd_plan.TRACK_SECONDS the same way. A
     poll that fails on the network is retried after a growing pause. `rounds` ends the loop after
     that many polls (tests); `clock` and `sleep` are the time seams.
 
@@ -563,6 +576,7 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
     too, rather than waiting out the difference. After a 401 or a 403 the next sync is an hour
     away, not 15 minutes: the key will not heal by itself."""
     next_sync, wait = clock(), T212_SYNC_SECONDS
+    next_plans = clock()
     backoff = 5
     done = 0
     while rounds is None or done < rounds:
@@ -571,6 +585,9 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
         if now >= next_sync or next_sync - now > wait:
             wait = _sync_t212(conn)
             next_sync = now + wait
+        if now >= next_plans or next_plans - now > cfd_plan.TRACK_SECONDS:
+            _track_cfd_plans(conn)
+            next_plans = now + cfd_plan.TRACK_SECONDS
         try:
             _poll_once(conn, token, chat_id, session)
             backoff = 5
