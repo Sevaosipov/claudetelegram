@@ -407,6 +407,33 @@ def scan_all(conn, send: Send, *, fetch: data.Fetch | None = None, today: dt.dat
     return made
 
 
+# ================================================================ the daily pass
+@dataclass(frozen=True)
+class RunResult:
+    tracked: int        # messages about signals already open (checkpoints, closes)
+    made: int           # new signals
+    paused: bool        # the scan was skipped
+
+
+def notify(notice: Notice) -> bool:
+    """Send one event to Telegram (telegram_notify.send_text, looked up at the call). True when it went out."""
+    import telegram_notify
+    return bool(telegram_notify.send_text(telegram_notify.format_cfd_notice(notice)))
+
+
+def run(conn, *, fetch: data.Fetch | None = None, today: dt.date | None = None,
+        send: Send | None = None) -> RunResult:
+    """The daily pass, called from bot.main after the positions step on a full run: 1. track the open
+    signals through the completed bars since their last one, a message per event; 2. unless paused, scan
+    the 13 coins for a new signal at yesterday's close. The bars come through cfd.data's `fetch` seam."""
+    send = send or notify
+    settings = get_settings(conn)
+    feed = Feed(fetch, today)
+    tracked = track_all(conn, send, feed=feed)
+    made = 0 if settings.paused else scan_all(conn, send, feed=feed, settings=settings)
+    return RunResult(tracked, made, settings.paused)
+
+
 # ================================================================ the commands (/cfd)
 USAGE = {
     "balance": "/cfd balance 500 — ваш баланс в евро (0 — убрать): от него считается объём",
