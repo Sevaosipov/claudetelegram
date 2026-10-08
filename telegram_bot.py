@@ -123,6 +123,7 @@ _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
 POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
                    "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST\n"
                    "/sold TICKER — отметить продажу\n"
+                   "Просто /bought или /sold — бот спросит, что именно\n"
                    "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»\n"
                    "/portfolio — ваши позиции")
 
@@ -234,7 +235,76 @@ _BUY_WORDS = {"/bought", "/buy", "/b", "bought", "buy", "купил", "купи�
 _SELL_WORDS = {"/sold", "/sell", "/s", "sold", "sell", "продал", "продала", "продано", "продать", "/продал"}
 _FILLER = {"по", "at", "@", "за", "for", "price", "цена"}
 _PRICE_RE = re.compile(r"^(?P<pre>[€$])?(?P<num>\d[\d\s.,]*)(?P<post>[€$]|eur|usd|евро)?$", re.IGNORECASE)
-BUY_OR_SELL_HINT = "Купили или продали? /bought {t} {p} — купили, /sold {t} — продали."
+BUY_OR_SELL_HINT = "{t} по {p} — купили или продали? Нажмите /bought или /sold."
+ASK_BOUGHT = ("Что купили? Пришлите тикер и цену, например: XRP 1.37 "
+              "(без цены — по последнему закрытию).")
+ASK_SOLD = "Что продали? Пришлите тикер: {names}."
+NOTHING_TO_SELL = ("Позиций, записанных через /bought, сейчас нет. "
+                   "Продажи на счёте Trading 212 бот видит сам.")
+PENDING_SECONDS = 300
+# What a bare /bought or /sold (a tap on the command) is waiting for, in this process only:
+# {"kind": "buy" | "sell" | "which", "ticker": ..., "price": ..., "at": time}. "which" is a ticker and
+# a price sent with no verb: the next bare /bought or /sold completes it.
+_PENDING: dict = {}
+
+
+def _pending(now: float | None = None) -> dict | None:
+    """The request a bare command left open, unless it is older than PENDING_SECONDS."""
+    now = time.time() if now is None else now
+    if _PENDING and 0 <= now - _PENDING.get("at", 0) <= PENDING_SECONDS:
+        return dict(_PENDING)
+    _PENDING.clear()
+    return None
+
+
+def _set_pending(kind: str, ticker: str | None = None, price: str | None = None) -> None:
+    _PENDING.clear()
+    _PENDING.update(kind=kind, ticker=ticker, price=price, at=time.time())
+
+
+def _complete_pending(text: str) -> str | None:
+    """The full command a message completes, or None when it completes nothing: a bare /bought or
+    /sold after «XRP 1.37»; or, after a bare /bought or /sold, the ticker (and for a buy the price)
+    it asked for. Anything else is an ordinary message and the open request is forgotten."""
+    pending = _pending()
+    if pending is None:
+        return None
+    parts = [w for w in text.split() if w.lower() not in _FILLER]
+    first = parts[0].lower().split("@")[0] if parts else ""
+    if pending["kind"] == "which":
+        if len(parts) == 1 and (first in _BUY_WORDS or first in _SELL_WORDS):
+            _PENDING.clear()
+            if first in _SELL_WORDS:
+                return f"/sold {pending['ticker']}"
+            return f"/bought {pending['ticker']} {pending['price']}"
+        return None
+    if first.startswith("/") or not 1 <= len(parts) <= 2 or not _position_listing(parts[0]):
+        if not (len(parts) == 1 and (first in _BUY_WORDS or first in _SELL_WORDS)):
+            _PENDING.clear()                    # another command, a question: the request is dropped
+        return None
+    if len(parts) == 2 and _price_token(parts[1]) is None:
+        _PENDING.clear()
+        return None
+    _PENDING.clear()
+    if pending["kind"] == "sell":
+        return f"/sold {parts[0]}"
+    return " ".join(["/bought", *parts])
+
+
+def _ask_what(conn, cmd: str) -> None:
+    """A bare /bought or /sold: ask for the rest, and wait for it (_PENDING)."""
+    if cmd == "/bought":
+        _set_pending("buy")
+        telegram_notify.send_text(ASK_BOUGHT)
+        return
+    mine = [p for p in positions.open_positions(conn) if p.origin != positions.T212]
+    if not mine:
+        _PENDING.clear()
+        telegram_notify.send_text(NOTHING_TO_SELL)
+        return
+    _set_pending("sell")
+    names = ", ".join(telegram_notify._esc(p.ticker.removeprefix("CRYPTO:")) for p in mine)
+    telegram_notify.send_text(ASK_SOLD.format(names=names))
 
 
 def _price_token(token: str) -> tuple[float, str | None] | None:
@@ -281,6 +351,7 @@ def _handle_positions_command(conn, text: str) -> bool:
     """/portfolio (/positions too), /bought, /sold -- the positions that positions.py tracks for
     close alerts. Returns False for anything else. A buy or a sale may be typed loosely
     (_normalise_trade_text): /buy, /sell, without the slash, with a currency sign on the price."""
+    text = _complete_pending(text) or text
     parts = text.split()
     cmd = parts[0].lower().split("@")[0] if parts else ""
     if cmd not in ("/portfolio", "/positions"):
@@ -289,8 +360,12 @@ def _handle_positions_command(conn, text: str) -> bool:
             return False
         cmd, ticker_text, price_text = trade
         if cmd == "?":
+            _set_pending("which", ticker_text, price_text)
             telegram_notify.send_text(BUY_OR_SELL_HINT.format(
                 t=telegram_notify._esc(ticker_text.upper()), p=telegram_notify._esc(price_text)))
+            return True
+        if ticker_text is None:                 # a bare /bought or /sold: a tap on the command
+            _ask_what(conn, cmd)
             return True
         parts = [cmd] + [x for x in (ticker_text, price_text) if x]
     if cmd in ("/portfolio", "/positions"):
@@ -361,7 +436,8 @@ def _handle_positions_command(conn, text: str) -> bool:
     try:
         pos = positions.open_position(conn, ticker, price, source=source)
     except ValueError:
-        telegram_notify.send_text(f"Позиция {ticker} уже открыта. /sold {ticker}, чтобы закрыть.")
+        telegram_notify.send_text(f"Позиция {ticker} уже открыта. /sold {ticker.removeprefix('CRYPTO:')}, "
+                                  "чтобы закрыть.")
         return True
     insiders = ", ".join(telegram_notify._esc(n) for n in pos.insiders)
     if pos.insiders:

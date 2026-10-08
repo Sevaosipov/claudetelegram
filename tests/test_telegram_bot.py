@@ -175,6 +175,7 @@ def replies(monkeypatch):
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: None)
+    tb._PENDING.clear()
     return sent
 
 
@@ -494,7 +495,7 @@ def test_with_no_price_to_be_found_the_hint_is_a_command_that_keeps_the_listing(
 
 
 @pytest.mark.parametrize("text", ["/bought .OL 5", "/bought EQNR.OL abc", "/bought TOOLONGTICKER.OL 5",
-                                  "/bought EQNR.OL 0", "/sold .ST", "/bought"])
+                                  "/bought EQNR.OL 0", "/sold .ST"])
 def test_a_bad_listing_or_price_gets_the_usage(conn, replies, text):
     import positions
     tb._handle_message(conn, text)
@@ -773,6 +774,7 @@ def test_the_positions_usage_says_how_to_record_a_buy_and_a_sale():
         "/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
         "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST",
         "/sold TICKER — отметить продажу",
+        "Просто /bought или /sold — бот спросит, что именно",
         "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»",
         "/portfolio — ваши позиции"]
     assert tb.POSITIONS_USAGE in tb.HELP_TEXT
@@ -1373,7 +1375,77 @@ def test_a_ticker_and_a_price_with_no_verb_asks_which_it_was(conn, replies):
     import positions
     tb._handle_message(conn, "Xrp €1.3676")
     assert positions.open_positions(conn) == []
-    assert replies[-1] == "Купили или продали? /bought XRP €1.3676 — купили, /sold XRP — продали."
+    assert replies[-1] == "XRP по €1.3676 — купили или продали? Нажмите /bought или /sold."
+
+
+# ---- a bare /bought or /sold (a tap on the command in Telegram) asks for the rest and waits for it
+def test_a_tap_on_bought_after_a_ticker_and_a_price_records_the_buy(conn, replies):
+    import positions
+    tb._handle_message(conn, "Xrp €1.3676")
+    tb._handle_message(conn, "/bought")
+    pos = positions.find_open(conn, "CRYPTO:XRP")
+    assert pos.entry_price == pytest.approx(1.3676 * 1.16) and replies[-1].startswith("Записал CRYPTO:XRP")
+
+
+def test_a_tap_on_sold_after_a_ticker_and_a_price_closes_the_position(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought XRP 1.37")
+    tb._handle_message(conn, "xrp 1.50")
+    tb._handle_message(conn, "/sold")
+    assert positions.open_positions(conn) == [] and replies[-1] == "Позиция CRYPTO:XRP закрыта."
+
+
+def test_a_bare_bought_asks_what_and_takes_the_next_message(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought")
+    assert replies[-1] == tb.ASK_BOUGHT and positions.open_positions(conn) == []
+    tb._handle_message(conn, "sol по 150,5")
+    assert positions.find_open(conn, "CRYPTO:SOL").entry_price == 150.5
+
+
+def test_a_bare_sold_lists_the_recorded_positions_and_takes_the_next_ticker(conn, replies):
+    import positions
+    tb._handle_message(conn, "/sold")
+    assert replies[-1] == tb.NOTHING_TO_SELL and not tb._PENDING
+    tb._handle_message(conn, "/bought XRP 1.37")
+    tb._handle_message(conn, "/bought NVDA 180")
+    tb._handle_message(conn, "/sold")
+    assert replies[-1] == "Что продали? Пришлите тикер: XRP, NVDA."
+    tb._handle_message(conn, "xrp")
+    assert [p.ticker for p in positions.open_positions(conn)] == ["NVDA"]
+    assert replies[-1] == "Позиция CRYPTO:XRP закрыта."
+
+
+def test_a_bare_sold_does_not_offer_a_trading_212_holding(conn, replies):
+    import positions
+    positions.open_position(conn, "AAPL", 250.0)
+    conn.execute("UPDATE positions SET origin = ?", (positions.T212,))
+    tb._handle_message(conn, "/sold")
+    assert replies[-1] == tb.NOTHING_TO_SELL
+
+
+def test_an_open_request_is_dropped_by_anything_else_and_by_time(conn, replies, analysis, monkeypatch):
+    import positions
+    tb._handle_message(conn, "/bought")
+    tb._handle_message(conn, "why did gold fall today?")            # a question, not the answer
+    assert not tb._PENDING and positions.open_positions(conn) == []
+    tb._handle_message(conn, "/bought")
+    monkeypatch.setattr(tb.time, "time", lambda: tb._PENDING["at"] + tb.PENDING_SECONDS + 1)
+    assert tb._complete_pending("XRP 1.37") is None and not tb._PENDING
+
+
+def test_a_second_tap_keeps_the_request_open(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought")
+    tb._handle_message(conn, "/bought")
+    tb._handle_message(conn, "XRP 1.37")
+    assert positions.find_open(conn, "CRYPTO:XRP") is not None
+
+
+def test_an_already_open_coin_names_the_command_to_close_it_without_the_prefix(conn, replies):
+    tb._handle_message(conn, "/bought XRP 1.37")
+    tb._handle_message(conn, "/bought XRP 1.40")
+    assert replies[-1] == "Позиция CRYPTO:XRP уже открыта. /sold XRP, чтобы закрыть."
 
 
 def test_an_ordinary_sentence_starting_with_sold_is_not_a_command(conn, monkeypatch):
