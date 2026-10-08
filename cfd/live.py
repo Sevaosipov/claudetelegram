@@ -13,14 +13,17 @@ a signal bar) with the sizing, and the daily pass that ties them to Telegram.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 import db
+import fx
 from cfd import data, exits
 from cfd import indicators as ind
 from cfd import instruments as ins
+from cfd import setups
 from cfd.data import Bar
 
 # ------------------------------------------------------------------ settings (kv_cache)
@@ -307,3 +310,95 @@ def track_all(conn, send: Send, *, fetch: data.Fetch | None = None, today: dt.da
         except Exception as e:
             print(f"[CFD] {sig.coin}: tracking failed: {type(e).__name__}: {e}", file=sys.stderr)
     return sent
+
+
+# ================================================================ sizing
+def qty_step(price: float) -> float:
+    """The smallest step of a quantity, by the price of the coin: 0.0001 above 100, whole coins under 1,
+    hundredths from 1 to 100."""
+    if price > 100:
+        return 0.0001
+    if price < 1:
+        return 1.0
+    return 0.01
+
+
+def size_qty(risk_eur: float, r_usd: float, price: float, conn=None) -> float:
+    """How many coins risk `risk_eur` over a stop `r_usd` away (every coin is quoted in dollars; fx.to_eur
+    turns R into euro), rounded down to the step of the price."""
+    r_eur = fx.to_eur(r_usd, "USD", conn)
+    step = qty_step(price)
+    qty = math.floor(risk_eur / r_eur / step + 1e-9) * step
+    return round(qty, 4)
+
+
+def open_risk_pct(conn, settings: Settings) -> float:
+    """The risk, in percent of the balance, that the open signals carry: each its own risk_pct, and a
+    signal made with no balance set (risk_pct NULL) the current risk percent."""
+    return sum(s.risk_pct if s.risk_pct is not None else settings.risk_pct for s in open_signals(conn))
+
+
+# ================================================================ the scanner
+MIN_R_ATR, MAX_R_ATR = exits.MIN_R_ATR, exits.MAX_R_ATR       # the backtest's R rules
+REFERENCE_BALANCE = 1000.0                                    # the balance a message without one sizes for
+
+
+def scan_coin(conn, inst: ins.Instrument, feed: Feed, settings: Settings, send: Send) -> bool:
+    """Read the last completed bar of a coin: when it is a BO-D signal bar and the coin has no open
+    signal and none for that date, make the signal (sized, checked against the open-risk limit), tell it
+    with `send`, and keep the row once the message went out. True when a signal was made."""
+    coin = coin_of(inst)
+    bars = feed.bars(inst.symbol)
+    if not bars:
+        return False
+    last = bars[-1]
+    day = last.ts.date()
+    if day != feed.today - dt.timedelta(days=1):
+        print(f"[CFD] {coin}: the last completed bar is {day}, not yesterday -- not read", file=sys.stderr)
+        return False
+    signal = next((s for s in setups.bo_d(bars) if s.index == len(bars) - 1), None)
+    if signal is None:
+        return False
+    if any(s.coin == coin for s in open_signals(conn)) or has_signal(conn, coin, day.isoformat()):
+        return False
+    forming = feed.forming_open(inst.symbol)
+    entry = forming if forming else last.close
+    distance = (entry - signal.stop) if signal.side == "long" else (signal.stop - entry)
+    if distance <= MIN_R_ATR * signal.atr or distance > MAX_R_ATR * signal.atr:
+        print(f"[CFD] {coin}: {signal.side} signal skipped, R {distance:.6g} is outside "
+              f"{MIN_R_ATR:g}-{MAX_R_ATR:g} ATR", file=sys.stderr)
+        return False
+
+    risk_pct = risk_eur = qty = qty_per_1000 = None
+    if settings.balance_eur:
+        risk_pct = settings.risk_pct
+        risk_eur = round(settings.balance_eur * risk_pct / 100.0, 2)
+        qty = size_qty(risk_eur, distance, entry, conn)
+    else:
+        qty_per_1000 = size_qty(REFERENCE_BALANCE * settings.risk_pct / 100.0, distance, entry, conn)
+    total = open_risk_pct(conn, settings) + settings.risk_pct
+    over = (total, settings.max_open_risk_pct) if total > settings.max_open_risk_pct else None
+
+    draft = Signal(0, coin, inst.symbol, signal.side, day.isoformat(), entry, signal.stop, signal.stop,
+                   distance, 0, day.isoformat(), "open", None, None, None, risk_pct, risk_eur, qty, "")
+    if not send(Notice("entry", draft, qty_per_1000=qty_per_1000, over_limit=over)):
+        return False
+    insert_signal(conn, coin=coin, symbol=inst.symbol, side=signal.side, signal_date=day.isoformat(),
+                  entry=entry, stop0=signal.stop, r=distance, last_bar=day.isoformat(),
+                  risk_pct=risk_pct, risk_eur=risk_eur, qty=qty)
+    return True
+
+
+def scan_all(conn, send: Send, *, fetch: data.Fetch | None = None, today: dt.date | None = None,
+             settings: Settings | None = None, feed: Feed | None = None) -> int:
+    """Scan the 13 coins. One coin failing is logged and the others go on. Returns the number of
+    signals made."""
+    feed = feed or Feed(fetch, today)
+    settings = settings or get_settings(conn)
+    made = 0
+    for inst in COINS:
+        try:
+            made += scan_coin(conn, inst, feed, settings, send)
+        except Exception as e:
+            print(f"[CFD] {coin_of(inst)}: scan failed: {type(e).__name__}: {e}", file=sys.stderr)
+    return made
