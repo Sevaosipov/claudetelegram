@@ -1532,7 +1532,9 @@ def test_crypto_shows_the_coins_with_their_totals_and_portfolio_only_counts_them
     text = replies[-1]
     assert text.startswith("<b>🪙 Крипто-портфель — 2 монеты</b>\n"
                            "Вложено $125,00 · сейчас $150,00 · P/L +$25,00 (+20,0%) — по 1 из 2: "
-                           "у остальных нет количества или цены\n\n• XRP: 100 шт., вход 1,25")
+                           "у остальных нет количества или цены\n"
+                           "Ваш результат: неделя +$25,00 (+20,0%) · месяц +$25,00 (+20,0%) · "
+                           "год +$25,00 (+20,0%)\n\n• XRP: 100 шт., вход 1,25")
     assert "• SOL: вход 150,00" in text and "NVDA" not in text
     tb._handle_message(conn, "/portfolio")
     assert "NVDA" in replies[-1] and "XRP" not in replies[-1] and replies[-1].endswith("\n🪙 Монеты (2) — /crypto")
@@ -1555,3 +1557,21 @@ def test_buying_more_of_a_recorded_coin_averages_the_entry(conn, replies):
     assert pos.quantity == 150 and pos.entry_price == pytest.approx(1.30)
     assert replies[-1] == "Докупили CRYPTO:XRP: теперь 150 шт., средняя 1,30."
     assert len(positions.open_positions(conn)) == 1
+
+
+def test_the_statistics_of_a_week_a_month_and_a_year():
+    """A coin held for 40 days: the week and the month count from the price then, the year -- longer
+    than it is held -- from the entry. The price line leaves out a period with no history."""
+    import positions
+    import telegram_notify as tn
+    pos = positions.Position(id=1, ticker="CRYPTO:XRP", source=None, opened_at="2026-08-29", entry_price=1.0,
+                             insiders=[], signal_id=None, closed_at=None, close_reason=None,
+                             close_alerted_at=None, quantity=100, currency="USD")
+    st = {"last": 1.5, "result": 0.5, "days": 40, "stop_level": 1.2, "stop_pct": 0.15, "peak": 1.5,
+          "to_stop": 0.2, "refs": {7: 1.25, 30: 2.0, 365: None}}
+    text = tn.format_crypto_portfolio([(pos, st)], html=False)
+    assert "\nВаш результат: неделя +$25,00 (+20,0%) · месяц −$50,00 (−25,0%) · год +$50,00 (+50,0%)\n" in text
+    assert "\n   цена: неделя +20,0% · месяц −25,0%\n" in text
+    pos.quantity = None
+    text = tn.format_crypto_portfolio([(pos, st)], html=False)
+    assert "Ваш результат" not in text and "Вложено" not in text and "цена: неделя" in text

@@ -534,6 +534,9 @@ def last_price(conn, ticker: str, source: str | None = None) -> float | None:
     return last_close(ticker, source) if pos is None else _pricing(conn, None, None)[0](pos)
 
 
+STAT_DAYS = (7, 30, 365)                # a week, a month, a year
+
+
 def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=None, conn=None) -> dict:
     """How an open position stands, from the same price and history the exits read (`price_fn`
     and `closes_fn`, `(ticker, source)` seams with check_exits' defaults; `conn` lets a Trading
@@ -550,17 +553,24 @@ def position_status(pos: Position, today: dt.date, *, closes_fn=None, price_fn=N
       to_stop     how far the price can still fall before the stop fires, as a share of the
                   price now: 1 - stop_level / last (the price at its peak: the stop's own
                   distance). Zero at the stop level, negative below it (how far below, as
-                  a share of the price now); None with no price."""
+                  a share of the price now); None with no price;
+      refs        {7: close, 30: close, 365: close}: the last completed close on or before that
+                  many days ago, or None where the history does not reach (the statistics of a
+                  week, a month and a year)."""
     price_of, closes_of = _pricing(conn, price_fn, closes_fn, today)
     last = price_of(pos) or None
     bars = _completed_bars(closes_of(pos), today)
+    refs = {}
+    for days in STAT_DAYS:
+        cut = (today - dt.timedelta(days=days)).isoformat()
+        refs[days] = next((c for d, c in reversed(bars) if d <= cut), None)
     stop_pct, peak = _stop_and_peak(pos, bars)
     stop_level = peak * (1 - stop_pct)
     return {"last": last,
             "result": last / pos.entry_price - 1 if last else None,
             "days": (today - dt.date.fromisoformat(pos.opened_at)).days,
             "peak": peak, "stop_pct": stop_pct, "stop_level": stop_level,
-            "to_stop": 1 - stop_level / last if last else None}
+            "to_stop": 1 - stop_level / last if last else None, "refs": refs}
 
 
 _VENUE_SOURCES = ("NORWAY", "SWEDEN")

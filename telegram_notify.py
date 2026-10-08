@@ -883,7 +883,43 @@ def _my_block(pos, st: dict, html: bool) -> str:
             now += f", {money_cents((st['last'] - pos.entry_price) * pos.quantity, pos.currency)}"
     lines = [f"• {crypto.symbol_of(pos.ticker)}: {lot}вход {_price(pos.entry_price)} "
              f"({dt.date.fromisoformat(pos.opened_at):%d.%m}), {now}, {st['days']} дн."]
-    return "\n".join(_e(line, html) for line in lines + _status_lines(pos, st))
+    moves = _price_moves(st)
+    return "\n".join(_e(line, html) for line in lines + ([moves] if moves else []) + _status_lines(pos, st))
+
+
+_STAT_NAMES = {7: "неделя", 30: "месяц", 365: "год"}
+
+
+def _price_moves(st: dict) -> str | None:
+    """«   цена: неделя +3,2% · месяц −5,1% · год +40,0%»: how the price moved over a week, a month and
+    a year (st["refs"], positions.position_status); a period the history does not reach is left
+    out, and None when there is none or no price."""
+    refs = st.get("refs") or {}
+    if st["last"] is None:
+        return None
+    parts = [f"{_STAT_NAMES[d]} {signed_pct(st['last'] / refs[d] - 1)}" for d in _STAT_NAMES if refs.get(d)]
+    return "   цена: " + " · ".join(parts) if parts else None
+
+
+def _own_results(rows: list) -> str | None:
+    """«Ваш результат: неделя +$12,30 (+1,5%) · месяц … · год …»: what the coins held now, in the
+    quantities told, made or lost over each period -- from the price at its start, or from the entry
+    price for a coin bought since (or with no history that far). None when no coin has a quantity and
+    a price."""
+    counted = [(pos, st) for pos, st in rows if pos.quantity and st["last"] is not None]
+    if not counted:
+        return None
+    parts = []
+    for days, name in _STAT_NAMES.items():
+        gain = base = 0.0
+        for pos, st in counted:
+            ref = (st.get("refs") or {}).get(days)
+            if st["days"] < days or not ref:
+                ref = pos.entry_price
+            gain += (st["last"] - ref) * pos.quantity
+            base += ref * pos.quantity
+        parts.append(f"{name} {money_cents(gain, 'USD')} ({signed_pct(gain / base)})")
+    return "Ваш результат: " + " · ".join(parts)
 
 
 def my_position_blocks(rows: list, *, html: bool = True) -> list[str]:
@@ -1039,7 +1075,8 @@ COINS_FOOTER = "🪙 Монеты ({n}) — /crypto"
 
 def format_crypto_portfolio(rows: list, *, html: bool = True) -> str:
     """/crypto: the header with the number of coins, the totals in dollars over the coins whose
-    quantity and price are known (what they cost, what they are worth, the difference), a block per
+    quantity and price are known (what they cost, what they are worth, the difference; then what they
+    made over a week, a month and a year: _own_results), a block per
     coin and the hint that a signal to sell comes by itself. `rows` as in my_position_blocks."""
     if not rows:
         return "\n\n".join([_b(_CRYPTO_HEADER, html), NO_COINS])
@@ -1054,6 +1091,7 @@ def format_crypto_portfolio(rows: list, *, html: bool = True) -> str:
         if len(counted) < n:
             line += f" — по {len(counted)} из {n}: у остальных нет количества или цены"
         head.append(_e(line, html))
+        head.append(_e(_own_results(rows), html))
     return "\n\n".join(["\n".join(head)] + my_position_blocks(rows, html=html) + [_SELL_HINT])
 
 

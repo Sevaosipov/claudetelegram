@@ -918,7 +918,7 @@ def _status_of(conn, price=None, bars=(), pos=None):
 def test_position_status_is_the_price_the_result_the_days_the_peak_and_the_stop(conn):
     _open(conn, price=100.0, days_ago=5, stop=0.10)
     st = _status_of(conn, 120.0, _held_bars([200.0] * 3, [110.0, 130.0, 125.0]))
-    assert set(st) == {"last", "result", "days", "peak", "stop_pct", "stop_level", "to_stop"}
+    assert set(st) == {"last", "result", "days", "peak", "stop_pct", "stop_level", "to_stop", "refs"}
     assert st["last"] == 120.0 and st["days"] == 5
     assert st["result"] == pytest.approx(0.20)
     assert (st["peak"], st["stop_pct"]) == (130.0, 0.10)
@@ -1559,3 +1559,14 @@ def test_the_status_of_a_holding_with_a_stale_day_price_has_no_price(conn, monke
     st = positions.position_status(pos, TODAY, conn=conn)
     assert (st["last"], st["result"], st["to_stop"]) == (None, None, None)
     assert st["peak"] == 120.0                                      # the old close still counts for the peak
+
+
+def test_position_status_gives_the_closes_of_a_week_a_month_and_a_year_ago(conn):
+    """refs: the last completed close on or before 7, 30 and 365 days ago; None where the history
+    does not reach."""
+    today = dt.date(2026, 10, 8)
+    pos = positions.open_position(conn, "AAA", 100.0, today=dt.date(2026, 9, 1), closes_fn=lambda t, s: [])
+    bars = [("2026-08-20", 80.0), ("2026-09-08", 90.0), ("2026-09-30", 95.0), ("2026-10-01", 96.0),
+            ("2026-10-02", 97.0), ("2026-10-07", 110.0), ("2026-10-08", 111.0)]
+    st = positions.position_status(pos, today, closes_fn=lambda t, s: bars, price_fn=lambda t, s: 120.0)
+    assert st["refs"] == {7: 96.0, 30: 90.0, 365: None}
