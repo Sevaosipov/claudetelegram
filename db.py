@@ -605,6 +605,31 @@ CREATE TABLE IF NOT EXISTS buy_signals (
     sent_at   TEXT NOT NULL              -- ISO date of the message
 );
 CREATE INDEX IF NOT EXISTS buy_signals_ticker ON buy_signals(ticker, sent_at);
+
+-- The experimental live CFD signals (cfd/live.py, spec 2026-10-08-cfd-live-crypto-breakout.md): one row per
+-- breakout signal on a coin, kept while it is open and after it closes. The bot never places an order.
+CREATE TABLE IF NOT EXISTS cfd_signals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    coin        TEXT NOT NULL,             -- SOL (BTC, ETH ...)
+    symbol      TEXT NOT NULL,             -- the Yahoo symbol, SOL-USD
+    side        TEXT NOT NULL,             -- long | short
+    signal_date TEXT NOT NULL,             -- ISO date of the signal bar (its close made the signal)
+    entry       REAL NOT NULL,             -- the reference entry: the open of the next bar
+    stop0       REAL NOT NULL,             -- the initial stop
+    stop        REAL NOT NULL,             -- the trailing stop in force after the last bar processed
+    r           REAL NOT NULL,             -- |entry - stop0|
+    checkpoint  INTEGER NOT NULL DEFAULT 0, -- the highest of +1R..+4R reached (0-4)
+    last_bar    TEXT NOT NULL,             -- ISO date of the last completed bar processed
+    status      TEXT NOT NULL DEFAULT 'open', -- open | closed
+    closed_date TEXT,
+    exit_price  REAL,
+    result_r    REAL,                      -- after the pre-registered costs
+    risk_pct    REAL,                      -- NULL with no balance set (as risk_eur and qty)
+    risk_eur    REAL,
+    qty         REAL,
+    created     TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS cfd_signals_coin_date ON cfd_signals(coin, signal_date);
 """
 
 
