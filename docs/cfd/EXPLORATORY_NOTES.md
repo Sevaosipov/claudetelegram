@@ -54,3 +54,41 @@ is up).
 
 No further setups were tried after seeing these results. Searching on until something passes is how a false edge is
 found; ~/forex-daytrader stopped its own search for the same reason.
+
+---
+
+# Round 2 (run 2026-10-08): notes beside BACKTEST_REPORT_R2.md
+
+The gate judged each hypothesis on its four-take-profit exit, as pre-registered. All three fail; nothing is enabled.
+
+| Hypothesis | Four take-profits (judged) | Its natural exit (reported) |
+|---|---|---|
+| H3 crypto breakout, 11 coins never tested before | OOS PF 0.69, mean R −0.15 (391 trades) | E0 trailing: OOS PF 1.60, mean R +0.27, t 2.08 (357 trades); IS PF 1.52 (70 trades) |
+| H4 index dip-buying | OOS PF 1.00; IS 0.93 | E0c close above SMA5: OOS PF 1.16, mean R +0.04, t 1.29; IS PF 1.29 |
+| H5 carry-gated trend, 11 FX pairs | OOS PF 0.57; IS 0.80 | E0c original exit: OOS PF 0.53; IS 0.80 |
+
+## The pattern across both rounds
+
+Wherever an edge shows, it shows only with the setup's natural exit, and the four-stage take-profit removes it:
+crypto breakout 1.60 → 0.69 (BTC/ETH in round 1: 2.12 → 1.38), index dips 1.16 → 1.00, the 2006–2016 breakout 1.31 →
+1.15. The requirement of four take-profit stages and the requirement of a profit factor above 1.1 were not met
+together by anything tested.
+
+## What the crypto result is made of (E0, out of sample, the 11 coins)
+
+- By coin: 8 of 11 positive (AVAX 4.02, SOL 3.10, DOGE 2.83, BNB 2.08, ENA 1.86, XRP 1.58, HYPE 1.34, LINK 1.23);
+  LTC 0.51, SUI 0.84, TRX 0.84 negative.
+- By year (total R): 2020 +30.8, 2021 +66.9, 2022 −3.0, 2023 +3.5, 2024 −7.8, 2025 −10.2, 2026 +14.4.
+- The five largest trades (BNB Feb 2021 +26.7R, DOGE Apr 2021 +20.0R, SOL Aug 2021 +14.2R, XRP Nov 2020 +13.8R,
+  DOGE Feb 2024 +5.1R) are +79.7R of the +94.7R total; the other 352 trades sum to +15.0R.
+
+So it is a real but lottery-shaped edge: a few runaway moves pay for years of small losses, most of them came in the
+2020–21 boom, and 2022–2025 was slightly negative. That is also exactly why capping a trade at +4R destroys it. It is
+below the pre-registered significance bar (t 2.08 against 2.33), and trades in different coins at the same time are
+not independent, so the true uncertainty is larger than the t-statistic says.
+
+## H5
+
+The user's EUR/USD rule does not generalise to the other pairs with OECD 3-month rates as the carry gate (the original
+uses 2-year yields, which are not freely available for most of these currencies). This says nothing new about the
+EUR/USD original itself.
