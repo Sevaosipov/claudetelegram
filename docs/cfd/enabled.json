@@ -14,5 +14,13 @@
       "CARRY-FX": "EL"
     },
     "run_at": "2026-10-08T15:54:54+00:00"
+  },
+  "round3": {
+    "enabled": [],
+    "exit": {
+      "FX-REV": "E0c",
+      "CARRY-BASKET": "monthly"
+    },
+    "run_at": "2026-10-08T16:47:04+00:00"
   }
 }
