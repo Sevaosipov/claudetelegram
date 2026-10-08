@@ -10,6 +10,11 @@ hence the hygiene rules: a bar is dropped when any of O/H/L/C is missing or not 
 high < low, or when its high or low is more than 15 % away from its close. Duplicates (Yahoo
 repeats the latest bar) keep the last valid row.
 
+The 15 % wick rule was written for bad FX ticks. Round 2 (docs/cfd/PREREGISTRATION_R2.md, amendment A3)
+cleans the crypto symbols it adds at 60 %, because alt-coins really move that far on a day: a caller
+that wants that passes `max_wick=MAX_WICK_CRYPTO` to `clean_rows` / `load_daily` / `daily_bars`. Without
+the argument the rule is the 15 % it always was, so round 1's loading path is unchanged.
+
 `Bar.ts` is always a tz-aware UTC datetime: the start of the hour for hourly bars, midnight UTC
 of the bar's own calendar date for daily bars (so `ts.date()` is the date Yahoo shows). Only
 completed bars are returned -- Yahoo serves the bar still forming as the last row, and a signal or a
@@ -36,6 +41,7 @@ DAILY = "1d"
 HOURLY = "1h"
 
 MAX_WICK = 0.15                  # §1.1: a high or low further than this from the close is a bad tick
+MAX_WICK_CRYPTO = 0.60           # round 2, amendment A3: the same rule for the crypto symbols of round 2
 MIN_BARS_BEFORE_SIGNAL = 300     # §1.1: an instrument needs this many bars before its first signal
 DAILY_START = "2000-01-01"       # Yahoo serves what it has from here (FX from late 2003)
 HOURLY_PERIOD = "725d"           # Yahoo keeps 1h bars for 730 days; a margin so the edge isn't refused
@@ -103,19 +109,22 @@ def _parse_ts(value, interval: str) -> dt.datetime | None:
     return ts.astimezone(UTC)
 
 
-def _bad_reason(o, h, low, c) -> str | None:
+def _bad_reason(o, h, low, c, max_wick: float | None = None) -> str | None:
     if None in (o, h, low, c) or min(o, h, low, c) <= 0:
         return "missing"
     if h < low:
         return "inverted"
-    if abs(h - c) / c > MAX_WICK or abs(low - c) / c > MAX_WICK:
+    limit = MAX_WICK if max_wick is None else max_wick
+    if abs(h - c) / c > limit or abs(low - c) / c > limit:
         return "wick"
     return None
 
 
-def clean_rows(rows: Iterable, interval: str) -> Loaded:
+def clean_rows(rows: Iterable, interval: str, *, max_wick: float | None = None) -> Loaded:
     """Raw rows -> sorted, de-duplicated bars with the §1.1 hygiene applied. `interval` is "1d"
-    or "1h" and sets how a timestamp is read. Forming bars are not judged here (see load_daily)."""
+    or "1h" and sets how a timestamp is read. Forming bars are not judged here (see load_daily).
+    `max_wick` is how far a high or low may be from its close, as a fraction of the close; None is the
+    pre-registered 15 % (`MAX_WICK`, read when called), `MAX_WICK_CRYPTO` the 60 % of round 2's coins."""
     dropped = Dropped()
     by_ts: dict[dt.datetime, Bar] = {}
     for row in rows:
@@ -124,7 +133,7 @@ def clean_rows(rows: Iterable, interval: str) -> Loaded:
             dropped.unparsable += 1
             continue
         o, h, low, c = (_num(v) for v in row[1:5])
-        reason = _bad_reason(o, h, low, c)
+        reason = _bad_reason(o, h, low, c, max_wick)
         if reason:
             setattr(dropped, reason, getattr(dropped, reason) + 1)
             continue
@@ -138,11 +147,12 @@ def _today() -> dt.date:
     return dt.datetime.now(UTC).date()
 
 
-def load_daily(symbol: str, *, fetch: Fetch | None = None, today: dt.date | None = None) -> Loaded:
+def load_daily(symbol: str, *, fetch: Fetch | None = None, today: dt.date | None = None,
+               max_wick: float | None = None) -> Loaded:
     """Completed daily bars of a Yahoo symbol with their drop counts. Bars dated today or later
-    are still forming and are removed."""
+    are still forming and are removed. `max_wick` as in `clean_rows`."""
     rows = (fetch or yahoo_fetch)(symbol, DAILY)
-    loaded = clean_rows(rows, DAILY)
+    loaded = clean_rows(rows, DAILY, max_wick=max_wick)
     cutoff = today or _today()
     done = [b for b in loaded.bars if b.ts.date() < cutoff]
     loaded.dropped.incomplete = len(loaded.bars) - len(done)
@@ -163,9 +173,9 @@ def load_hourly(symbol: str, *, fetch: Fetch | None = None,
     return loaded
 
 
-def daily_bars(symbol: str, *, fetch: Fetch | None = None,
-               today: dt.date | None = None) -> list[Bar]:
-    return load_daily(symbol, fetch=fetch, today=today).bars
+def daily_bars(symbol: str, *, fetch: Fetch | None = None, today: dt.date | None = None,
+               max_wick: float | None = None) -> list[Bar]:
+    return load_daily(symbol, fetch=fetch, today=today, max_wick=max_wick).bars
 
 
 def hourly_bars(symbol: str, *, fetch: Fetch | None = None,

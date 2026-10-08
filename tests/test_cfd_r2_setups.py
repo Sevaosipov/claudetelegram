@@ -1,12 +1,19 @@
-"""cfd/setups.py, round 2: IDX-DIP (`idx_dip`, H4) and CARRY-FX (`carry_states` and `carry_fx`, H5),
-each on crafted series with hand-computed values (worked in the comments). Where a single comparison
-needs its boundary tested the indicator is stubbed to a number worked out by hand; the indicators
-themselves are tested in test_cfd_indicators.py and test_cfd_r2_indicators.py."""
+"""cfd/setups.py, round 2: IDX-DIP (`idx_dip`, H4) and CARRY-FX (`carry_states`, `carry_fx` and, after
+amendment A1 of PREREGISTRATION_R2.md, `carry_holds`, H5), each on crafted series with hand-computed values
+(worked in the comments). Where a single comparison needs its boundary tested the indicator is stubbed to a
+number worked out by hand; the indicators themselves are tested in test_cfd_indicators.py and
+test_cfd_r2_indicators.py.
+
+H5 has two conditions that must not be confused: the ENTRY state (`carry_states`: the close beyond the 2.5 % band
+of SMA200 with the rates agreeing) and the HOLD condition (`carry_holds`: the original's, close above / below
+SMA200 itself with the rates agreeing, no band). The stop and the signal's ATR are ATR(20) (amendment A2)."""
 from __future__ import annotations
 
 import datetime as dt
+import math
 import random
 
+import pandas as pd
 import pytest
 
 from cfd import indicators as ind
@@ -50,7 +57,8 @@ def test_the_round_two_parameters_are_the_preregistered_ones():
     assert setups.DIP_STOP_ATR == 2.5
     assert setups.CARRY_UPPER == 1.025 and setups.CARRY_LOWER == 0.975      # carry_strategy.BAND_PCT 2.5 %
     assert setups.CARRY_STOP_ATR == 6.0
-    assert setups.SMA_LEN == 200 and setups.ATR_LEN == 14
+    assert setups.CARRY_ATR_LEN == 20                                       # amendment A2: the original's ATR_LEN
+    assert setups.SMA_LEN == 200 and setups.ATR_LEN == 14                  # H3 and H4 keep ATR(14)
     assert (setups.LONG, setups.SHORT, setups.FLAT) == ("long", "short", "flat")
 
 
@@ -190,8 +198,8 @@ def test_idx_dip_signals_are_ordered_one_per_bar_and_never_see_the_future():
 # ================================================================== CARRY-FX (H5): the state
 @pytest.fixture
 def band(monkeypatch):
-    """SMA(200) stubbed to 100 on every bar (recording the length) and ATR(14) to 2, so the 2.5 %
-    band is at 102.5 / 97.5 and a stop is the close -/+ 12."""
+    """SMA(200) stubbed to 100 on every bar (recording the length) and the ATR to 2 (recording its length),
+    so the 2.5 % band is at 102.5 / 97.5 and a stop is the close -/+ 12."""
     seen = {}
 
     def sma(values, length):
@@ -269,6 +277,103 @@ def test_the_state_series_is_aligned_with_the_bars_and_checks_its_inputs(band):
     assert setups.carry_states([], [], []) == []
 
 
+# ================================================================== CARRY-FX (H5): the hold condition (A1)
+# The original's (carry_strategy.py hold_l / hold_s): a long is held while close > SMA200 and rate(base) >
+# rate(quote); a short while close < SMA200 and rate(base) < rate(quote). The 2.5 % band applies to entries only.
+def holds(closes, base, quote):
+    return setups.carry_holds(bars_closing_at(*closes), base, quote)
+
+
+def test_a_long_is_held_while_the_close_is_above_the_average_and_the_base_rate_is_higher(band):
+    assert holds([100.01], [3.0], [2.0]) == ["long"]
+    assert band["sma"] == 200
+
+
+def test_a_short_is_held_while_the_close_is_below_the_average_and_the_base_rate_is_lower(band):
+    assert holds([99.99], [2.0], [3.0]) == ["short"]
+
+
+def test_the_hold_has_no_band_unlike_the_entry_state(band):
+    # inside the 2.5 % band (100 .. 102.5) the entry state is flat, but a long is held
+    up = [100.01, 101.0, 102.4, 102.6]
+    assert states(up, [3.0] * 4, [2.0] * 4) == ["flat", "flat", "flat", "long"]
+    assert holds(up, [3.0] * 4, [2.0] * 4) == ["long"] * 4
+    # and below the average for a short
+    down = [99.99, 99.0, 97.6, 97.4]
+    assert states(down, [2.0] * 4, [3.0] * 4) == ["flat", "flat", "flat", "short"]
+    assert holds(down, [2.0] * 4, [3.0] * 4) == ["short"] * 4
+
+
+def test_the_hold_is_strictly_above_or_below_the_average(band):
+    assert holds([100.0, 100.0], [3.0, 2.0], [2.0, 3.0]) == ["flat", "flat"]            # equal to the average
+    assert holds([100.0001, 99.9999], [3.0, 2.0], [2.0, 3.0]) == ["long", "short"]
+
+
+def test_the_hold_drops_when_the_close_crosses_back_through_the_average(band):
+    assert holds([103.0, 100.5, 100.0, 99.9], [3.0] * 4, [2.0] * 4) == ["long", "long", "flat", "flat"]
+    assert holds([97.0, 99.5, 100.0, 100.1], [2.0] * 4, [3.0] * 4) == ["short", "short", "flat", "flat"]
+
+
+def test_the_hold_drops_when_the_rates_stop_agreeing_with_the_side(band):
+    # the close stays above the average; the base rate falls to the quote rate, then below it
+    assert holds([103.0] * 4, [3.0, 2.0, 1.0, 3.0], [2.0] * 4) == ["long", "flat", "flat", "long"]
+    assert holds([97.0] * 4, [1.0, 2.0, 3.0, 1.0], [2.0] * 4) == ["short", "flat", "flat", "short"]
+
+
+def test_the_hold_needs_the_carry_on_the_trades_side(band):
+    assert holds([103.0, 103.0], [2.0, 2.5], [3.0, 2.5]) == ["flat", "flat"]            # above, rates against / equal
+    assert holds([97.0, 97.0], [3.0, 2.5], [2.0, 2.5]) == ["flat", "flat"]
+    assert holds([101.0, 99.0], [-0.1, -0.5], [-0.5, -0.1]) == ["long", "short"]        # negative rates compare alike
+
+
+def test_the_hold_is_off_while_a_rate_or_the_average_is_missing(band, monkeypatch):
+    assert holds([103.0, 103.0, 97.0, 97.0], [None, 3.0, None, 2.0], [2.0, None, 3.0, None]) == ["flat"] * 4
+    monkeypatch.setattr(setups.ind, "sma", lambda v, length: [None, 100.0])
+    assert setups.carry_holds(bars_closing_at(103.0, 103.0), [3.0, 3.0], [2.0, 2.0]) == ["flat", "long"]
+
+
+def test_the_hold_series_is_aligned_with_the_bars_and_checks_its_inputs(band):
+    bars = bars_closing_at(103.0, 100.0, 97.0)
+    out = setups.carry_holds(bars, [3.0, 3.0, 2.0], [2.0, 2.0, 3.0])
+    assert out == ["long", "flat", "short"] and len(out) == len(bars)
+    with pytest.raises(ValueError):
+        setups.carry_holds(bars, [3.0, 3.0], [2.0, 2.0, 2.0])
+    with pytest.raises(ValueError):
+        setups.carry_holds(bars, [3.0] * 3, [2.0] * 2)
+    assert setups.carry_holds([], [], []) == []
+
+
+def test_every_entry_state_is_also_a_hold_and_the_hold_is_the_looser_of_the_two():
+    bars = mk(_walk(1500, 31, drift=0.0003, vol=0.007))
+    base = [None if i < 40 else 2.0 + 1.5 * math.sin(i / 300.0) for i in range(1500)]
+    quote = [None if i < 40 else 2.0 + 1.5 * math.sin(i / 450.0 + 1.0) for i in range(1500)]
+    entry = setups.carry_states(bars, base, quote)
+    held = setups.carry_holds(bars, base, quote)
+    assert all(h == e for e, h in zip(entry, held) if e != "flat")          # inside the band only the hold is on
+    assert sum(1 for e, h in zip(entry, held) if e == "flat" and h != "flat") > 100
+    assert sum(1 for e in entry if e != "flat") > 100
+
+
+def test_entry_state_and_hold_match_carry_strategys_own_conditions_in_pandas():
+    # carry_strategy.compute_state: enter_l = (close > ma * (1 + band)) & carry_l and hold_l = (close > ma) &
+    # carry_l, with carry_l = diff > 0, band 2.5 %, ma the 200-day mean; the short side is the mirror
+    bars = mk(_walk(1500, 31, drift=0.0003, vol=0.007))
+    base = [None if i < 40 else 2.0 + 1.5 * math.sin(i / 300.0) for i in range(1500)]
+    quote = [None if i < 40 else 2.0 + 1.5 * math.sin(i / 450.0 + 1.0) for i in range(1500)]
+    close = pd.Series([b.close for b in bars])
+    ma = close.rolling(200).mean()
+    diff = pd.Series([math.nan if x is None else x for x in base]) - pd.Series(
+        [math.nan if x is None else x for x in quote])
+    band = 2.5 / 100.0
+    enter_l, enter_s = (close > ma * (1 + band)) & (diff > 0), (close < ma * (1 - band)) & (diff < 0)
+    hold_l, hold_s = (close > ma) & (diff > 0), (close < ma) & (diff < 0)
+    entry = setups.carry_states(bars, base, quote)
+    held = setups.carry_holds(bars, base, quote)
+    for i in range(len(bars)):
+        assert entry[i] == ("long" if enter_l[i] else "short" if enter_s[i] else "flat"), i
+        assert held[i] == ("long" if hold_l[i] else "short" if hold_s[i] else "flat"), i
+
+
 # ================================================================== CARRY-FX (H5): the entries
 CLOSES = [100, 103, 104, 100, 103, 97, 96, 100]
 BASE = [2.0, 3.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0]
@@ -284,7 +389,7 @@ def test_entries_are_the_changes_from_flat_or_from_the_opposite_side_into_long_o
     # bar 1: flat -> long;  bar 2: still long (no new signal);  bar 3: long -> flat (an exit, no signal)
     # bar 4: flat -> long;  bar 5: long -> short (the opposite side);  bar 6: still short;  bar 7: flat
     assert [(s.index, s.side) for s in sigs] == [(1, "long"), (4, "long"), (5, "short")]
-    assert band["atr"] == 14
+    assert band["atr"] == 20                                      # amendment A2: ATR(20) for H5
 
 
 def test_the_stop_is_six_atr_from_the_signal_close(band):
@@ -334,11 +439,11 @@ def test_carry_fx_checks_its_inputs(band):
 
 # ------------------------------------------------------------------ end to end, real indicators
 # 320 flat bars (close 100, range 1.0: TR 1.0), then bar 320: open 100, high 103.5, low 99.8, close 103
-#   TR = max(3.7, 3.5, 0.2) = 3.7; ATR(14) = (1 * 13 + 3.7) / 14 = 167/140 = 1.1928571
+#   TR = max(3.7, 3.5, 0.2) = 3.7; ATR(20) = (1 * 19 + 3.7) / 20 = 227/200 = 1.135 (an ATR(14) would read 1.1929)
 #   SMA(200) = (199 * 100 + 103) / 200 = 100.015, so the bands are 102.5154 and 97.5146:
 #   the close of 103 is above the upper band; with rate(base) 3 > rate(quote) 2 the state is long
 JUMP = (100.0, 103.5, 99.8, 103.0)
-CARRY_ATR = (1.0 * 13 + 3.7) / 14
+CARRY_ATR = (1.0 * 19 + 3.7) / 20
 
 
 def test_carry_fx_long_on_real_indicators():
@@ -347,10 +452,10 @@ def test_carry_fx_long_on_real_indicators():
     assert len(sigs) == 1
     s = sigs[0]
     assert (s.index, s.side) == (320, "long")
-    assert CARRY_ATR == pytest.approx(167 / 140)
+    assert CARRY_ATR == pytest.approx(227 / 200)
     assert s.atr == pytest.approx(CARRY_ATR)
     assert s.stop == pytest.approx(103.0 - 6.0 * CARRY_ATR)
-    assert s.stop == pytest.approx(95.8428571429)
+    assert s.stop == pytest.approx(96.19)
 
 
 def test_carry_fx_short_on_real_indicators_is_the_mirror_image():
@@ -361,6 +466,7 @@ def test_carry_fx_short_on_real_indicators_is_the_mirror_image():
     assert (s.index, s.side) == (320, "short")
     assert s.atr == pytest.approx(CARRY_ATR)
     assert s.stop == pytest.approx(97.0 + 6.0 * CARRY_ATR)
+    assert s.stop == pytest.approx(103.81)
     # and with the rates the other way round the mirror image is flat
     assert setups.carry_fx(bars, [3.0] * 321, [2.0] * 321) == []
 
@@ -378,12 +484,18 @@ def test_carry_fx_the_average_is_exactly_200_bars_long():
     assert 320 in indices(setups.carry_fx(mk(rows(200)), *rates))            # bar 120: out of it
 
 
-def test_carry_fx_the_stop_uses_atr_14(monkeypatch):
-    # an ATR(20) would not equal the ATR(14) of the hand computation above
+def test_carry_fx_the_stop_and_the_signals_atr_are_atr_20_not_atr_14():
+    # amendment A2: the original's ATR_LEN. H3 and H4 keep ATR(14); the two lengths differ here
     bars = mk(flat(320) + [JUMP])
     (s,) = setups.carry_fx(bars, [3.0] * 321, [2.0] * 321)
-    assert s.atr == pytest.approx(ind.atr(bars, 14)[-1])
-    assert s.atr != pytest.approx(ind.atr(bars, 20)[-1])
+    assert s.atr == pytest.approx(ind.atr(bars, 20)[-1])
+    assert s.atr != pytest.approx(ind.atr(bars, 14)[-1])
+    assert s.stop == pytest.approx(103.0 - 6.0 * ind.atr(bars, 20)[-1])
+    assert s.stop != pytest.approx(103.0 - 6.0 * ind.atr(bars, 14)[-1])
+    # and idx_dip still reads ATR(14)
+    rows = climb(300) + [(250.0, 250.25, 246.75, 247.0), (247.0, 247.25, 243.75, 244.0)]
+    (d,) = setups.idx_dip(mk(rows))
+    assert d.atr == pytest.approx(ind.atr(mk(rows), 14)[-1])
 
 
 def test_carry_fx_signals_never_see_the_future_and_the_states_are_causal():

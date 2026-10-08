@@ -13,7 +13,7 @@ The hypotheses:
                and EL (four quarters at +0.5R, +1R, +1.5R, +2R; the rest at the open of the 16th bar).
                The round-1 indices costs. Judged on EL.
   H5 CARRY-FX  `carry_fx` on the eleven FX pairs with OECD 3-month rates (cfd/rates.py); E0c (leave at the
-               next open after the state stops being the trade's side, or at a 6 ATR trailing stop) and EL
+               next open after the original's hold condition drops, or at a 6 ATR(20) trailing stop) and EL
                (the same ladder, the remainder leaving on the state, no time stop). The round-1 FX round
                trips and 0.004 % a night. R is up to 8 ATR (the stop is 6 ATR away by construction).
                Judged on EL.
@@ -139,6 +139,13 @@ class Outcome2:
 
 
 # ================================================================== running the hypotheses
+def max_wick_for(inst: ins.Instrument) -> float:
+    """How far a bar's high or low may be from its close before the bar is dropped as a bad tick: 60 % for
+    the coins of round 2 (amendment A3 -- alt-coins really move further than 15 % on a day, and those are
+    the breakout days under test), the pre-registered 15 % for every other instrument."""
+    return data.MAX_WICK_CRYPTO if inst in ins.ALT_COINS else data.MAX_WICK
+
+
 def _in_window(inst: ins.Instrument, bars: Sequence[data.Bar],
                signals: Sequence[setups.Signal]) -> list[setups.Signal]:
     """Signals before the study window (2006-01-01 outside crypto) are warm-up, not trades."""
@@ -147,9 +154,11 @@ def _in_window(inst: ins.Instrument, bars: Sequence[data.Bar],
 
 def _backtest(name: str, inst: ins.Instrument, bars: Sequence[data.Bar],
               signals: Sequence[setups.Signal], costs: ins.Costs,
-              plan: Sequence[tuple[str, dict]]) -> tuple[list[r1.Row], dict[tuple[str, str], r1.Counts]]:
-    """Round 1's one-open-trade walk for each exit of the plan (exit kind, extra simulate arguments)."""
-    atr = ind.atr(bars)
+              plan: Sequence[tuple[str, dict]], *, atr_len: int = setups.ATR_LEN
+              ) -> tuple[list[r1.Row], dict[tuple[str, str], r1.Counts]]:
+    """Round 1's one-open-trade walk for each exit of the plan (exit kind, extra simulate arguments).
+    `atr_len` is the ATR the skip rule and a trailing stop read: 14, or H5's 20 (amendment A2)."""
+    atr = ind.atr(bars, atr_len)
     signals = _in_window(inst, bars, signals)
     rows: list[r1.Row] = []
     counts: dict[tuple[str, str], r1.Counts] = {}
@@ -191,21 +200,22 @@ def backtest_idx_dip(inst: ins.Instrument, bars: Sequence[data.Bar]
 def backtest_carry_fx(inst: ins.Instrument, bars: Sequence[data.Bar], rates: rates_mod.Rates
                       ) -> tuple[list[r1.Row], dict[tuple[str, str], r1.Counts]]:
     """H5: the carry-gated trend of one FX pair. Each bar gets the rate in force on its date for the
-    base and the quote currency (None while a currency has none, which makes the state flat). E0c leaves
-    at the next open after the state stops being the trade's side, or at a 6 ATR trailing stop; EL is the
-    ladder whose remainder leaves the same way; R may be up to 8 ATR. The pair's round-1 round trip and
-    0.004 % a night."""
+    base and the quote currency (None while a currency has none, which makes the state flat). A trade is
+    held on the original's hold condition (`setups.carry_holds`, amendment A1: the close on its side of
+    SMA200 and the rates agreeing; the 2.5 % band is for entries only). E0c leaves at the next open after
+    the hold drops, or at a 6 ATR(20) trailing stop; EL is the ladder whose remainder leaves the same way;
+    R may be up to 8 ATR(20) (amendment A2). The pair's round-1 round trip and 0.004 % a night."""
     days = [b.ts.date() for b in bars]
     base_rates = [rates.rate_on(inst.base, d) for d in days]
     quote_rates = [rates.rate_on(inst.quote, d) for d in days]
-    states = setups.carry_states(bars, base_rates, quote_rates)
+    holds = setups.carry_holds(bars, base_rates, quote_rates)
 
-    def state_is_off(j: int, side: str) -> bool:
-        return states[j] != side
-    plan = [(exits.E0C, dict(trail_atr=CARRY_TRAIL_ATR, exit_when=state_is_off, max_r_atr=CARRY_MAX_R_ATR)),
-            (exits.EL, dict(exit_when=state_is_off, max_r_atr=CARRY_MAX_R_ATR))]
+    def hold_dropped(j: int, side: str) -> bool:
+        return holds[j] != side
+    plan = [(exits.E0C, dict(trail_atr=CARRY_TRAIL_ATR, exit_when=hold_dropped, max_r_atr=CARRY_MAX_R_ATR)),
+            (exits.EL, dict(exit_when=hold_dropped, max_r_atr=CARRY_MAX_R_ATR))]
     return _backtest(CARRY_FX, inst, bars, setups.carry_fx(bars, base_rates, quote_rates),
-                     ins.carry_fx_costs(inst), plan)
+                     ins.carry_fx_costs(inst), plan, atr_len=setups.CARRY_ATR_LEN)
 
 
 # ================================================================== the exit that is judged, the gate
@@ -326,13 +336,15 @@ _RULES = {
               "at each of +0.5R, +1R, +1.5R, +2R, the stop at its initial level until TP2, at the entry "
               "after TP2 and at TP1 after TP3, what is left at the open of the 16th bar after entry. "
               "Costs: the round-1 Indices row. In-sample 2006-2016, out-of-sample from 2017. Judged on EL."),
-    CARRY_FX: ("State at each close: long when the close is above 1.025 x SMA200 and rate(base) is above "
-               "rate(quote), short when it is below 0.975 x SMA200 and rate(base) is below rate(quote), "
-               "otherwise flat. Entry at the next open on a change from flat (or from the opposite side) "
-               "into long or short; stop 6 ATR from the signal close. E0c: leave at the next open after "
-               "the state stops being the trade's side, or at a 6 ATR trailing stop that never loosens. "
-               "EL: the ladder of H4, its remainder also leaving at the next open after the state stops "
-               "being the trade's side; no time stop. Costs: the round-1 FX round trip and 0.004 % a "
+    CARRY_FX: ("Entry state at each close: long when the close is above 1.025 x SMA200 and rate(base) is "
+               "above rate(quote), short when it is below 0.975 x SMA200 and rate(base) is below "
+               "rate(quote), otherwise flat. Entry at the next open on a change from flat (or from the "
+               "opposite side) into long or short; stop 6 ATR(20) from the signal close. A trade is held "
+               "on the original's hold condition: a long is held while the close is above SMA200 and "
+               "rate(base) is above rate(quote), a short on the mirror -- the 2.5 % band is for entries "
+               "only. E0c: leave at the next open after the hold drops, or at a 6 ATR(20) trailing stop "
+               "that never loosens. EL: the ladder of H4, its remainder also leaving at the next open "
+               "after the hold drops; no time stop. Costs: the round-1 FX round trip and 0.004 % a "
                "night. In-sample 2006-2016, out-of-sample from 2017. Judged on EL."),
 }
 
@@ -406,11 +418,17 @@ def _notes() -> list[str]:
         "0.020 % a night, long only), H5 the pair's round-1 FX round trip (0.015 % a major, 0.030 % a cross) "
         "and 0.004 % a night. H5 charges the broker's markup and credits none of the carry it earns, which "
         "is the conservative reading.",
-        "- Everything the pre-registration does not restate is round 1's: data hygiene, ATR(14) (also for "
-        "H5's stop and trailing stop), the bar order (stop before target within a bar), gaps filling at the "
-        "open, the skip rule (R <= 0.25 ATR, or R > 6 ATR; H5: 8 ATR), one open trade per instrument per "
-        "setup and exit, and 300 bars of history before a first signal.",
-        "- Every stop is fixed at the signal (H4: the close - 2.5 ATR; H5: the close -/+ 6 ATR) and R is "
+        "- Everything the pre-registration does not restate is round 1's: data hygiene, ATR(14) for H3 and "
+        "H4, the bar order (stop before target within a bar), gaps filling at the open, the skip rule "
+        "(R <= 0.25 ATR, or R > 6 ATR; H5: 8 ATR), one open trade per instrument per setup and exit, and 300 "
+        "bars of history before a first signal.",
+        "- Three points were settled in writing before the first run (the pre-registration's amendment "
+        "section). A1: H5 is held on the original's hold condition -- a long while the close is above SMA200 "
+        "and the base rate above the quote rate, a short on the mirror; the 2.5 % band is for entries only. "
+        "A2: H5 uses ATR(20), the original's, for its stop, its trailing stop and its R bounds. A3: the coins "
+        "of H3 are cleaned with a wick threshold of 60 % in place of 15 %, which was written for bad FX "
+        "ticks; every other instrument keeps 15 %.",
+        "- Every stop is fixed at the signal (H4: the close - 2.5 ATR; H5: the close -/+ 6 ATR(20)) and R is "
         "measured from the actual entry, the next open, as for round 1's setups; so R is about 6 ATR for H5 "
         "and the gap of the entry bar is what the 8 ATR bound allows for.",
         "- A time stop of N bars leaves at the open of the Nth bar after the entry bar (the bar whose open is "
@@ -418,9 +436,9 @@ def _notes() -> list[str]:
         "each close from the entry bar's own close on and leaves at the next bar's open; a condition read at "
         "the signal bar, before the entry, never counts. Both fill at that open, before the bar's own stop and "
         "targets, and the earlier of the two wins.",
-        "- H5's state includes the 2.5 % band (carry_strategy.py's frozen 2.5 % and 200 days), and so does the "
-        "exit: a trade leaves when the close is back inside the band or the rates no longer agree, not when it "
-        "crosses the 200-day average as carry_strategy.py's hold condition does.",
+        "- H5's entry state includes the 2.5 % band (carry_strategy.py's frozen 2.5 % and 200 days); its exit "
+        "does not: a trade leaves when the close crosses back through the 200-day average or the rates no "
+        "longer agree with its side, as carry_strategy.py's own hold condition does.",
         "- The rate of a currency on a bar is the value of the latest month already published (the 15th of the "
         "next month reached, that day included); a bar with no rate for either currency has no state.",
         "- In-sample and out-of-sample are split by the signal date; signals before 2006-01-01 (crypto: no "
@@ -521,7 +539,8 @@ def run(*, fetch: data.Fetch | None = None, rates_fetch: rates_mod.Fetch | None 
     for name in HYPOTHESES:
         for inst in universe[name]:
             try:
-                loaded = data.load_daily(inst.symbol, fetch=source, today=now.date())
+                loaded = data.load_daily(inst.symbol, fetch=source, today=now.date(),
+                                         max_wick=max_wick_for(inst))
             except Exception as e:      # one dead symbol must not cost the whole run
                 log(f"{inst.symbol}: no daily data ({type(e).__name__}: {str(e)[:120]})")
                 loaded = None

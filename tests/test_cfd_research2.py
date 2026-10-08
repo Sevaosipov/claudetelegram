@@ -1,7 +1,8 @@
 """cfd/research2.py: round 2 of the CFD research -- H3 CR-BO, H4 IDX-DIP and H5 CARRY-FX exactly as
-docs/cfd/PREREGISTRATION_R2.md fixes them. What is tested: the wiring of each hypothesis (setup, exits,
-costs, periods) both by spying on the simulator and by hand-computed results on crafted bars with the
-real setups, the exit choice, the gate arithmetic of each hypothesis, the round2 block of enabled.json
+docs/cfd/PREREGISTRATION_R2.md fixes them, with its amendments of 2026-10-05 (A1: H5 holds on the original's
+condition, the band being for entries only; A2: H5 uses ATR(20); A3: crypto bars are cleaned at a 60 % wick
+threshold). What is tested: the wiring of each hypothesis (setup, exits, costs, periods) both by spying on the
+simulator and by hand-computed results on crafted bars with the real setups, the exit choice, the gate arithmetic of each hypothesis, the round2 block of enabled.json
 and its merge, the report, and the whole run behind fake Yahoo and FRED fetches. Nothing here reaches
 the network and nothing is written outside tmp_path."""
 from __future__ import annotations
@@ -13,7 +14,7 @@ import random
 
 import pytest
 
-from cfd import data, exits, rates, research, research2
+from cfd import data, exits, rates, research, research2, setups
 from cfd import indicators as ind
 from cfd import instruments as ins
 from cfd.data import Bar
@@ -78,6 +79,8 @@ def test_the_hypotheses_and_their_numbers_are_the_preregistered_ones():
     assert research2.GATE_MIN_IS_TRADES == 30
     assert (research2.IDX_SMA_LEN, research2.IDX_E0C_TIME_STOP, research2.IDX_EL_TIME_STOP) == (5, 11, 16)
     assert (research2.CARRY_TRAIL_ATR, research2.CARRY_MAX_R_ATR) == (6.0, 8.0)
+    assert setups.CARRY_ATR_LEN == 20 and setups.ATR_LEN == 14               # amendment A2
+    assert data.MAX_WICK == 0.15 and data.MAX_WICK_CRYPTO == 0.60            # amendment A3
     assert research2.OUT_DIR == research.OUT_DIR and research2.OUT_DIR.parts[-2:] == ("docs", "cfd")
     assert research2.REPORT_NAME == "BACKTEST_REPORT_R2.md"
 
@@ -113,9 +116,11 @@ def kw_of(seen, kind):
 def test_h3_is_bo_d_under_e0_e1_and_e2_exactly_as_round_one_with_the_alt_costs(monkeypatch, spy):
     monkeypatch.setattr(research2.setups, "bo_d", lambda bars: [Signal(10, "long", 96.0, 2.0)])
     coin = ins.by_symbol("SOL-USD")
-    rows, counts = research2.backtest_cr_bo(coin, quiet_bars())
+    bars = quiet_bars()
+    rows, counts = research2.backtest_cr_bo(coin, bars)
     assert {k for k, _ in spy} == {"E0", "E1", "E2"}
     for _, kw in spy:
+        assert kw["atr"] == ind.atr(bars, 14) and kw["atr"] != ind.atr(bars, 20)    # H3 keeps ATR(14)
         assert kw["entry"] == "next_open" and kw["costs"] == coin.costs
         assert set(kw) == {"costs", "entry", "session", "atr", "e0_target_r"}      # nothing round 2 added
         assert kw["session"] is None and kw["e0_target_r"] is None
@@ -127,8 +132,10 @@ def test_h3_is_bo_d_under_e0_e1_and_e2_exactly_as_round_one_with_the_alt_costs(m
 def test_h4_runs_e0c_with_the_sma5_condition_and_an_11_bar_time_stop_and_el_with_16(monkeypatch, spy):
     monkeypatch.setattr(research2.setups, "idx_dip", lambda bars: [Signal(10, "long", 96.0, 2.0)])
     idx = ins.by_symbol("^GSPC")
-    _, counts = research2.backtest_idx_dip(idx, quiet_bars())
+    bars = quiet_bars()
+    _, counts = research2.backtest_idx_dip(idx, bars)
     assert {k for k, _ in spy} == {"E0c", "EL"}
+    assert all(kw["atr"] == ind.atr(bars, 14) and kw["atr"] != ind.atr(bars, 20) for _, kw in spy)   # H4: ATR(14)
     (e0c,) = kw_of(spy, "E0c")
     (el,) = kw_of(spy, "EL")
     assert e0c["time_stop_bars"] == 11 and callable(e0c["exit_when"])
@@ -153,22 +160,26 @@ def test_h4_condition_is_a_close_above_the_5_day_average(monkeypatch, spy):
     assert not cond(10, "long")                             # 100.2 against (100*3+101+100.2)/5 = 100.24
 
 
-def test_h5_runs_e0c_with_a_six_atr_trail_and_el_both_leaving_when_the_state_turns(monkeypatch, spy):
+def test_h5_runs_e0c_with_a_six_atr_20_trail_and_el_both_leaving_when_the_hold_condition_drops(monkeypatch, spy):
     inst = ins.by_symbol("EURUSD=X")
-    states = ["flat", "flat", "long", "long", "short", "flat", "long"] + ["flat"] * 33
-    monkeypatch.setattr(research2.setups, "carry_states", lambda b, base, quote: states)
+    holds = ["flat", "flat", "long", "long", "short", "flat", "long"] + ["flat"] * 33
+    monkeypatch.setattr(research2.setups, "carry_holds", lambda b, base, quote: holds)
+    # the entry state must not be what the exits read: here it says "long" on every bar
+    monkeypatch.setattr(research2.setups, "carry_states", lambda b, base, quote: ["long"] * len(b))
     monkeypatch.setattr(research2.setups, "carry_fx", lambda b, base, quote: [Signal(2, "long", 96.0, 2.0)])
-    _, counts = research2.backtest_carry_fx(inst, quiet_bars(), rates.Rates())
+    bars = quiet_bars()
+    _, counts = research2.backtest_carry_fx(inst, bars, rates.Rates())
     assert {k for k, _ in spy} == {"E0c", "EL"}
     (e0c,) = kw_of(spy, "E0c")
     (el,) = kw_of(spy, "EL")
     assert e0c["trail_atr"] == 6.0 and e0c["max_r_atr"] == 8.0
     assert el["max_r_atr"] == 8.0 and "trail_atr" not in el
     for kw in (e0c, el):
+        assert kw["atr"] == ind.atr(bars, 20) and kw["atr"] != ind.atr(bars, 14)     # amendment A2: ATR(20)
         assert "time_stop_bars" not in kw                       # no time stop
         assert kw["entry"] == "next_open" and kw["costs"] == ins.carry_fx_costs(inst)
         cond = kw["exit_when"]
-        # the state series, read at the close of bar j: anything but the trade's own side leaves
+        # the hold series, read at the close of bar j: anything but the trade's own side leaves
         assert [cond(j, "long") for j in range(7)] == [True, True, False, False, True, True, False]
         assert [cond(j, "short") for j in range(7)] == [True, True, True, True, False, True, True]
     assert set(counts) == {(CARRY_FX, "E0c"), (CARRY_FX, "EL")}
@@ -177,14 +188,14 @@ def test_h5_runs_e0c_with_a_six_atr_trail_and_el_both_leaving_when_the_state_tur
 def test_h5_gives_each_bar_the_rates_in_force_on_its_date_of_the_bases_and_quotes_currency(monkeypatch):
     seen = {}
 
-    def carry_states(bars, base, quote):
+    def carry_holds(bars, base, quote):
         seen["states"] = (list(base), list(quote))
         return ["flat"] * len(bars)
 
     def carry_fx(bars, base, quote):
         seen["signals"] = (list(base), list(quote))
         return []
-    monkeypatch.setattr(research2.setups, "carry_states", carry_states)
+    monkeypatch.setattr(research2.setups, "carry_holds", carry_holds)
     monkeypatch.setattr(research2.setups, "carry_fx", carry_fx)
     usd = rates.RateSeries("USD", "x", ((dt.date(2019, 12, 1), 1.5), (dt.date(2020, 1, 1), 1.8)))
     jpy = rates.RateSeries("JPY", "y", ((dt.date(2019, 1, 1), -0.1),))
@@ -345,15 +356,18 @@ def test_h3_costs_are_the_alts_not_bitcoins():
     assert e1(rows_sol) < e1(rows_btc)
 
 
-# ---- H5: 320 flat bars, a jump bar (close 103, ATR(14) = 167/140), EUR 3 % against USD 2 %
-#   the state turns long at bar 320 (SMA200 100.015, upper band 102.5154); signal stop 103 - 6 ATR = 95.8428571
-#   bar 321 opens at 103.2 (the entry): R = 7.3571429 = 6.17 ATR -- over the round-1 bound of 6 ATR, inside H5's 8
-#   bar 323 closes at 101.0, under the band: the state is flat, so the trade leaves at the open of bar 324 (101.2)
-#   E0c and EL alike: (101.2 - 103.2) / R gross, 3 nights, cost (0.015 + 3 * 0.004) % of the entry
+# ---- H5 (amendments A1 and A2): 320 flat bars, a jump bar (close 103, ATR(20) = 227/200 = 1.135), EUR 3 % over USD 2 %
+#   the entry state turns long at bar 320 (SMA200 100.015, upper band 102.5154); signal stop 103 - 6 ATR(20) = 96.19
+#   bar 321 opens at 103.2 (the entry): R = 7.01 = 6.18 ATR(20) -- over the round-1 bound of 6 ATR, inside H5's 8
+#   bar 322 closes at 101.0: back INSIDE the 2.5 % band (the entry state is flat) but above SMA200 (100.0355), so the
+#   original's hold condition still holds and the trade is kept -- a band exit would have left at bar 323's open
+#   bar 323 closes at 99.9, under SMA200 (100.035): the hold drops, the trade leaves at the open of bar 324 (99.7)
+#   E0c (its 6 ATR(20) trail stays at 96.89, far under every low) and EL alike: (99.7 - 103.2) / R gross, 3 nights,
+#   cost (0.015 + 3 * 0.004) % of the entry
 H5_ROWS = ([(100.0, 100.5, 99.5, 100.0)] * 320 + [(100.0, 103.5, 99.8, 103.0)]
-           + [(103.2, 103.6, 102.8, 103.1), (103.1, 103.5, 102.9, 103.0), (103.0, 103.2, 100.5, 101.0),
-              (101.2, 101.6, 100.8, 101.0)])
-H5_ATR = (1.0 * 13 + 3.7) / 14
+           + [(103.2, 103.6, 102.8, 103.1), (103.1, 103.3, 100.8, 101.0), (101.0, 101.2, 99.6, 99.9),
+              (99.7, 100.1, 99.4, 99.8)])
+H5_ATR = (1.0 * 19 + 3.7) / 20
 H5_R = 103.2 - (103.0 - 6 * H5_ATR)
 
 
@@ -364,23 +378,34 @@ def eur_over_usd():
 
 
 def test_h5_on_crafted_bars_with_the_real_setup_and_exits_hand_computed():
-    assert H5_R == pytest.approx(7.3571428571) and H5_R / H5_ATR > 6.0
+    assert H5_ATR == pytest.approx(1.135) and H5_R == pytest.approx(7.01) and H5_R / H5_ATR > 6.0
     inst = ins.by_symbol("EURUSD=X")
     start = dt.datetime(2023, 1, 1, tzinfo=UTC)
     rows, counts = research2.backtest_carry_fx(inst, daily(H5_ROWS, start=start), eur_over_usd())
     by = {r.exit_kind: r for r in rows}
     assert set(by) == {"E0c", "EL"} and len(rows) == 2
     cost = (0.015 + 3 * 0.004) / 100 * 103.2 / H5_R                    # the major's round trip, 0.004 a night
-    want = (101.2 - 103.2) / H5_R - cost
-    assert cost == pytest.approx(0.0037873398)
-    assert want == pytest.approx(-0.275632)
+    want = (99.7 - 103.2) / H5_R - cost
+    assert cost == pytest.approx(0.0039748930)
+    assert want == pytest.approx(-0.5032616262)
     for e in ("E0c", "EL"):
         assert by[e].result_r == pytest.approx(want), e
+        # held through bar 322 (back inside the band, above SMA200); gone at bar 324's open, not bar 323's
         assert by[e].exit_ts == start + 324 * DAY and by[e].hold_days == 3.0
         assert (by[e].setup, by[e].symbol, by[e].klass, by[e].period) == (CARRY_FX, "EURUSD=X", "FX", "OOS")
         assert by[e].signal_ts == start + 320 * DAY
         c = counts[(CARRY_FX, e)]
         assert (c.signals, c.closed, c.skipped) == (1, 1, 0)
+
+
+def test_h5_uses_atr_20_for_the_stop_not_atr_14():
+    # with ATR(14) (1.1929) the stop would be 95.8429 and R 7.3571: a different result in R
+    rows, _ = research2.backtest_carry_fx(ins.by_symbol("EURUSD=X"), daily(H5_ROWS), eur_over_usd())
+    el = next(r for r in rows if r.exit_kind == "EL")
+    atr14 = (1.0 * 13 + 3.7) / 14
+    r14 = 103.2 - (103.0 - 6 * atr14)
+    result14 = (99.7 - 103.2) / r14 - (0.015 + 3 * 0.004) / 100 * 103.2 / r14
+    assert el.result_r == pytest.approx(-0.5032616262) and el.result_r != pytest.approx(result14)
 
 
 def test_h5_an_entry_that_gapped_further_than_eight_atr_from_the_stop_is_skipped():
@@ -392,13 +417,38 @@ def test_h5_an_entry_that_gapped_further_than_eight_atr_from_the_stop_is_skipped
         rows[321] = (entry_open, entry_open + 0.4, entry_open - 0.4, entry_open)
         _, counts = research2.backtest_carry_fx(inst, daily(rows), eur_over_usd())
         return counts[(CARRY_FX, "EL")]
-    assert (104.9 - stop) / H5_ATR == pytest.approx(7.5928, abs=1e-3)
-    assert counts_for(104.9).skipped == 0                      # 7.59 ATR: taken
-    assert (105.5 - stop) / H5_ATR == pytest.approx(8.0958, abs=1e-3)
-    assert counts_for(105.5).skipped == 1                      # 8.10 ATR: skipped
+    assert (104.9 - stop) / H5_ATR == pytest.approx(7.6740, abs=1e-3)
+    assert counts_for(104.9).skipped == 0                      # 7.67 ATR(20): taken
+    assert (105.5 - stop) / H5_ATR == pytest.approx(8.2026, abs=1e-3)
+    assert counts_for(105.5).skipped == 1                      # 8.20 ATR(20): skipped
 
 
-def test_h5_the_opposite_rates_give_no_long_and_a_short_needs_a_fall():
+# the same climb with every close well above SMA200 (about 100.04): the price never drops the hold
+H5_STEADY_ROWS = ([(100.0, 100.5, 99.5, 100.0)] * 320 + [(100.0, 103.5, 99.8, 103.0)]
+                  + [(103.2, 103.6, 102.8, 103.1), (103.1, 103.5, 102.9, 103.0), (103.0, 103.2, 102.6, 102.9),
+                     (102.9, 103.1, 102.7, 103.0)])
+
+
+def test_h5_a_trade_is_held_until_the_hold_drops_and_the_rates_can_drop_it_with_the_price_above_the_average():
+    inst = ins.by_symbol("EURUSD=X")
+    # with the rates unchanged and every close above SMA200 the trade is still open when the data ends
+    rows, counts = research2.backtest_carry_fx(inst, daily(H5_STEADY_ROWS), eur_over_usd())
+    assert rows == [] and counts[(CARRY_FX, "EL")].open == 1 and counts[(CARRY_FX, "E0c")].open == 1
+    # EUR's October value (1.0, under USD's 2.0) is published on 2023-11-15, which is bar 322: the rates stop
+    # agreeing with the long at that close, so it leaves at the open of bar 323 although the price is above SMA200
+    far_back = dt.date(2000, 1, 1)
+    flipping = rates.Rates({"EUR": rates.RateSeries("EUR", "e", ((far_back, 3.0), (dt.date(2023, 10, 1), 1.0))),
+                            "USD": rates.RateSeries("USD", "u", ((far_back, 2.0),))})
+    start = dt.datetime(2023, 11, 15, tzinfo=UTC) - 322 * DAY
+    rows, _ = research2.backtest_carry_fx(inst, daily(H5_STEADY_ROWS, start=start), flipping)
+    assert {r.exit_kind for r in rows} == {"E0c", "EL"}
+    for r in rows:
+        assert r.exit_ts == start + 323 * DAY and r.hold_days == 2.0
+        cost = (0.015 + 2 * 0.004) / 100 * 103.2 / H5_R
+        assert r.result_r == pytest.approx((103.0 - 103.2) / H5_R - cost)
+
+
+def test_h5_the_opposite_rates_give_no_long_and_a_short_is_held_while_the_close_stays_under_the_average():
     inst = ins.by_symbol("EURUSD=X")
     far_back = dt.date(2000, 1, 1)
     usd_over_eur = rates.Rates({"EUR": rates.RateSeries("EUR", "e", ((far_back, 2.0),)),
@@ -408,6 +458,13 @@ def test_h5_the_opposite_rates_give_no_long_and_a_short_needs_a_fall():
     mirrored = [(200.0 - o, 200.0 - low, 200.0 - h, 200.0 - c) for (o, h, low, c) in H5_ROWS]
     rows, _ = research2.backtest_carry_fx(inst, daily(mirrored), usd_over_eur)
     assert {r.exit_kind for r in rows} == {"E0c", "EL"}              # a fall with the carry on the short side
+    # the mirror image of the long in price terms: entry 200 - 103.2 = 96.8, exit 200 - 99.7 = 100.3, the same R.
+    # Costs are a percentage of the entry price, so the short pays them on 96.8 where the long paid on 103.2.
+    want = (96.8 - 100.3) / H5_R - (0.015 + 3 * 0.004) / 100 * 96.8 / H5_R
+    assert want == pytest.approx(-0.5030151213)
+    for r in rows:                                                    # held through bar 322, gone at bar 324's open
+        assert r.exit_ts == D0 + 324 * DAY and r.hold_days == 3.0
+        assert r.result_r == pytest.approx(want)
 
 
 def test_h5_without_any_rates_has_no_signals():
@@ -758,8 +815,16 @@ def test_the_report_has_the_trade_accounting_the_data_and_the_rates():
 def test_the_report_notes_state_how_the_pre_registration_was_read():
     text = research2.render_report(fake_results([]), research2.decide([]), NOW)
     notes = section(text, "Notes")
-    for needle in ("15th", "0.40", "0.004", "ATR(14)", "state", "time stop", "8 ATR"):
+    for needle in ("15th", "0.40", "0.004", "ATR(14)", "ATR(20)", "hold condition", "entries only", "time stop",
+                   "8 ATR", "60 %", "amendment"):
         assert needle in notes, needle
+
+
+def test_the_report_states_h5s_amended_rules_in_its_own_section():
+    h5 = section(research2.render_report(fake_results([]), research2.decide([]), NOW), CARRY_FX)
+    assert "ATR(20)" in h5 and "SMA200" in h5 and "hold" in h5
+    assert "held while" in h5 and "entries only" in h5
+    assert "falls back inside the band" not in h5
 
 
 def test_the_report_is_deterministic():
@@ -959,6 +1024,65 @@ def test_run_merges_into_an_existing_enabled_json_and_creates_one_when_missing(t
     research2.run(fetch=synthetic_fetch(), rates_fetch=fake_fred(), now=NOW_RUN,
                   cache_dir=tmp_path / "cache", out_dir=out_dir, universes=SMALL)
     assert list(json.loads((out_dir / "enabled.json").read_text())) == ["round2"]
+
+
+# ================================================================== amendment A3: the wick threshold of crypto
+def wick_fetch(good, factor, at=500):
+    """`good` with the row at index `at` of every series given a high `factor` times its close."""
+    def fetch(symbol, interval):
+        rows = list(good(symbol, interval))
+        day, o, h, low, c = rows[at]
+        rows[at] = (day, o, c * factor, low, c)
+        return rows
+    return fetch
+
+
+def test_the_wick_threshold_is_60_percent_for_the_coins_and_15_percent_for_everything_else():
+    for coin in ins.ALT_COINS:
+        assert research2.max_wick_for(coin) == 0.60
+    for inst in ins.INDEX_UNIVERSE + ins.FX_UNIVERSE:
+        assert research2.max_wick_for(inst) == 0.15
+    for symbol in ("GC=F", "SI=F", "CL=F", "BZ=F"):
+        assert research2.max_wick_for(ins.by_symbol(symbol)) == 0.15
+
+
+def run_with_wick(tmp_path, factor):
+    return research2.run(fetch=wick_fetch(synthetic_fetch(), factor), rates_fetch=fake_fred(), now=NOW_RUN,
+                         cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", write=False,
+                         universes={CR_BO: ins.ALT_COINS[:2], IDX_DIP: ins.INDEX_UNIVERSE[:1],
+                                    CARRY_FX: ins.FX_UNIVERSE[:1]})
+
+
+def test_run_cleans_a_coin_at_60_percent_and_an_index_or_a_pair_at_15(tmp_path):
+    out = run_with_wick(tmp_path, 1.30)                  # a bar with a high 30 % over its close, in every series
+    coverage = {c.symbol: c for c in out.results.coverage}
+    assert {s: c.dropped.wick for s, c in coverage.items()} == {
+        "SOL-USD": 0, "XRP-USD": 0, "^GSPC": 1, "EURUSD=X": 1}
+    # the coins keep that bar, the others lose it
+    assert {s: c.bars for s, c in coverage.items()} == {
+        "SOL-USD": 2188, "XRP-USD": 2188, "^GSPC": 4694, "EURUSD=X": 4694}
+    assert not (tmp_path / "out").exists()
+
+
+def test_run_still_drops_a_coin_bar_whose_wick_is_over_60_percent(tmp_path):
+    out = run_with_wick(tmp_path, 1.61)
+    coverage = {c.symbol: c for c in out.results.coverage}
+    assert {s: c.dropped.wick for s, c in coverage.items()} == {
+        "SOL-USD": 1, "XRP-USD": 1, "^GSPC": 1, "EURUSD=X": 1}
+    out = run_with_wick(tmp_path / "again", 1.59)
+    assert {c.symbol: c.dropped.wick for c in out.results.coverage}["SOL-USD"] == 0
+
+
+def test_run_reads_the_coins_through_the_loader_with_the_crypto_threshold(monkeypatch, tmp_path):
+    asked = {}
+    real = data.load_daily
+
+    def spy(symbol, **kw):
+        asked[symbol] = kw.get("max_wick")
+        return real(symbol, **kw)
+    monkeypatch.setattr(data, "load_daily", spy)
+    run_with_wick(tmp_path, 1.0)
+    assert asked == {"SOL-USD": 0.60, "XRP-USD": 0.60, "^GSPC": 0.15, "EURUSD=X": 0.15}
 
 
 # ================================================================== the command line

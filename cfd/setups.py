@@ -21,7 +21,7 @@ and the short side is the mirror image.
 Round 2 (docs/cfd/PREREGISTRATION_R2.md) adds two more, with the same shape (bars in, signals out):
   IDX-DIP (H4)   `idx_dip`: long only, close > SMA200 and RSI(2) < 10 at the close of bar t; the stop,
                  fixed at the signal, is the close - 2.5 ATR.
-  CARRY-FX (H5)  `carry_states` and `carry_fx`: the carry-gated trend of carry_strategy.py (its frozen
+  CARRY-FX (H5)  `carry_states`, `carry_holds` and `carry_fx`: the carry-gated trend of carry_strategy.py (its frozen
                  2.5 % band and 200-day average) with the rates of the two currencies given per bar.
                  The state at each close is LONG / SHORT / FLAT; a signal is a change from FLAT (or
                  from the opposite side) into LONG or SHORT, with the stop at the close -/+ 6 ATR.
@@ -57,6 +57,7 @@ DIP_STOP_ATR = 2.5           # IDX-DIP: stop = signal close - 2.5 ATR
 CARRY_UPPER = 1.025          # CARRY-FX: long above 1.025 * SMA200 (carry_strategy.BAND_PCT = 2.5)
 CARRY_LOWER = 0.975          # ... short below 0.975 * SMA200
 CARRY_STOP_ATR = 6.0         # CARRY-FX: stop = signal close -/+ 6 ATR (carry_strategy.TRAIL_ATR)
+CARRY_ATR_LEN = 20           # CARRY-FX: the original's ATR_LEN (amendment A2); H3 and H4 keep ATR(14)
 LONG, SHORT, FLAT = "long", "short", "flat"      # the states of CARRY-FX
 
 
@@ -179,16 +180,41 @@ def carry_states(bars: Sequence[Bar], base_rates: Sequence[float | None],
     return out
 
 
+def carry_holds(bars: Sequence[Bar], base_rates: Sequence[float | None],
+                quote_rates: Sequence[float | None]) -> list[str]:
+    """The HOLD condition at the close of every bar (PREREGISTRATION_R2.md, amendment A1) -- the
+    original's, carry_strategy.py's hold_l / hold_s: "long" while the close is above SMA200 and the
+    base currency's rate is above the quote currency's; "short" while it is below SMA200 and the base
+    rate is below the quote rate; otherwise "flat". No band: the 2.5 % of `carry_states` applies to
+    entries only, so a trade is not thrown out by a fall back inside it. Inputs as in `carry_states`."""
+    if not len(bars) == len(base_rates) == len(quote_rates):
+        raise ValueError("bars, base_rates and quote_rates must have the same length")
+    closes = ind.closes(bars)
+    sma = ind.sma(closes, SMA_LEN)
+    out: list[str] = []
+    for c, avg, base, quote in zip(closes, sma, base_rates, quote_rates):
+        if avg is None or base is None or quote is None:
+            out.append(FLAT)
+        elif c > avg and base > quote:
+            out.append(LONG)
+        elif c < avg and base < quote:
+            out.append(SHORT)
+        else:
+            out.append(FLAT)
+    return out
+
+
 def carry_fx(bars: Sequence[Bar], base_rates: Sequence[float | None],
              quote_rates: Sequence[float | None], *,
              min_bars: int = MIN_BARS_BEFORE_SIGNAL) -> list[Signal]:
     """The entries of the carry-gated trend: a signal at the close of bar t when the state
     (`carry_states`) changes from flat, or from the opposite side, into long or short. The stop,
-    fixed at the signal, is the close -/+ 6 ATR; R is measured from the actual entry, the next open.
-    The state series itself, which the exits of H5 read, is `carry_states` of the same arguments."""
+    fixed at the signal, is the close -/+ 6 ATR(20) (the original's ATR_LEN, amendment A2); R is
+    measured from the actual entry, the next open. What a trade is held on is `carry_holds` of the
+    same arguments, not this entry state."""
     states = carry_states(bars, base_rates, quote_rates)
     closes = ind.closes(bars)
-    atr = ind.atr(bars, ATR_LEN)
+    atr = ind.atr(bars, CARRY_ATR_LEN)
     out: list[Signal] = []
     for i in range(max(min_bars, 1), len(bars)):
         state, a = states[i], atr[i]
