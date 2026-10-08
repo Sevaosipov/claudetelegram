@@ -126,7 +126,7 @@ POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупк�
                    "/sold TICKER — отметить продажу\n"
                    "Просто /bought или /sold — бот спросит, что именно\n"
                    "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»\n"
-                   "/portfolio — ваши позиции")
+                   "/portfolio — ваши позиции, /crypto — ваши монеты")
 
 LOOKUP_HINT = ("Любой тикер или монета: NVDA, BTC, SOL, EQNR.OL, VOLV-B.ST. "
                "$BTC — акция с таким тикером, BTC-USD — монета.")
@@ -136,6 +136,7 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
              "/portfolio — ваш счёт Trading 212 и позиции /bought.\n"
+             "/crypto — ваши монеты: /bought BTC 80000 0.01, итог в долларах.\n"
              "/cfd — CFD-сигналы по 13 монетам (эксперимент): открытые, итоги, настройки.\n"
              "/cfd plan XAUUSD buy 4461.80 stop 4449.10 — ваша CFD-сделка: 4 цели, риск и объём, "
              "сообщение на каждой цели и на стопе.\n"
@@ -206,12 +207,13 @@ def _position_listing(arg: str) -> tuple[str, str | None] | None:
     return positions.split_venue(ticker) or (ticker, None)
 
 
-def _handle_my_portfolio(conn) -> None:
+def _handle_my_portfolio(conn, coins: bool = False) -> None:
     """/portfolio and /positions: «💼 Trading 212» -- the account, asked live (or what the last
     sync stored, with why) -- then the positions recorded with /bought, each with how it stands
-    now."""
+    now, the coins among them only counted. /crypto (`coins`): those coins, with their totals."""
     try:
-        telegram_notify.send_text(t212_account.portfolio_text(conn, dt.date.today()))
+        text = (t212_account.crypto_text if coins else t212_account.portfolio_text)(conn, dt.date.today())
+        telegram_notify.send_text(text)
     except Exception as e:
         print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось собрать список позиций ({type(e).__name__}). "
@@ -407,7 +409,7 @@ def _handle_positions_command(conn, text: str) -> bool:
     text, qty_token = _split_quantity(text)
     parts = text.split()
     cmd = parts[0].lower().split("@")[0] if parts else ""
-    if cmd not in ("/portfolio", "/positions"):
+    if cmd not in ("/portfolio", "/positions", "/crypto", "/coins"):
         trade = _normalise_trade_text(text)
         if trade is None:
             return False
@@ -423,6 +425,9 @@ def _handle_positions_command(conn, text: str) -> bool:
         parts = [cmd] + [x for x in (ticker_text, price_text) if x]
     if cmd in ("/portfolio", "/positions"):
         _handle_my_portfolio(conn)
+        return True
+    if cmd in ("/crypto", "/coins"):
+        _handle_my_portfolio(conn, coins=True)
         return True
     if cmd not in ("/bought", "/sold"):
         return False
@@ -491,11 +496,18 @@ def _handle_positions_command(conn, text: str) -> bool:
     if qty_token and qty is None:
         telegram_notify.send_text(POSITIONS_USAGE)
         return True
+    mine = positions.find_open(conn, ticker)
+    if mine is not None and qty and mine.quantity:      # more of what is already recorded: averaged
+        pos = positions.add_to_position(conn, mine, price, qty)
+        telegram_notify.send_text(
+            f"Докупили {ticker}: теперь {telegram_notify.quantity(pos.quantity)} шт., "
+            f"средняя {telegram_notify._price(pos.entry_price)}.")
+        return True
     try:
         pos = positions.open_position(conn, ticker, price, source=source, quantity=qty, currency=currency)
     except ValueError:
         telegram_notify.send_text(f"Позиция {ticker} уже открыта. /sold {ticker.removeprefix('CRYPTO:')}, "
-                                  "чтобы закрыть.")
+                                  "чтобы закрыть; докупить можно, когда у обеих покупок указано количество.")
         return True
     insiders = ", ".join(telegram_notify._esc(n) for n in pos.insiders)
     if pos.insiders:

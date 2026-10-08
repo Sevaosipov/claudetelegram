@@ -1031,6 +1031,32 @@ def format_my_portfolio(rows: list, *, html: bool = True, t212=None) -> str:
     return "\n\n".join(parts + my_position_blocks(rows, html=html) + ["\n".join(footer)])
 
 
+# ---- /crypto: the coins the user recorded with /bought, apart from the stocks of /portfolio
+_CRYPTO_HEADER = "🪙 Крипто-портфель"
+NO_COINS = "Монет пока нет. Запишите покупку: /bought BTC 80000 0.01 (цена и сколько купили)."
+COINS_FOOTER = "🪙 Монеты ({n}) — /crypto"
+
+
+def format_crypto_portfolio(rows: list, *, html: bool = True) -> str:
+    """/crypto: the header with the number of coins, the totals in dollars over the coins whose
+    quantity and price are known (what they cost, what they are worth, the difference), a block per
+    coin and the hint that a signal to sell comes by itself. `rows` as in my_position_blocks."""
+    if not rows:
+        return "\n\n".join([_b(_CRYPTO_HEADER, html), NO_COINS])
+    n = len(rows)
+    head = [_b(f"{_CRYPTO_HEADER} — {n} {_plural(n, 'монета', 'монеты', 'монет')}", html)]
+    counted = [(pos, st) for pos, st in rows if pos.quantity and st["last"] is not None]
+    if counted:
+        cost = sum(pos.entry_price * pos.quantity for pos, _ in counted)
+        value = sum(st["last"] * pos.quantity for pos, st in counted)
+        line = (f"Вложено ${_price(cost)} · сейчас ${_price(value)} · "
+                f"P/L {money_cents(value - cost, 'USD')} ({signed_pct(value / cost - 1)})")
+        if len(counted) < n:
+            line += f" — по {len(counted)} из {n}: у остальных нет количества или цены"
+        head.append(_e(line, html))
+    return "\n\n".join(["\n".join(head)] + my_position_blocks(rows, html=html) + [_SELL_HINT])
+
+
 # ------------------------------------------------- the experimental live CFD signals (cfd/live.py)
 # Spec 2026-10-08-cfd-live-crypto-breakout.md. One message per event, in the signal-line style:
 #   «🟢 SOLUSD!: покупка по 121,50 — стоп 108,20, трейлинг-стоп 3×ATR; TP1 134,80 · … (отметки, позиция не

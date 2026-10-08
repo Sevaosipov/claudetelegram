@@ -271,6 +271,16 @@ def open_position(conn, ticker: str, entry_price: float, today: dt.date | None =
     return next(p for p in open_positions(conn) if p.ticker == ticker)
 
 
+def add_to_position(conn, pos: Position, price: float, quantity: float) -> Position:
+    """More of a position the user recorded with its quantity: the quantities add up and the entry
+    becomes the average price paid."""
+    total = pos.quantity + quantity
+    entry = (pos.entry_price * pos.quantity + price * quantity) / total
+    conn.execute("UPDATE positions SET quantity = ?, entry_price = ? WHERE id = ?", (total, entry, pos.id))
+    conn.commit()
+    return next(p for p in open_positions(conn) if p.id == pos.id)
+
+
 def close_position(conn, ticker: str, reason: str = "manual",
                    today: dt.date | None = None) -> Position | None:
     ticker = ticker.strip().upper()

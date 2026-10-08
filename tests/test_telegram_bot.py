@@ -777,7 +777,7 @@ def test_the_positions_usage_says_how_to_record_a_buy_and_a_sale():
         "/sold TICKER — отметить продажу",
         "Просто /bought или /sold — бот спросит, что именно",
         "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»",
-        "/portfolio — ваши позиции"]
+        "/portfolio — ваши позиции, /crypto — ваши монеты"]
     assert tb.POSITIONS_USAGE in tb.HELP_TEXT
 
 
@@ -1446,7 +1446,8 @@ def test_a_second_tap_keeps_the_request_open(conn, replies):
 def test_an_already_open_coin_names_the_command_to_close_it_without_the_prefix(conn, replies):
     tb._handle_message(conn, "/bought XRP 1.37")
     tb._handle_message(conn, "/bought XRP 1.40")
-    assert replies[-1] == "Позиция CRYPTO:XRP уже открыта. /sold XRP, чтобы закрыть."
+    assert replies[-1] == ("Позиция CRYPTO:XRP уже открыта. /sold XRP, чтобы закрыть; "
+                           "докупить можно, когда у обеих покупок указано количество.")
 
 
 def test_an_ordinary_sentence_starting_with_sold_is_not_a_command(conn, monkeypatch):
@@ -1518,3 +1519,39 @@ def test_the_portfolio_line_shows_the_quantity_and_the_money():
     import telegram_notify as tn
     line = tn.my_position_blocks([(pos, st)], html=False)[0].splitlines()[0]
     assert line == "• XRP: 100 шт., вход 1,25 (01.10), сейчас 1,50 (+20,0%), +$25,00, 7 дн."
+
+
+# ---- /crypto: the coins apart from the stocks
+def test_crypto_shows_the_coins_with_their_totals_and_portfolio_only_counts_them(conn, replies, monkeypatch):
+    tb._handle_message(conn, "/bought XRP 1.25 100")
+    tb._handle_message(conn, "/bought SOL 150")
+    tb._handle_message(conn, "/bought NVDA 180 2")
+    prices = {"CRYPTO:XRP": 1.5, "CRYPTO:SOL": None, "NVDA": 198.0}
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: prices[ticker])
+    tb._handle_message(conn, "/crypto")
+    text = replies[-1]
+    assert text.startswith("<b>🪙 Крипто-портфель — 2 монеты</b>\n"
+                           "Вложено $125,00 · сейчас $150,00 · P/L +$25,00 (+20,0%) — по 1 из 2: "
+                           "у остальных нет количества или цены\n\n• XRP: 100 шт., вход 1,25")
+    assert "• SOL: вход 150,00" in text and "NVDA" not in text
+    tb._handle_message(conn, "/portfolio")
+    assert "NVDA" in replies[-1] and "XRP" not in replies[-1] and replies[-1].endswith("\n🪙 Монеты (2) — /crypto")
+
+
+def test_crypto_with_no_coins_says_how_to_record_one(conn, replies):
+    import telegram_notify as tn
+    tb._handle_message(conn, "/bought NVDA 180")
+    tb._handle_message(conn, "/crypto")
+    assert replies[-1] == f"<b>🪙 Крипто-портфель</b>\n\n{tn.NO_COINS}"
+    tb._handle_message(conn, "/portfolio")
+    assert "/crypto" not in replies[-1]
+
+
+def test_buying_more_of_a_recorded_coin_averages_the_entry(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought XRP 1.20 100")
+    tb._handle_message(conn, "/bought XRP 1.50 50")
+    pos = positions.find_open(conn, "CRYPTO:XRP")
+    assert pos.quantity == 150 and pos.entry_price == pytest.approx(1.30)
+    assert replies[-1] == "Докупили CRYPTO:XRP: теперь 150 шт., средняя 1,30."
+    assert len(positions.open_positions(conn)) == 1
