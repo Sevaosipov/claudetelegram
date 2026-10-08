@@ -405,3 +405,66 @@ def scan_all(conn, send: Send, *, fetch: data.Fetch | None = None, today: dt.dat
         except Exception as e:
             print(f"[CFD] {coin_of(inst)}: scan failed: {type(e).__name__}: {e}", file=sys.stderr)
     return made
+
+
+# ================================================================ the commands (/cfd)
+USAGE = {
+    "balance": "/cfd balance 500 — ваш баланс в евро (0 — убрать): от него считается объём",
+    "risk": "/cfd risk 1 — риск на сигнал, % баланса: от 0,1 до 5",
+    "maxrisk": "/cfd maxrisk 3 — лимит открытого риска, % баланса: от 1 до 20",
+    "off": "/cfd off — не искать новые сигналы (открытые отслеживаются дальше)",
+    "on": "/cfd on — снова искать новые сигналы",
+}
+_BALANCE_MAX = 1e9
+_LIMITS = {"risk": (0.1, 5.0), "maxrisk": (1.0, 20.0)}
+
+
+def usage_text() -> str:
+    return "\n".join(["/cfd — CFD-сигналы (эксперимент): открытые, итоги, настройки", *USAGE.values()])
+
+
+def status_text(conn, *, html: bool = True, today: dt.date | None = None) -> str:
+    """The /cfd view (also the menu's): the header, the settings line, the open signals, the record."""
+    import telegram_notify
+    return telegram_notify.format_cfd_status(get_settings(conn), open_signals(conn), closed_signals(conn),
+                                             today or dt.date.today(), html=html)
+
+
+def _number(text: str) -> float | None:
+    try:
+        x = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    return x if math.isfinite(x) else None
+
+
+def handle_command(conn, text: str, *, today: dt.date | None = None) -> str:
+    """The answer to «/cfd ...». No argument: the view. «balance X», «risk X», «maxrisk X», «off», «on»:
+    validate, keep, and answer with the new settings line; a bad value or an unknown word gets its usage
+    line. The user's own settings are the only thing a command changes."""
+    import telegram_notify
+    parts = text.split()
+    args = parts[1:]
+    if not args:
+        return status_text(conn, today=today)
+    name = args[0].lower()
+    if name in ("off", "on"):
+        if len(args) != 1:
+            return USAGE[name]
+        set_setting(conn, "paused", name == "off")
+    elif name in ("balance", "risk", "maxrisk"):
+        value = _number(args[1]) if len(args) == 2 else None
+        if value is None:
+            return USAGE[name]
+        if name == "balance":
+            if not 0 <= value <= _BALANCE_MAX:
+                return USAGE[name]
+            value = value or None                   # 0 puts the balance away
+        else:
+            low, high = _LIMITS[name]
+            if not low <= value <= high:
+                return USAGE[name]
+        set_setting(conn, name, value)
+    else:
+        return usage_text()
+    return telegram_notify.format_cfd_settings(get_settings(conn))
