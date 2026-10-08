@@ -773,6 +773,7 @@ def test_the_positions_usage_says_how_to_record_a_buy_and_a_sale():
         "/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
         "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST",
         "/sold TICKER — отметить продажу",
+        "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»",
         "/portfolio — ваши позиции"]
     assert tb.POSITIONS_USAGE in tb.HELP_TEXT
 
@@ -1337,3 +1338,52 @@ while true; do sleep 1; done
             os.kill(int(grandchild.read_text()), signal.SIGKILL)
         except (OSError, ValueError):
             pass
+
+
+# ---- a buy or a sale typed loosely (the user's own messages: "/sell", "Xrp €1.3676")
+@pytest.mark.parametrize("text", ["/buy AAA 12.5", "/BUY aaa 12,5", "bought AAA 12.5", "купил AAA по 12.5",
+                                  "/bought AAA $12.5", "buy AAA at 12.5"])
+def test_a_buy_typed_loosely_is_recorded(conn, replies, text):
+    import positions
+    tb._handle_message(conn, text)
+    [pos] = positions.open_positions(conn)
+    assert (pos.ticker, pos.entry_price) == ("AAA", 12.5)
+    assert replies[-1].startswith("Записал AAA по 12,50")
+
+
+@pytest.mark.parametrize("text", ["/sell AAA", "/sold aaa", "sold AAA", "продал AAA", "sell AAA"])
+def test_a_sale_typed_loosely_closes_the_position(conn, replies, text):
+    import positions
+    tb._handle_message(conn, "/bought AAA 12.5")
+    tb._handle_message(conn, text)
+    assert positions.open_positions(conn) == [] and replies[-1] == "Позиция AAA закрыта."
+
+
+def test_a_euro_price_for_a_coin_is_converted_to_dollars_and_said(conn, replies, monkeypatch):
+    import fx
+    import positions
+    monkeypatch.setattr(fx, "per_eur", lambda currency, conn=None: 1.16)
+    tb._handle_message(conn, "/buy XRP €1.3676")
+    [pos] = positions.open_positions(conn)
+    assert pos.ticker == "CRYPTO:XRP" and pos.entry_price == pytest.approx(1.3676 * 1.16)
+    assert "€1.3676 = $1.586" in replies[-1]
+
+
+def test_a_ticker_and_a_price_with_no_verb_asks_which_it_was(conn, replies):
+    import positions
+    tb._handle_message(conn, "Xrp €1.3676")
+    assert positions.open_positions(conn) == []
+    assert replies[-1] == "Купили или продали? /bought XRP €1.3676 — купили, /sold XRP — продали."
+
+
+def test_an_ordinary_sentence_starting_with_sold_is_not_a_command(conn, monkeypatch):
+    assert tb._normalise_trade_text("sold everything yesterday, what now?") is None
+    assert tb._normalise_trade_text("buy or wait?") is None
+
+
+@pytest.mark.parametrize("token, want", [("1.3676", (1.3676, None)), ("1,3676", (1.3676, None)),
+                                         ("€1.3676", (1.3676, "EUR")), ("180eur", (180.0, "EUR")),
+                                         ("1.37$", (1.37, "USD")), ("1,234.5", (1234.5, None)),
+                                         ("1.234,5", (1234.5, None)), ("abc", None)])
+def test_a_typed_price_is_read_with_its_currency(token, want):
+    assert tb._price_token(token) == want

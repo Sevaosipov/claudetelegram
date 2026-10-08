@@ -88,6 +88,10 @@ CHILD_ENV = "DISCLOSURE_ANALYST_CHILD"
 _DROPPED_ENV = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 _SECRET_ENV = re.compile(r"TOKEN|SECRET|API_KEY|PASSWORD", re.I)
 _LOADED_ENV: set[str] = set()   # what load_env set in os.environ: never handed to Claude
+# Claude's own long-lived login (`claude setup-token`), kept in .env: the one credential Claude must get,
+# because the interactive login on this machine keeps expiring. It authenticates Claude itself; it opens
+# nothing else.
+CLAUDE_AUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 # What Claude CLI prints on stdout, exit 0, when it could not answer at all.
 _CLI_ERROR_START = ("Error:", "Failed to authenticate")
 _CLI_ERROR_PHRASES = ("usage limit", "session limit")
@@ -147,6 +151,12 @@ def claude_env(base: dict | None = None) -> dict:
     parts = [p for p in env.get("PATH", "").split(":") if p]
     env["PATH"] = ":".join([p for p in EXTRA_PATH if p not in parts] + parts)
     env[CHILD_ENV] = "1"
+    token = (os.environ if base is None else base).get(CLAUDE_AUTH_ENV)
+    if not token and base is None:              # `ask` does not load .env: read just this one name from it
+        import trading212
+        token = trading212._setting(CLAUDE_AUTH_ENV)
+    if token:
+        env[CLAUDE_AUTH_ENV] = token
     return env
 
 

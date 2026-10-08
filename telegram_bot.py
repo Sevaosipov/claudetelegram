@@ -122,6 +122,7 @@ _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
 POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
                    "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST\n"
                    "/sold TICKER — отметить продажу\n"
+                   "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»\n"
                    "/portfolio — ваши позиции")
 
 LOOKUP_HINT = ("Любой тикер или монета: NVDA, BTC, SOL, EQNR.OL, VOLV-B.ST. "
@@ -226,11 +227,69 @@ def _handle_cfd_command(conn, text: str) -> bool:
     return True
 
 
+_BUY_WORDS = {"/bought", "/buy", "/b", "bought", "buy", "купил", "купила", "куплено", "купить", "/купил"}
+_SELL_WORDS = {"/sold", "/sell", "/s", "sold", "sell", "продал", "продала", "продано", "продать", "/продал"}
+_FILLER = {"по", "at", "@", "за", "for", "price", "цена"}
+_PRICE_RE = re.compile(r"^(?P<pre>[€$])?(?P<num>\d[\d\s.,]*)(?P<post>[€$]|eur|usd|евро)?$", re.IGNORECASE)
+BUY_OR_SELL_HINT = "Купили или продали? /bought {t} {p} — купили, /sold {t} — продали."
+
+
+def _price_token(token: str) -> tuple[float, str | None] | None:
+    """A typed price -> (number, currency or None): 1.3676, 1,3676, €1.3676, 1.37$, 180eur."""
+    m = _PRICE_RE.match(token.strip())
+    if not m:
+        return None
+    raw = m.group("num").replace(" ", "")
+    if "," in raw and "." in raw:           # 1,234.5 or 1.234,5: the last separator is the decimal one
+        dec = "," if raw.rfind(",") > raw.rfind(".") else "."
+        raw = raw.replace("." if dec == "," else ",", "").replace(dec, ".")
+    else:
+        raw = raw.replace(",", ".")
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    mark = (m.group("pre") or m.group("post") or "").lower()
+    currency = {"€": "EUR", "eur": "EUR", "евро": "EUR", "$": "USD", "usd": "USD"}.get(mark)
+    return value, currency
+
+
+def _normalise_trade_text(text: str) -> tuple[str, str | None, str | None] | None:
+    """What the user meant by a buy or a sale typed loosely -> ("/bought" | "/sold" | "?", ticker text,
+    price text) or None when the message is not one. Accepts /buy, /sell, the words without a slash,
+    Russian verbs, fillers ("по", "at") and a price with a currency sign. "?" is a ticker and a price
+    with no verb ("XRP €1.37"): the reply asks which it was."""
+    parts = [w for w in text.split() if w.lower() not in _FILLER]
+    if not parts:
+        return None
+    first = parts[0].lower().split("@")[0]
+    if first in _BUY_WORDS or first in _SELL_WORDS:
+        cmd = "/bought" if first in _BUY_WORDS else "/sold"
+        if not first.startswith("/") and (len(parts) < 2 or len(parts) > 3 or not _position_listing(parts[1])
+                                          or (len(parts) == 3 and _price_token(parts[2]) is None)):
+            return None                         # an ordinary sentence that starts with "sold ...": a question
+        return cmd, (parts[1] if len(parts) > 1 else None), (parts[2] if len(parts) > 2 else None)
+    if len(parts) == 2 and not first.startswith("/") and _price_token(parts[1]) and _position_listing(parts[0]):
+        return "?", parts[0], parts[1]
+    return None
+
+
 def _handle_positions_command(conn, text: str) -> bool:
     """/portfolio (/positions too), /bought, /sold -- the positions that positions.py tracks for
-    close alerts. Returns False for anything else."""
+    close alerts. Returns False for anything else. A buy or a sale may be typed loosely
+    (_normalise_trade_text): /buy, /sell, without the slash, with a currency sign on the price."""
     parts = text.split()
     cmd = parts[0].lower().split("@")[0] if parts else ""
+    if cmd not in ("/portfolio", "/positions"):
+        trade = _normalise_trade_text(text)
+        if trade is None:
+            return False
+        cmd, ticker_text, price_text = trade
+        if cmd == "?":
+            telegram_notify.send_text(BUY_OR_SELL_HINT.format(
+                t=telegram_notify._esc(ticker_text.upper()), p=telegram_notify._esc(price_text)))
+            return True
+        parts = [cmd] + [x for x in (ticker_text, price_text) if x]
     if cmd in ("/portfolio", "/positions"):
         _handle_my_portfolio(conn)
         return True
@@ -259,18 +318,22 @@ def _handle_positions_command(conn, text: str) -> bool:
         telegram_notify.send_text(f"Позиция {ticker} закрыта." if pos
                                   else f"По {ticker} нет открытой позиции.")
         return True
-    user_price = None
-    if len(parts) > 2:
-        try:
-            user_price = float(parts[2].replace(",", "."))
-        except ValueError:
-            telegram_notify.send_text(POSITIONS_USAGE)
-            return True
-        if not math.isfinite(user_price) or user_price <= 0:
-            telegram_notify.send_text(POSITIONS_USAGE)
-            return True
-
+    user_price, converted = None, ""
     source = venue_source or positions.position_source(conn, ticker)
+    if len(parts) > 2:
+        typed = _price_token(parts[2])
+        if typed is None or not math.isfinite(typed[0]) or typed[0] <= 0:
+            telegram_notify.send_text(POSITIONS_USAGE)
+            return True
+        user_price, currency = typed
+        # A coin or a US stock is priced in dollars: a price typed in euros is converted, and said so.
+        if currency == "EUR" and (crypto.is_crypto(ticker) or not source or source in ("SEC", "HOUSE", "SENATE", "SEC13DG")):
+            import fx
+            rate = fx.per_eur("USD", conn)
+            if rate:
+                converted = f" (€{parts[2].strip('€').strip()} = ${user_price * rate:,.4g})"
+                user_price *= rate
+
     market_price = positions.last_close(ticker, source)
     note = ""
     if user_price is not None:
@@ -310,7 +373,7 @@ def _handle_positions_command(conn, text: str) -> bool:
     stop = "" if note else (f"стоп −{pos.stop_pct * 100:.0f}% от максимума; " if pos.stop_pct is not None
                             else "стоп — по умолчанию; ")
     shown = f"{price:,.2f}".replace(",", " ").replace(".", ",")
-    telegram_notify.send_text(f"Записал {ticker} по {shown}; {stop}{who}{note}.")
+    telegram_notify.send_text(f"Записал {ticker} по {shown}{converted}; {stop}{who}{note}.")
     return True
 
 

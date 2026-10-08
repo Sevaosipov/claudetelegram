@@ -1986,3 +1986,12 @@ def test_the_signals_of_a_venue_key_are_asked_for_by_the_bare_name(conn, dossier
     seen = _stub_scoring(monkeypatch, [_stock("EQNR", 66.0, source="NORWAY")])
     assert "МОДЕЛЬ: балл 66" in analyst.context(conn, "EQNR.OL")
     assert seen["tickers"] == {"EQNR.OL", "EQNR"}
+
+
+def test_claudes_own_login_token_is_the_one_credential_handed_on():
+    base = {"PATH": "/usr/bin", "CLAUDE_CODE_OAUTH_TOKEN": "tok", "TELEGRAM_BOT_TOKEN": "x",
+            "TRADING212_API_KEY": "k", "OTHER_TOKEN": "y"}
+    env = analyst.claude_env(base)
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+    assert not {"TELEGRAM_BOT_TOKEN", "TRADING212_API_KEY", "OTHER_TOKEN"} & set(env)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in analyst.claude_env({"PATH": "/usr/bin"})
