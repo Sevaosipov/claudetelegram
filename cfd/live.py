@@ -190,8 +190,9 @@ class Notice:
     it is at that moment. A checkpoint carries its number `k`, its price `level` and the `stop` in force
     after the bar; a close the `price` it was closed at, its `result_r` after the costs, whether the stop
     had `trailed` away from the initial one and the `date` of the bar. An entry carries, when the sizing
-    asks for it, `qty_per_1000` (the quantity for a €1 000 balance, with no balance set) and
-    `over_limit` (the open risk including this signal, and the limit it is above)."""
+    asks for it, `risk_pct` (the percent the message names), `qty_per_1000` (the quantity for a €1 000
+    balance, with no balance set) and `over_limit` (the open risk including this signal, and the limit it
+    is above)."""
     kind: str
     signal: Signal
     k: int | None = None
@@ -203,6 +204,7 @@ class Notice:
     date: str | None = None
     qty_per_1000: float | None = None
     over_limit: tuple[float, float] | None = None
+    risk_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -381,7 +383,8 @@ def scan_coin(conn, inst: ins.Instrument, feed: Feed, settings: Settings, send: 
 
     draft = Signal(0, coin, inst.symbol, signal.side, day.isoformat(), entry, signal.stop, signal.stop,
                    distance, 0, day.isoformat(), "open", None, None, None, risk_pct, risk_eur, qty, "")
-    if not send(Notice("entry", draft, qty_per_1000=qty_per_1000, over_limit=over)):
+    if not send(Notice("entry", draft, qty_per_1000=qty_per_1000, over_limit=over,
+                     risk_pct=settings.risk_pct)):
         return False
     insert_signal(conn, coin=coin, symbol=inst.symbol, side=signal.side, signal_date=day.isoformat(),
                   entry=entry, stop0=signal.stop, r=distance, last_bar=day.isoformat(),

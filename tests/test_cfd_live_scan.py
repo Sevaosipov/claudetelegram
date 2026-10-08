@@ -222,7 +222,7 @@ def test_nothing_is_stored_without_a_balance_but_the_notice_has_the_quantity_for
     (sig,) = live.open_signals(conn)
     assert (sig.risk_pct, sig.risk_eur, sig.qty) == (None, None, None)
     (notice,) = out.notices
-    assert notice.qty_per_1000 == live.size_qty(10.0, sig.r, 110.5, conn)
+    assert notice.qty_per_1000 == live.size_qty(10.0, sig.r, 110.5, conn) and notice.risk_pct == 1.0
     assert notice.signal.risk_eur is None
 
 
