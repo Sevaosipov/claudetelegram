@@ -13,9 +13,15 @@ a signal bar) with the sizing, and the daily pass that ties them to Telegram.
 from __future__ import annotations
 
 import datetime as dt
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 import db
+from cfd import data, exits
+from cfd import indicators as ind
+from cfd import instruments as ins
+from cfd.data import Bar
 
 # ------------------------------------------------------------------ settings (kv_cache)
 KV_KEYS = {"balance": "cfd_balance_eur", "risk": "cfd_risk_pct", "maxrisk": "cfd_max_open_risk_pct",
@@ -134,3 +140,170 @@ def update_signal(conn, signal_id: int, **changes) -> None:
     sets = ", ".join(f"{name} = ?" for name in changes)
     conn.execute(f"UPDATE cfd_signals SET {sets} WHERE id = ?", (*changes.values(), signal_id))
     conn.commit()
+
+
+# ================================================================ the data
+COINS: tuple[ins.Instrument, ...] = (ins.by_symbol("BTC-USD"), ins.by_symbol("ETH-USD")) + ins.ALT_COINS
+CHECKPOINTS = 4                  # TP1..TP4 = +1R..+4R: marks on the way, never exits
+ATR_LEN = 14
+
+
+def coin_of(inst: ins.Instrument) -> str:
+    """SOL of SOLUSD: the name a coin goes by in the messages and in the table."""
+    return inst.name.removesuffix("USD")
+
+
+class Feed:
+    """The daily bars of the coins for one pass, fetched once per symbol through cfd.data's seam
+    (`fetch(symbol, interval) -> raw rows`; the default is Yahoo). `bars(symbol)` are the completed
+    ones, cleaned at the coins' 60 % wick threshold; `forming_open(symbol)` is the open of the bar of
+    `today` (UTC), still forming, or None -- the reference entry of a signal made at yesterday's close."""
+
+    def __init__(self, fetch: data.Fetch | None = None, today: dt.date | None = None):
+        self._fetch = fetch
+        self.today = today or data._today()
+        self._loaded: dict[str, tuple[list[Bar], float | None]] = {}
+
+    def _load(self, symbol: str) -> tuple[list[Bar], float | None]:
+        if symbol not in self._loaded:
+            rows = (self._fetch or data.yahoo_fetch)(symbol, data.DAILY)
+            cleaned = data.clean_rows(rows, data.DAILY, max_wick=data.MAX_WICK_CRYPTO).bars
+            done = [b for b in cleaned if b.ts.date() < self.today]
+            forming = next((b.open for b in cleaned if b.ts.date() == self.today), None)
+            self._loaded[symbol] = (done, forming)
+        return self._loaded[symbol]
+
+    def bars(self, symbol: str) -> list[Bar]:
+        return self._load(symbol)[0]
+
+    def forming_open(self, symbol: str) -> float | None:
+        return self._load(symbol)[1]
+
+
+# ================================================================ the tracker
+@dataclass(frozen=True)
+class Notice:
+    """One event to tell the user about. `kind` is "entry", "checkpoint" or "close"; `signal` the row as
+    it is at that moment. A checkpoint carries its number `k`, its price `level` and the `stop` in force
+    after the bar; a close the `price` it was closed at, its `result_r` after the costs, whether the stop
+    had `trailed` away from the initial one and the `date` of the bar. An entry carries, when the sizing
+    asks for it, `qty_per_1000` (the quantity for a €1 000 balance, with no balance set) and
+    `over_limit` (the open risk including this signal, and the limit it is above)."""
+    kind: str
+    signal: Signal
+    k: int | None = None
+    level: float | None = None
+    stop: float | None = None
+    price: float | None = None
+    result_r: float | None = None
+    trailed: bool = False
+    date: str | None = None
+    qty_per_1000: float | None = None
+    over_limit: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
+class BarEvent:
+    kind: str                        # "checkpoint" | "close"
+    k: int | None = None
+    level: float | None = None
+    price: float | None = None
+
+
+def advance(side: str, entry: float, stop0: float, stop: float, checkpoint: int, bar: Bar,
+            atr: float | None) -> tuple[list[BarEvent], float, bool]:
+    """One completed bar of an open signal: (events in order, the stop after the bar, closed).
+
+    The position is exits.LadderState under E0 -- the backtest's own code, resumed at `stop`. Inside the
+    bar the stop goes before a new checkpoint (the backtest's bar order), unless the bar opened beyond the
+    checkpoint, which was then reached at the open. The trailing stop moves at the end of the bar and is
+    effective from the next one."""
+    state = exits.LadderState(side, entry, stop0, exits.E0, stop=stop)
+    fills = state.step(bar, atr)
+    sign = 1 if side == "long" else -1
+    best = bar.high if side == "long" else bar.low
+    events: list[BarEvent] = []
+    for k in range(checkpoint + 1, CHECKPOINTS + 1):
+        level = state.level(k)
+        if sign * best < sign * level:
+            break
+        if state.closed and sign * bar.open < sign * level:
+            break
+        events.append(BarEvent("checkpoint", k=k, level=level))
+    if state.closed:
+        events.append(BarEvent("close", price=fills[0].price))
+    return events, state.stop, state.closed
+
+
+def result_r(side: str, entry: float, stop0: float, exit_price: float, entry_date: dt.date,
+             exit_date: dt.date, costs: ins.Costs) -> float:
+    """The result of a closed signal in R after the pre-registered costs, as exits.simulate computes it:
+    the move over R, less the round trip and a financing charge per night as a percent of the entry."""
+    distance = abs(entry - stop0)
+    sign = 1 if side == "long" else -1
+    gross = sign * (exit_price - entry) / distance
+    nights = max(0, (exit_date - entry_date).days)
+    cost_pct = costs.round_trip_pct + nights * costs.financing_pct(side)
+    return gross - cost_pct / 100.0 * entry / distance
+
+
+Send = Callable[[Notice], bool]
+
+
+def track_signal(conn, sig: Signal, bars: list[Bar], send: Send) -> int:
+    """Feed an open signal the completed `bars` after its `last_bar`, in order, and tell each event with
+    `send(notice) -> bool`. The row is saved only after the message of what it records went out: a
+    checkpoint is saved when sent; the stop and `last_bar` when the bar is done; the close, with its exit,
+    when its message is sent. A refused send ends the work for this signal and leaves the row as it was,
+    so the next run repeats that event and nothing before it. `sig` is updated in place. Returns the
+    number of messages sent."""
+    if sig.status != "open":
+        return 0
+    atr = ind.atr(bars, ATR_LEN)
+    costs = ins.by_symbol(sig.symbol).costs
+    entry_date = dt.date.fromisoformat(sig.signal_date) + dt.timedelta(days=1)
+    sent = 0
+    for i, bar in enumerate(bars):
+        day = bar.ts.date().isoformat()
+        if day <= sig.last_bar:
+            continue
+        events, stop, closed = advance(sig.side, sig.entry, sig.stop0, sig.stop, sig.checkpoint, bar, atr[i])
+        for ev in events:
+            if ev.kind == "checkpoint":
+                notice = Notice("checkpoint", sig, k=ev.k, level=ev.level, stop=stop, date=day)
+                if not send(notice):
+                    return sent
+                sent += 1
+                update_signal(conn, sig.id, checkpoint=ev.k)
+                sig.checkpoint = ev.k
+                continue
+            sign = 1 if sig.side == "long" else -1
+            res = result_r(sig.side, sig.entry, sig.stop0, ev.price, entry_date,
+                           bar.ts.date(), costs)
+            notice = Notice("close", sig, price=ev.price, result_r=res, date=day,
+                            trailed=sign * (sig.stop - sig.stop0) > 0)
+            if not send(notice):
+                return sent
+            sent += 1
+            update_signal(conn, sig.id, status="closed", closed_date=day, exit_price=ev.price,
+                          result_r=res, last_bar=day)
+            sig.status, sig.closed_date, sig.exit_price, sig.result_r, sig.last_bar = (
+                "closed", day, ev.price, res, day)
+            return sent
+        update_signal(conn, sig.id, stop=stop, last_bar=day)
+        sig.stop, sig.last_bar = stop, day
+    return sent
+
+
+def track_all(conn, send: Send, *, fetch: data.Fetch | None = None, today: dt.date | None = None,
+              feed: Feed | None = None) -> int:
+    """Track every open signal. One coin failing (its data, its send) is logged and the others go on.
+    Returns the number of messages sent."""
+    feed = feed or Feed(fetch, today)
+    sent = 0
+    for sig in open_signals(conn):
+        try:
+            sent += track_signal(conn, sig, feed.bars(sig.symbol), send)
+        except Exception as e:
+            print(f"[CFD] {sig.coin}: tracking failed: {type(e).__name__}: {e}", file=sys.stderr)
+    return sent
