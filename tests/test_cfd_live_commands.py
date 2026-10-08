@@ -145,9 +145,9 @@ def test_a_failing_view_answers_instead_of_dying(conn, sent, monkeypatch):
     assert len(sent) == 1 and "RuntimeError" in sent[0]
 
 
-def test_the_help_text_has_one_line_for_cfd():
+def test_the_help_text_has_a_line_for_cfd_and_one_for_the_plan():
     lines = [l for l in tb.HELP_TEXT.splitlines() if "/cfd" in l]
-    assert len(lines) == 1 and "эксперимент" in lines[0]
+    assert len(lines) == 2 and "эксперимент" in lines[0] and lines[1].startswith("/cfd plan")
 
 
 # ------------------------------------------------------------------ the menu

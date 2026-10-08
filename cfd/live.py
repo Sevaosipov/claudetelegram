@@ -447,14 +447,19 @@ _LIMITS = {"risk": (0.1, 5.0), "maxrisk": (1.0, 20.0)}
 
 
 def usage_text() -> str:
-    return "\n".join(["/cfd — CFD-сигналы (эксперимент): открытые, итоги, настройки", *USAGE.values()])
+    from cfd import plan
+    return "\n".join(["/cfd — CFD-сигналы (эксперимент): открытые, итоги, настройки", *USAGE.values(),
+                      *plan.USAGE.values()])
 
 
 def status_text(conn, *, html: bool = True, today: dt.date | None = None) -> str:
     """The /cfd view (also the menu's): the header, the settings line, the open signals, the record."""
     import telegram_notify
-    return telegram_notify.format_cfd_status(get_settings(conn), open_signals(conn), closed_signals(conn),
+    from cfd import plan
+    text = telegram_notify.format_cfd_status(get_settings(conn), open_signals(conn), closed_signals(conn),
                                              today or dt.date.today(), html=html)
+    plans = telegram_notify.format_cfd_plans(plan.open_plans(conn), plan.closed_plans(conn), html=html)
+    return f"{text}\n\n{plans}" if plans else text
 
 
 def _number(text: str) -> float | None:
@@ -468,13 +473,17 @@ def _number(text: str) -> float | None:
 def handle_command(conn, text: str, *, today: dt.date | None = None) -> str:
     """The answer to «/cfd ...». No argument: the view. «balance X», «risk X», «maxrisk X», «off», «on»:
     validate, keep, and answer with the new settings line; a bad value or an unknown word gets its usage
-    line. The user's own settings are the only thing a command changes."""
+    line. «plan ...» and «cancel N» are the user's own trades (cfd/plan.py). The user's own settings and
+    trades are the only thing a command changes."""
     import telegram_notify
     parts = text.split()
     args = parts[1:]
     if not args:
         return status_text(conn, today=today)
     name = args[0].lower()
+    if name in ("plan", "cancel"):
+        from cfd import plan
+        return plan.handle_plan(conn, args[1:]) if name == "plan" else plan.handle_cancel(conn, args[1:])
     if name in ("off", "on"):
         if len(args) != 1:
             return USAGE[name]

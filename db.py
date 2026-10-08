@@ -630,6 +630,32 @@ CREATE TABLE IF NOT EXISTS cfd_signals (
     created     TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS cfd_signals_coin_date ON cfd_signals(coin, signal_date);
+
+-- The user's own CFD trades (cfd/plan.py, /cfd plan): one row per trade the user told the bot about, followed
+-- through its four take-profit stages to its close. The bot never places an order.
+CREATE TABLE IF NOT EXISTS cfd_plans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,             -- XAUUSD, EURUSD, SOLUSD
+    symbol      TEXT NOT NULL,             -- the Yahoo symbol the prices come from
+    side        TEXT NOT NULL,             -- long | short
+    entry       REAL NOT NULL,
+    stop0       REAL NOT NULL,             -- the stop the user gave
+    stop        REAL NOT NULL,             -- the stop in force (it steps up after TP1, TP2, TP3)
+    r           REAL NOT NULL,             -- |entry - stop0|
+    stage       INTEGER NOT NULL DEFAULT 0, -- take-profits reached (0-4)
+    remaining   REAL NOT NULL DEFAULT 1.0, -- the share of the position still open
+    realized_r  REAL NOT NULL DEFAULT 0.0, -- the result of the parts closed so far, in R
+    offset      REAL NOT NULL DEFAULT 0.0, -- added to every source price (a future against a spot quote)
+    last_ts     TEXT NOT NULL,             -- UTC start of the last 1-minute bar processed
+    status      TEXT NOT NULL DEFAULT 'open', -- open | closed | cancelled
+    closed_ts   TEXT,
+    exit_price  REAL,
+    result_r    REAL,                      -- before any cost
+    risk_pct    REAL,                      -- NULL with no balance set (as risk_eur and qty)
+    risk_eur    REAL,
+    qty         REAL,
+    created     TEXT NOT NULL
+);
 """
 
 
