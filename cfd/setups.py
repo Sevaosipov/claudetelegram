@@ -28,6 +28,11 @@ Round 2 (docs/cfd/PREREGISTRATION_R2.md) adds two more, with the same shape (bar
                  The exits of H5 leave when the state stops being the trade's side, so the state
                  series is public.
 BO-D is reused as it is for H3 (CR-BO) on other instruments.
+
+Round 3 (docs/cfd/PREREGISTRATION_R3.md) adds one more, `fx_rev` (H6, FX-REV): range reversion in pairs of
+linked economies. At the close of bar t, when ADX(14) < 20 (no trend), long when the close is under
+SMA20 - 2.0 x SD20 and short when it is over SMA20 + 2.0 x SD20 (SD20 the population standard deviation of
+the last 20 closes); the stop, fixed at the signal, is the close -/+ 2.0 ATR(14).
 """
 from __future__ import annotations
 
@@ -59,6 +64,11 @@ CARRY_LOWER = 0.975          # ... short below 0.975 * SMA200
 CARRY_STOP_ATR = 6.0         # CARRY-FX: stop = signal close -/+ 6 ATR (carry_strategy.TRAIL_ATR)
 CARRY_ATR_LEN = 20           # CARRY-FX: the original's ATR_LEN (amendment A2); H3 and H4 keep ATR(14)
 LONG, SHORT, FLAT = "long", "short", "flat"      # the states of CARRY-FX
+REV_SMA_LEN = 20             # FX-REV: the average the close is measured from ...
+REV_SD_LEN = 20              # ... and the window of the standard deviation
+REV_BAND_SD = 2.0            # FX-REV: signal beyond SMA20 -/+ this many SD20
+REV_STOP_ATR = 2.0           # FX-REV: stop = signal close -/+ 2.0 ATR(14)
+REV_ADX_MAX = 20.0           # FX-REV: only while ADX(14) is under this (no trend)
 
 
 @dataclass(frozen=True)
@@ -222,6 +232,31 @@ def carry_fx(bars: Sequence[Bar], base_rates: Sequence[float | None],
             continue
         stop = closes[i] - CARRY_STOP_ATR * a if state == LONG else closes[i] + CARRY_STOP_ATR * a
         out.append(Signal(i, state, stop, a))
+    return out
+
+
+# ---------------------------------------------------------------- FX-REV (round 3, H6)
+def fx_rev(bars: Sequence[Bar], *, min_bars: int = MIN_BARS_BEFORE_SIGNAL) -> list[Signal]:
+    """Range reversion, both directions: at the close of bar t, when ADX(14) is under 20, a long if the
+    close is under SMA20 - 2.0 x SD20 and a short if it is over SMA20 + 2.0 x SD20 (all strict; SD20 is
+    the population standard deviation of the last 20 closes). The stop, fixed at the signal, is the close
+    -/+ 2.0 ATR(14); R is measured from the actual entry, the next open. What the trade is held on
+    (SMA20, 16 bars) belongs to the backtest."""
+    closes = ind.closes(bars)
+    atr = ind.atr(bars, ATR_LEN)
+    adx = ind.adx(bars, ADX_LEN)
+    avg = ind.sma(closes, REV_SMA_LEN)
+    sd = ind.stdev(closes, REV_SD_LEN)
+    out: list[Signal] = []
+    for i in range(max(min_bars, 1), len(bars)):
+        a, x, m, s = atr[i], adx[i], avg[i], sd[i]
+        if a is None or x is None or m is None or s is None or x >= REV_ADX_MAX:
+            continue
+        c = closes[i]
+        if c < m - REV_BAND_SD * s:
+            out.append(Signal(i, "long", c - REV_STOP_ATR * a, a))
+        elif c > m + REV_BAND_SD * s:
+            out.append(Signal(i, "short", c + REV_STOP_ATR * a, a))
     return out
 
 
