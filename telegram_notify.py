@@ -1024,3 +1024,157 @@ def format_my_portfolio(rows: list, *, html: bool = True, t212=None) -> str:
                       f"{_plural(k, 'позиции', 'позициям', 'позициям')}")
     footer.append(_SELL_HINT)
     return "\n\n".join(parts + my_position_blocks(rows, html=html) + ["\n".join(footer)])
+
+
+# ------------------------------------------------- the experimental live CFD signals (cfd/live.py)
+# Spec 2026-10-08-cfd-live-crypto-breakout.md. One message per event, in the signal-line style:
+#   «🟢 SOLUSD!: покупка по 121,50 — стоп 108,20, трейлинг-стоп 3×ATR; TP1 134,80 · … (отметки, позиция не
+#   закрывается); риск 1% = €5,00, объём 0,43 SOL; эксперимент»
+# TP1..TP4 are checkpoints (+1R..+4R), not exits. Nothing here places an order.
+CFD_HEADER = "CFD-сигналы (эксперимент): пробой тренда на 13 монетах, выход по трейлинг-стопу"
+CFD_NO_SIGNALS = "Сигналов пока не было."
+CFD_REFERENCE_BALANCE = "€1 000"
+
+
+def cfd_price(x: float) -> str:
+    """A coin's price with the precision its size needs: two decimals from 100, four from 1 to under 100,
+    six under 1; a comma decimal, a space between thousands."""
+    places = 2 if x >= 100 else 4 if x >= 1 else 6
+    return f"{x:,.{places}f}".replace(",", " ").replace(".", ",")
+
+
+def _cfd_pct(x: float) -> str:
+    """A percent setting as «1», «0,5», «3,5»."""
+    return f"{x:g}".replace(".", ",")
+
+
+def _cfd_eur(x: float) -> str:
+    """Unsigned euro to the cent: «€5,00»."""
+    return f"€{_price(x)}"
+
+
+def _cfd_r(x: float, digits: int = 1) -> str:
+    """A result in R with its sign: «+2,3R», «−1,0R»; a result that rounds to zero is «+0,0R»."""
+    v = round(x, digits) or 0.0
+    return f"{v:+.{digits}f}R".replace(".", ",").replace("-", "−")
+
+
+def _cfd_name(sig) -> str:
+    return f"{sig.coin}USD"
+
+
+def _cfd_entry(notice, html: bool) -> str:
+    sig = notice.signal
+    long = sig.side == "long"
+    sign = 1 if long else -1
+    levels = " · ".join(f"TP{k} {cfd_price(sig.entry + sign * k * sig.r)}" for k in range(1, 5))
+    if sig.risk_eur is not None:
+        pct = sig.risk_pct if sig.risk_pct is not None else notice.risk_pct
+        sizing = f"риск {_cfd_pct(pct)}% = {_cfd_eur(sig.risk_eur)}, " + _cfd_qty(sig.qty, sig.coin)
+    else:
+        sizing = (f"риск {_cfd_pct(notice.risk_pct)}%, объём на {CFD_REFERENCE_BALANCE} баланса: "
+                  + _cfd_qty(notice.qty_per_1000, sig.coin, short=True))
+    parts = [f"стоп {cfd_price(sig.stop0)}, трейлинг-стоп 3×ATR; {levels} (отметки, позиция не закрывается)",
+             sizing]
+    if notice.over_limit is not None:
+        total, limit = notice.over_limit
+        parts.append(f"открытый риск уже {_cfd_pct(total)}% — выше вашего лимита {_cfd_pct(limit)}%")
+    parts.append("эксперимент")
+    return signal_line(DOT_GREEN if long else DOT_RED, _cfd_name(sig),
+                       f"{'покупка' if long else 'продажа'} по {cfd_price(sig.entry)}", "; ".join(parts),
+                       html=html)
+
+
+def _cfd_qty(qty: float | None, coin: str, short: bool = False) -> str:
+    if not qty:
+        return "объём меньше минимального шага"
+    return f"{'' if short else 'объём '}{quantity(qty)} {coin}"
+
+
+def _cfd_checkpoint(notice, html: bool) -> str:
+    sig = notice.signal
+    sign = 1 if sig.side == "long" else -1
+    pulled = sign * (notice.stop - sig.stop) > 0
+    stop = f"стоп подтянут до {cfd_price(notice.stop)}" if pulled else f"стоп {cfd_price(notice.stop)}"
+    extra = f" ({money_cents(notice.k * sig.risk_eur)})" if sig.risk_eur is not None else None
+    return signal_line(DOT_GREEN, _cfd_name(sig), f"достигнут TP{notice.k} {cfd_price(notice.level)}", stop,
+                       result=_cfd_r(float(notice.k)), extra=extra, label="сейчас", html=html)
+
+
+def _cfd_close(notice, html: bool) -> str:
+    sig = notice.signal
+    event = "сработал трейлинг-стоп" if notice.trailed else "сработал стоп"
+    details = f"закрыто по {cfd_price(notice.price)}"
+    if sig.risk_eur is not None:
+        money_ = notice.result_r * sig.risk_eur
+        result, extra, gain = money_cents(money_), f" ({_cfd_r(notice.result_r)})", round(money_, 2) >= 0
+    else:
+        result, extra, gain = _cfd_r(notice.result_r), None, round(notice.result_r, 1) >= 0
+    return signal_line(DOT_GREEN if gain else DOT_RED, _cfd_name(sig), event, details, result=result,
+                       extra=extra, html=html)
+
+
+def format_cfd_notice(notice, *, html: bool = True) -> str:
+    """The message of one event of a live CFD signal (cfd.live.Notice): its entry, a checkpoint reached or
+    its close. With html=False there are no tags (the log, the report)."""
+    if notice.kind == "entry":
+        return _cfd_entry(notice, html)
+    if notice.kind == "checkpoint":
+        return _cfd_checkpoint(notice, html)
+    if notice.kind == "close":
+        return _cfd_close(notice, html)
+    raise ValueError(f"unknown CFD notice kind {notice.kind!r}")
+
+
+def format_cfd_settings(settings) -> str:
+    """The settings line of /cfd: «Баланс €500, риск 1% на сигнал, лимит открытого риска 3%, новые сигналы:
+    включены». `settings` is cfd.live.Settings."""
+    if settings.balance_eur:
+        cents = round(settings.balance_eur, 2)
+        balance = f"Баланс €{_price(cents) if cents != round(cents) else format(round(cents), ',').replace(',', ' ')}"
+    else:
+        balance = "Баланс не задан"
+    state = "на паузе" if settings.paused else "включены"
+    return (f"{balance}, риск {_cfd_pct(settings.risk_pct)}% на сигнал, "
+            f"лимит открытого риска {_cfd_pct(settings.max_open_risk_pct)}%, новые сигналы: {state}")
+
+
+def _cfd_open_line(sig, today: dt.date, html: bool) -> str:
+    long = sig.side == "long"
+    days = (today - dt.date.fromisoformat(sig.signal_date)).days
+    mark = f"отметка TP{sig.checkpoint}" if sig.checkpoint else "отметок нет"
+    return (f"{DOT_GREEN if long else DOT_RED} {_b(_cfd_name(sig), html)} — "
+            f"{'покупка' if long else 'продажа'} по {cfd_price(sig.entry)}, стоп {cfd_price(sig.stop)}, "
+            f"{mark}, {days} дн.")
+
+
+def _cfd_record(closed: list) -> str:
+    n = len(closed)
+    results = [s.result_r for s in closed]
+    wins = sum(1 for r in results if r > 0)
+    gain = sum(r for r in results if r > 0)
+    loss = -sum(r for r in results if r < 0)
+    pf = f"{gain / loss:.2f}".replace(".", ",") if loss > 0 else "—"
+    mean = _cfd_r(sum(results) / n, 2)
+    total = f"всего {_cfd_r(sum(results))}"
+    sized = [s for s in closed if s.risk_eur is not None]
+    if sized:
+        total += f" ({money_cents(sum(s.result_r * s.risk_eur for s in sized))})"
+    return (f"Закрытые, если брать каждый сигнал: {n}, прибыльных {round(100 * wins / n)}%, "
+            f"профит-фактор {pf}, средний результат {mean}, {total}")
+
+
+def format_cfd_status(settings, open_signals: list, closed_signals: list, today: dt.date, *,
+                      html: bool = True) -> str:
+    """/cfd and the menu's «CFD-сигналы (эксперимент)»: the header, the settings line, the open signals and
+    the record of the closed ones -- every signal taken, which is not what the user did."""
+    lines = [_b(CFD_HEADER, html), _e(format_cfd_settings(settings), html)]
+    if not open_signals and not closed_signals:
+        return "\n".join(lines + [CFD_NO_SIGNALS])
+    if open_signals:
+        lines.append(f"Открытые ({len(open_signals)}):")
+        lines += [_cfd_open_line(s, today, html) for s in open_signals]
+    else:
+        lines.append("Открытых нет.")
+    lines.append(_cfd_record(closed_signals) if closed_signals else "Закрытых пока нет.")
+    return "\n".join(lines)

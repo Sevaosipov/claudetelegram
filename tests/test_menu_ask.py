@@ -50,8 +50,8 @@ def test_the_menu_lists_option_4_and_dispatches_it(conn, monkeypatch, capsys):
     assert "4) Спросить аналитика" in capsys.readouterr().out
 
 
-def test_an_invalid_choice_lists_0_to_4(conn, monkeypatch, capsys):
+def test_an_invalid_choice_lists_0_to_5(conn, monkeypatch, capsys):
     _inputs(monkeypatch, "9", "0")
     monkeypatch.setattr(menu.db, "connect", lambda path: conn)
     menu.main()
-    assert "Не понял выбор, введите 0, 1, 2, 3 или 4." in capsys.readouterr().out
+    assert "Не понял выбор, введите 0, 1, 2, 3, 4 или 5." in capsys.readouterr().out

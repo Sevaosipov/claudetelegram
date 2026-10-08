@@ -16,6 +16,7 @@ data/universe_cache.json
 data/cik_ticker_cache.json
 data/*_seen*.json
 data/analyst.lock
+data/cfd_cache/
 
 # SDD scratch (git-ignored workspace for the executing skill)
 .superpowers/

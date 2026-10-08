@@ -44,6 +44,10 @@ Yahoo way (EQNR.OL, VOLV-B.ST): it is stored the way the signal tables know it, 
 bare ticker with its source (EQNR, NORWAY), so it is priced on its own exchange.
 See POSITIONS_USAGE and _handle_positions_command.
 
+/cfd shows the experimental CFD signals of the 13 coins (cfd/live.py: the open ones, the record of the
+closed ones, the settings) and /cfd balance|risk|maxrisk|off|on changes the settings; the daily run in bot.py
+sends the signals themselves.
+
 The Trading 212 account is tracked too (t212_account.py), read only: the bot never places an
 order. The loop syncs the account's holdings into the positions at start and then every 15 minutes
 (T212_SYNC_SECONDS; a failed sync is logged and the polling goes on), so a holding is watched
@@ -92,6 +96,7 @@ import research
 import sources
 import t212_account
 import telegram_notify
+from cfd import live as cfd_live
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "disclosures.db"
@@ -127,6 +132,7 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
              "/portfolio — ваш счёт Trading 212 и позиции /bought.\n"
+             "/cfd — CFD-сигналы по 13 монетам (эксперимент): открытые, итоги, настройки.\n"
              "Сигналы на покупку приходят по пятницам, сигнал на продажу по вашим позициям — сразу.\n"
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
@@ -204,6 +210,20 @@ def _handle_my_portfolio(conn) -> None:
         print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось собрать список позиций ({type(e).__name__}). "
                                   "Попробуйте позже.")
+
+
+def _handle_cfd_command(conn, text: str) -> bool:
+    """/cfd and its settings (cfd/live.py): the experimental CFD signals of the 13 coins -- the open ones,
+    the record, the balance, the risk and the pause. Returns False for any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/cfd":
+        return False
+    try:
+        telegram_notify.send_text(cfd_live.handle_command(conn, text))
+    except Exception as e:
+        print(f"[telegram_bot] /cfd failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /cfd ({type(e).__name__}). Попробуйте позже.")
+    return True
 
 
 def _handle_positions_command(conn, text: str) -> bool:
@@ -426,7 +446,7 @@ def _handle_message(conn, text: str) -> None:
     any other /command (help, /model included); then a single token that is an asset with a price --
     the ticker analysis; anything else -- a question for the analyst."""
     text = (text or "").strip()
-    if _handle_positions_command(conn, text):
+    if _handle_positions_command(conn, text) or _handle_cfd_command(conn, text):
         return
     if text.lower().startswith("/backtest"):
         _handle_backtest(conn, text)

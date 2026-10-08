@@ -788,6 +788,14 @@ def main_run(monkeypatch, tmp_path):
         return t212_account.SyncResult()
     monkeypatch.setattr(bot.t212_account, "sync", t212_sync)
 
+    def cfd_pass(conn):
+        # kept apart from `calls` too: the steps that were done before it, and whether it was run at all
+        run.cfd.append(list(calls))
+        if run.cfd_crashes:
+            raise RuntimeError("yahoo is down")
+        return types.SimpleNamespace(tracked=1, made=2, paused=False)
+    monkeypatch.setattr(bot.cfd_live, "run", cfd_pass)
+
     def run(*argv):
         monkeypatch.setattr(sys, "argv", ["bot.py", "--once", *argv])
         monkeypatch.setattr(sys, "stdout", sys.stdout)     # main() wraps the streams: restore them after
@@ -804,6 +812,7 @@ def main_run(monkeypatch, tmp_path):
     run.signals, run.refuse = [], set()                           # the week's signals; texts Telegram refuses
     run.complete = True                                           # False: a scoring pass that did not get through
     run.syncs, run.sync_silent, run.sync_crashes = [], [], False  # the Trading 212 sync (stubbed)
+    run.cfd, run.cfd_crashes = [], False                          # the CFD pass (stubbed): `calls` as it was
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 
@@ -1291,3 +1300,42 @@ def test_a_holding_the_daily_sync_finds_is_opened_and_announced_before_the_exits
         < calls.index("check_exits")
     [pos] = positions.open_positions(main_run.db())
     assert (pos.ticker, pos.origin, pos.quantity) == ("GME", "t212", 10.0)
+
+
+# ------------------------------------------------------------------ the experimental CFD pass
+def test_the_cfd_pass_runs_once_after_the_positions_step_of_a_full_run(main_run):
+    main_run()
+    assert len(main_run.cfd) == 1
+    assert "check_exits" in main_run.cfd[0] and ("closes", main_run.closes) in main_run.cfd[0]
+
+
+@pytest.mark.parametrize("day", [MON, WED, FRI, SAT, SUN])
+def test_the_cfd_pass_runs_on_every_full_run_whatever_the_day(main_run, day):
+    main_run.today = day
+    main_run()
+    assert len(main_run.cfd) == 1
+
+
+@pytest.mark.parametrize("flag", ["--sec-only", "--house-only", "--bafin-only", "--norway-only", "--sweden-only"])
+def test_a_filtered_run_does_not_run_the_cfd_pass(main_run, flag):
+    main_run(flag)
+    assert main_run.cfd == []
+
+
+def test_a_run_with_no_telegram_skips_the_cfd_pass_and_says_so(main_run, capsys):
+    main_run("--no-telegram")
+    assert main_run.cfd == [] and "[CFD] skipped: --no-telegram" in capsys.readouterr().out
+
+
+def test_a_crashing_cfd_pass_is_reported_and_the_run_goes_on(main_run, capsys):
+    main_run.cfd_crashes = True
+    main_run()
+    err = capsys.readouterr()
+    assert "[CFD] pass failed: RuntimeError: yahoo is down" in err.err
+    assert main_run.db().execute("SELECT COUNT(*) FROM kv_cache WHERE key = 'last_successful_run'").fetchone() == (1,)
+    assert "poll finished" in err.out
+
+
+def test_the_cfd_pass_logs_what_it_did(main_run, capsys):
+    main_run()
+    assert "[CFD] 1 update message(s), 2 new signal(s)" in capsys.readouterr().out

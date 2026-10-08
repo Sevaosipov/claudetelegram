@@ -17,6 +17,7 @@ import research
 import t212_account
 import telegram_notify
 import termstyle
+from cfd import live as cfd_live
 
 # Absolute, like bot.py's -- a relative path silently opened (and CREATED) an empty
 # database whenever the menu was launched from anywhere but the project directory.
@@ -72,6 +73,16 @@ def show_portfolio(conn) -> None:
         print(f"Ошибка: {type(e).__name__}: {e}")
 
 
+def show_cfd(conn) -> None:
+    """CFD-сигналы (эксперимент): what /cfd sends in Telegram, as plain text -- the settings, the open
+    signals and the record of the closed ones (cfd/live.py)."""
+    print()
+    try:
+        print(cfd_live.status_text(conn, html=False))
+    except Exception as e:  # a failed read must not end the menu
+        print(f"Ошибка: {type(e).__name__}: {e}")
+
+
 def ask_analyst() -> None:
     """A free-form question to the Claude analyst: the bot's own data plus the chart in the
     user's TradingView Desktop. analyst.ask prints the answer; nothing goes to Telegram."""
@@ -94,6 +105,7 @@ def main() -> None:
         print("2) Досье по тикеру или монете")
         print("3) Мой портфель")
         print("4) Спросить аналитика")
+        print("5) CFD-сигналы (эксперимент)")
         print("0) Выход")
         choice = input("Выбор: ").strip()
 
@@ -105,10 +117,12 @@ def main() -> None:
             show_portfolio(conn)
         elif choice == "4":
             ask_analyst()
+        elif choice == "5":
+            show_cfd(conn)
         elif choice == "0":
             break
         else:
-            print("Не понял выбор, введите 0, 1, 2, 3 или 4.")
+            print("Не понял выбор, введите 0, 1, 2, 3, 4 или 5.")
 
 
 if __name__ == "__main__":

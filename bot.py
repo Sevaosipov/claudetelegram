@@ -65,6 +65,7 @@ import t212_account
 import universe
 import telegram_notify
 import weekly
+from cfd import live as cfd_live
 from passes import (
     CSV_PATH,
     _sec_forms,
@@ -389,6 +390,22 @@ def _sync_t212(conn, args) -> None:
     if result is not None and (result.opened or result.updated or result.closed):
         print(f"[T212] opened {len(result.opened)}, updated {len(result.updated)}, "
               f"closed {len(result.closed)}")
+
+
+def _cfd_pass(conn, args) -> None:
+    """The experimental CFD signals (cfd/live.py): the open ones are tracked through the new daily bars and
+    the 13 coins are scanned for a new breakout, a Telegram message per event. After the positions step, on
+    a full run only -- a filtered run leaves it alone, as it leaves the scoring. A --no-telegram run skips
+    it: the pass keeps a signal only once its message went out, and nothing would. A crash is reported
+    like a failed source."""
+    if _filtered_run(args):
+        return
+    if args.no_telegram:
+        print("[CFD] skipped: --no-telegram")
+        return
+    result = _run_source("CFD", cfd_live.run, conn)
+    if result is not None and (result.tracked or result.made):
+        print(f"[CFD] {result.tracked} update message(s), {result.made} new signal(s)")
 
 
 def _send_closes(conn, closes: list) -> bool:
@@ -789,6 +806,8 @@ def main():
                     _run_source("WEEKLY", _send_weekly, conn, today, scoring_failed=not scored_ok)
                 else:
                     print("[telegram] weekly message waits for the week's scoring pass")
+
+        _cfd_pass(conn, args)
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from
