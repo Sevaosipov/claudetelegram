@@ -240,7 +240,8 @@ def _buy_signal(conn, ticker: str, source: str | None):
 
 
 def open_position(conn, ticker: str, entry_price: float, today: dt.date | None = None,
-                  source: str | None = None, *, closes_fn=None) -> Position:
+                  source: str | None = None, *, closes_fn=None, quantity: float | None = None,
+                  currency: str | None = None) -> Position:
     """`source` overrides what position_source() would otherwise resolve --
     telegram_bot passes it explicitly, having already resolved it itself to
     price against the same listing before storing.
@@ -248,7 +249,10 @@ def open_position(conn, ticker: str, entry_price: float, today: dt.date | None =
     The position's trailing stop is fixed here, from the price history now
     (model_score.stop_distance); it is None when there isn't enough history, and the
     exit check then works one out itself. `closes_fn(ticker, source)` returns the
-    history, [(iso date, close)] oldest first; the default is daily_closes."""
+    history, [(iso date, close)] oldest first; the default is daily_closes.
+
+    `quantity` (how many the user said they bought) and `currency` (what the entry price is in) are
+    kept when told: a result can then be shown in money."""
     ticker = ticker.strip().upper()
     if any(p.ticker == ticker for p in open_positions(conn)):
         raise ValueError(f"position in {ticker} is already open")
@@ -258,10 +262,11 @@ def open_position(conn, ticker: str, entry_price: float, today: dt.date | None =
     closes = (closes_fn or daily_closes)(ticker, source)
     stop_pct = model_score.stop_distance([c for _d, c in closes], _kind(ticker))
     conn.execute(
-        "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, signal_id, stop_pct) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO positions (ticker, source, opened_at, entry_price, insiders, signal_id, stop_pct, "
+        "quantity, currency) VALUES (?,?,?,?,?,?,?,?,?)",
         (ticker, source, (today or dt.date.today()).isoformat(),
-         float(entry_price), members or "[]", signal_id, stop_pct))
+         float(entry_price), members or "[]", signal_id, stop_pct, quantity,
+         currency if quantity else None))
     conn.commit()
     return next(p for p in open_positions(conn) if p.ticker == ticker)
 

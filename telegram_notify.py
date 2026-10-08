@@ -876,7 +876,12 @@ def _my_block(pos, st: dict, html: bool) -> str:
     """One position: how it stands now, then its status lines (_status_lines)."""
     now = (f"сейчас {_price(st['last'])} ({signed_pct(st['result'])})" if st["last"] is not None
            else "сейчас — цена недоступна")
-    lines = [f"• {crypto.symbol_of(pos.ticker)}: вход {_price(pos.entry_price)} "
+    lot = ""
+    if pos.quantity:                                # told with /bought: the result in money too
+        lot = f"{quantity(pos.quantity)} шт., "
+        if st["last"] is not None:
+            now += f", {money_cents((st['last'] - pos.entry_price) * pos.quantity, pos.currency)}"
+    lines = [f"• {crypto.symbol_of(pos.ticker)}: {lot}вход {_price(pos.entry_price)} "
              f"({dt.date.fromisoformat(pos.opened_at):%d.%m}), {now}, {st['days']} дн."]
     return "\n".join(_e(line, html) for line in lines + _status_lines(pos, st))
 

@@ -773,6 +773,7 @@ def test_the_positions_usage_says_how_to_record_a_buy_and_a_sale():
     assert tb.POSITIONS_USAGE.splitlines() == [
         "/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
         "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST",
+        "Сколько купили: /bought XRP 1.37 100 (штук) или /bought XRP 1.37 €200 (на сумму)",
         "/sold TICKER — отметить продажу",
         "Просто /bought или /sold — бот спросит, что именно",
         "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»",
@@ -1459,3 +1460,61 @@ def test_an_ordinary_sentence_starting_with_sold_is_not_a_command(conn, monkeypa
                                          ("1.234,5", (1234.5, None)), ("abc", None)])
 def test_a_typed_price_is_read_with_its_currency(token, want):
     assert tb._price_token(token) == want
+
+
+# ---- how much was bought: a count, or the money spent
+@pytest.mark.parametrize("text", ["/bought XRP 1.25 100", "/bought 100 XRP 1.25", "купил 100 XRP по 1,25",
+                                  "/buy xrp 1.25 x100", "/bought XRP 1.25 100шт", "/bought XRP 1.25 $125",
+                                  "/bought XRP 1.25 €107.7586"])        # at 1.16 dollars a euro = $125
+def test_a_buy_may_say_how_much(conn, replies, text):
+    import positions
+    tb._handle_message(conn, text)
+    pos = positions.find_open(conn, "CRYPTO:XRP")
+    assert pos.entry_price == 1.25 and pos.quantity == pytest.approx(100, abs=0.01) and pos.currency == "USD"
+    assert replies[-1].startswith("Записал CRYPTO:XRP по 1,25: 100 шт. на $125,0")
+
+
+def test_a_count_with_no_price_buys_at_the_last_close(conn, replies, monkeypatch):
+    import positions
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 2.0)
+    tb._handle_message(conn, "/bought 50 XRP")
+    pos = positions.find_open(conn, "CRYPTO:XRP")
+    assert (pos.entry_price, pos.quantity) == (2.0, 50)
+
+
+def test_a_buy_with_no_quantity_keeps_none(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought XRP 1.25")
+    pos = positions.find_open(conn, "CRYPTO:XRP")
+    assert pos.quantity is None and pos.currency is None and replies[-1].startswith("Записал CRYPTO:XRP по 1,25; ")
+
+
+def test_an_oslo_listing_keeps_its_own_currency(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought EQNR.OL 300 10")
+    pos = positions.open_positions(conn)[0]
+    assert (pos.quantity, pos.currency) == (10, "NOK") and "10 шт. на 3 000,00 NOK" in replies[-1]
+
+
+def test_a_zero_quantity_gets_the_usage(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought XRP 1.25 0")
+    assert positions.open_positions(conn) == [] and replies[-1] == tb.POSITIONS_USAGE
+
+
+def test_the_answer_to_what_did_you_buy_may_say_how_much(conn, replies):
+    import positions
+    tb._handle_message(conn, "/bought")
+    tb._handle_message(conn, "XRP 1.25 100")
+    assert positions.find_open(conn, "CRYPTO:XRP").quantity == 100
+
+
+def test_the_portfolio_line_shows_the_quantity_and_the_money():
+    import positions
+    pos = positions.Position(id=1, ticker="CRYPTO:XRP", source=None, opened_at="2026-10-01", entry_price=1.25,
+                             insiders=[], signal_id=None, closed_at=None, close_reason=None,
+                             close_alerted_at=None, quantity=100, currency="USD")
+    st = {"last": 1.5, "result": 0.2, "days": 7, "stop_level": 1.2, "stop_pct": 0.15, "peak": 1.5, "to_stop": 0.2}
+    import telegram_notify as tn
+    line = tn.my_position_blocks([(pos, st)], html=False)[0].splitlines()[0]
+    assert line == "• XRP: 100 шт., вход 1,25 (01.10), сейчас 1,50 (+20,0%), +$25,00, 7 дн."

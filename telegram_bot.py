@@ -122,6 +122,7 @@ _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
 POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупку (без цены — последнее закрытие); "
                    "биржи Осло/Стокгольма: EQNR.OL, VOLV-B.ST\n"
+                   "Сколько купили: /bought XRP 1.37 100 (штук) или /bought XRP 1.37 €200 (на сумму)\n"
                    "/sold TICKER — отметить продажу\n"
                    "Просто /bought или /sold — бот спросит, что именно\n"
                    "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»\n"
@@ -237,7 +238,7 @@ _FILLER = {"по", "at", "@", "за", "for", "price", "цена"}
 _PRICE_RE = re.compile(r"^(?P<pre>[€$])?(?P<num>\d[\d\s.,]*)(?P<post>[€$]|eur|usd|евро)?$", re.IGNORECASE)
 BUY_OR_SELL_HINT = "{t} по {p} — купили или продали? Нажмите /bought или /sold."
 ASK_BOUGHT = ("Что купили? Пришлите тикер и цену, например: XRP 1.37 "
-              "(без цены — по последнему закрытию).")
+              "(без цены — по последнему закрытию; сколько купили — третьим: XRP 1.37 100).")
 ASK_SOLD = "Что продали? Пришлите тикер: {names}."
 NOTHING_TO_SELL = ("Позиций, записанных через /bought, сейчас нет. "
                    "Продажи на счёте Trading 212 бот видит сам.")
@@ -278,6 +279,11 @@ def _complete_pending(text: str) -> str | None:
                 return f"/sold {pending['ticker']}"
             return f"/bought {pending['ticker']} {pending['price']}"
         return None
+    qty_token = None
+    if pending["kind"] == "buy" and not first.startswith("/"):
+        stripped, qty_token = _split_quantity("/bought " + text)
+        if qty_token:
+            parts = [w for w in stripped.split()[1:] if w.lower() not in _FILLER]
     if first.startswith("/") or not 1 <= len(parts) <= 2 or not _position_listing(parts[0]):
         if not (len(parts) == 1 and (first in _BUY_WORDS or first in _SELL_WORDS)):
             _PENDING.clear()                    # another command, a question: the request is dropped
@@ -288,7 +294,7 @@ def _complete_pending(text: str) -> str | None:
     _PENDING.clear()
     if pending["kind"] == "sell":
         return f"/sold {parts[0]}"
-    return " ".join(["/bought", *parts])
+    return " ".join(["/bought", *parts, *([qty_token] if qty_token else [])])
 
 
 def _ask_what(conn, cmd: str) -> None:
@@ -327,6 +333,52 @@ def _price_token(token: str) -> tuple[float, str | None] | None:
     return value, currency
 
 
+_QTY_RE = re.compile(r"^[x×*]?(?P<num>\d[\d\s.,]*)(шт\.?|pcs)?$", re.IGNORECASE)
+_VENUE_CURRENCY = {"NORWAY": "NOK", "SWEDEN": "SEK"}        # anything else /bought prices is in dollars
+
+
+def _split_quantity(text: str) -> tuple[str, str | None]:
+    """How much was bought, taken out of a buy typed with it -> (the text without it, the token).
+    The quantity stands before the ticker («/bought 100 XRP 1.37», «купил 100 XRP по 1,37») or after
+    the price («/bought XRP 1.37 100», «... x100», «... 100шт»); after the price a token with a
+    currency sign is the money spent instead («/bought XRP 1.37 €200»). (text, None) when there is
+    none."""
+    words = text.split()
+    parts = [w for w in words if w.lower() not in _FILLER]
+    if not parts or parts[0].lower().split("@")[0] not in _BUY_WORDS:
+        return text, None
+    token = None
+    if len(parts) >= 3 and _QTY_RE.match(parts[1]) and _position_listing(parts[2]) \
+            and not _position_listing(parts[1]):
+        token = parts[1]
+    elif len(parts) == 4 and _position_listing(parts[1]) and _price_token(parts[2]) \
+            and (_QTY_RE.match(parts[3]) or _price_token(parts[3])):
+        token = parts[3]
+    if token is None:
+        return text, None
+    words.remove(token)
+    return " ".join(words), token
+
+
+def _quantity(token: str, price: float, price_currency: str, conn) -> float | None:
+    """The number bought that `token` tells: a count as it is; money spent (a currency sign) over the
+    price, euros being turned into the price's currency first. None for nothing usable."""
+    m = _QTY_RE.match(token)
+    if m:
+        typed = _price_token(m.group("num"))
+        qty = typed[0] if typed else None
+    else:
+        typed = _price_token(token)
+        if typed is None or not price:
+            return None
+        amount, currency = typed
+        if currency and currency != price_currency:
+            import fx
+            amount = amount / fx.per_eur(currency, conn) * fx.per_eur(price_currency, conn)
+        qty = amount / price
+    return qty if qty and math.isfinite(qty) and qty > 0 else None
+
+
 def _normalise_trade_text(text: str) -> tuple[str, str | None, str | None] | None:
     """What the user meant by a buy or a sale typed loosely -> ("/bought" | "/sold" | "?", ticker text,
     price text) or None when the message is not one. Accepts /buy, /sell, the words without a slash,
@@ -352,6 +404,7 @@ def _handle_positions_command(conn, text: str) -> bool:
     close alerts. Returns False for anything else. A buy or a sale may be typed loosely
     (_normalise_trade_text): /buy, /sell, without the slash, with a currency sign on the price."""
     text = _complete_pending(text) or text
+    text, qty_token = _split_quantity(text)
     parts = text.split()
     cmd = parts[0].lower().split("@")[0] if parts else ""
     if cmd not in ("/portfolio", "/positions"):
@@ -433,8 +486,13 @@ def _handle_positions_command(conn, text: str) -> bool:
         typed = positions.yahoo_symbol(ticker, venue_source) if venue_source else ticker
         telegram_notify.send_text(f"Не нашёл цену {ticker} — укажите её: /bought {typed} 12.34")
         return True
+    currency = _VENUE_CURRENCY.get(source, "USD")
+    qty = _quantity(qty_token, price, currency, conn) if qty_token else None
+    if qty_token and qty is None:
+        telegram_notify.send_text(POSITIONS_USAGE)
+        return True
     try:
-        pos = positions.open_position(conn, ticker, price, source=source)
+        pos = positions.open_position(conn, ticker, price, source=source, quantity=qty, currency=currency)
     except ValueError:
         telegram_notify.send_text(f"Позиция {ticker} уже открыта. /sold {ticker.removeprefix('CRYPTO:')}, "
                                   "чтобы закрыть.")
@@ -452,7 +510,11 @@ def _handle_positions_command(conn, text: str) -> bool:
     stop = "" if note else (f"стоп −{pos.stop_pct * 100:.0f}% от максимума; " if pos.stop_pct is not None
                             else "стоп — по умолчанию; ")
     shown = f"{price:,.2f}".replace(",", " ").replace(".", ",")
-    telegram_notify.send_text(f"Записал {ticker} по {shown}{converted}; {stop}{who}{note}.")
+    lot = ""
+    if qty:
+        lot = (f": {telegram_notify.quantity(qty)} шт. на "
+               f"{telegram_notify.money_cents(qty * price, currency).lstrip('+')}")
+    telegram_notify.send_text(f"Записал {ticker} по {shown}{converted}{lot}; {stop}{who}{note}.")
     return True
 
 
