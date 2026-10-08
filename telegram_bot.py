@@ -44,6 +44,10 @@ Yahoo way (EQNR.OL, VOLV-B.ST): it is stored the way the signal tables know it, 
 bare ticker with its source (EQNR, NORWAY), so it is priced on its own exchange.
 See POSITIONS_USAGE and _handle_positions_command.
 
+/cfd shows the experimental CFD signals of the 13 coins (cfd/live.py: the open ones, the record of the
+closed ones, the settings) and /cfd balance|risk|maxrisk|off|on changes the settings; the daily run in bot.py
+sends the signals themselves.
+
 The Trading 212 account is tracked too (t212_account.py), read only: the bot never places an
 order. The loop syncs the account's holdings into the positions at start and then every 15 minutes
 (T212_SYNC_SECONDS; a failed sync is logged and the polling goes on), so a holding is watched

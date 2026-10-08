@@ -209,3 +209,15 @@ def test_the_profit_factor_of_a_record_with_no_loss_is_a_dash():
 def test_the_view_without_html_has_no_tags():
     text = tn.format_cfd_status(live.Settings(), [sig()], [closed(1.0, id=2)], TODAY, html=False)
     assert "<" not in text and text.startswith(HEADER)
+
+
+# ------------------------------------------------------------------ the README shows what the code renders
+def test_the_readme_examples_are_what_the_code_renders():
+    from pathlib import Path
+    readme = (Path(tn.__file__).parent / "README.md").read_text(encoding="utf-8")
+    qty = 0.436
+    for notice in (live.Notice("entry", sig(qty=qty), risk_pct=1.0),
+                   live.Notice("checkpoint", sig(), k=1, level=134.8, stop=119.4),
+                   live.Notice("close", sig(), price=152.3, result_r=2.32, trailed=True),
+                   live.Notice("close", sig(), price=108.2, result_r=-1.02, trailed=False)):
+        assert tn.format_cfd_notice(notice, html=False) in readme
