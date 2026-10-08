@@ -8,10 +8,13 @@ chart it was fitted on: a Wilder average (RMA) is seeded with the simple average
 same way (a simple average of the first `length` closes), so no value exists before its window
 is full.
 
+Round 3 adds the population standard deviation over a window (`stdev`), for H6's SD20.
+
 Every value at index t uses bars up to t only: indicators are "computed on completed bars only".
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 from cfd.data import Bar
@@ -40,6 +43,18 @@ def sma(values: Sequence[float], length: int) -> list[float | None]:
     _check(length)
     return [None if i + 1 < length else sum(values[i + 1 - length:i + 1]) / length
             for i in range(len(values))]
+
+
+def stdev(values: Sequence[float], length: int) -> list[float | None]:
+    """The population standard deviation (divide by n, not n - 1) of the last `length` values, the
+    current one included (Pine's ta.stdev, biased). H6 (FX-REV) reads SD20 of the closes."""
+    _check(length)
+    out: list[float | None] = [None] * len(values)
+    for i in range(length - 1, len(values)):
+        window = values[i + 1 - length:i + 1]
+        mean = sum(window) / length
+        out[i] = math.sqrt(sum((x - mean) ** 2 for x in window) / length)
+    return out
 
 
 def ema(values: Sequence[float], length: int) -> list[float | None]:

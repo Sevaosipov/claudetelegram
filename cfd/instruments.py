@@ -16,6 +16,11 @@ index and FX universes of H4 and H5 (`INDEX_UNIVERSE`, `FX_UNIVERSE`, both taken
 table), the base currency of an FX pair, and H5's own financing of 0.004 % a night
 (`carry_fx_costs`). The alts are not in `UNIVERSE`: round 1 iterates it, and its 23 instruments are
 frozen.
+
+Round 3 (docs/cfd/PREREGISTRATION_R3.md) adds the eight pairs of H6 (`H6_UNIVERSE`; EURCHF, EURGBP and
+USDCAD are the round-1 instruments themselves, the other five are new and, like the alts, outside
+`UNIVERSE`) and the USD pairs H7 prices its currencies with (`H7_PAIRS`, `H7_UNIVERSE`, all round-1
+instruments). Only one cost row is new (`fx_nordic`, 0.060 %); no round-1 or round-2 value moves.
 """
 from __future__ import annotations
 
@@ -44,6 +49,7 @@ ROUND_TRIP_PCT = {
     "indices": 0.030,
     "crypto": 0.250,
     "crypto_alt": 0.400,        # round 2, H3: alts trade wider than bitcoin
+    "fx_nordic": 0.060,         # round 3, H6: EURNOK and EURSEK trade wider than the other crosses
 }
 # (long, short) per night held
 FINANCING_PCT = {
@@ -171,8 +177,39 @@ ALT_COINS: tuple[Instrument, ...] = (
 INDEX_UNIVERSE: tuple[Instrument, ...] = tuple(i for i in UNIVERSE if i.klass == INDICES)
 FX_UNIVERSE: tuple[Instrument, ...] = tuple(i for i in UNIVERSE if i.gate_class == "FX")
 
-_BY_SYMBOL = {i.symbol: i for i in UNIVERSE + ALT_COINS}
-_BY_NAME = {i.name: i for i in UNIVERSE + ALT_COINS}
+# ---------------------------------------------------------------- round 3 (PREREGISTRATION_R3.md)
+def _fx_new(symbol: str, quote: str, cost_key: str = "fx_cross") -> Instrument:
+    return Instrument(symbol, symbol.removesuffix("=X"), FX_CROSS, cost_key, "fx_cross", quote, UNIT_FX)
+
+
+_NEW_H6 = {
+    "AUDNZD=X": _fx_new("AUDNZD=X", "NZD"),
+    "AUDCAD=X": _fx_new("AUDCAD=X", "CAD"),
+    "NZDCAD=X": _fx_new("NZDCAD=X", "CAD"),
+    "EURNOK=X": _fx_new("EURNOK=X", "NOK", "fx_nordic"),
+    "EURSEK=X": _fx_new("EURSEK=X", "SEK", "fx_nordic"),
+}
+_ROUND1_FX = {i.symbol: i for i in UNIVERSE}
+
+# H6 (FX-REV): the eight pairs, in the pre-registration's order. EURCHF, EURGBP and USDCAD are the
+# round-1 instruments (USDCAD pays the 0.015 % of a major, the other two 0.030 %).
+H6_UNIVERSE: tuple[Instrument, ...] = tuple(
+    _ROUND1_FX.get(symbol) or _NEW_H6[symbol] for symbol in
+    ("EURCHF=X", "EURGBP=X", "AUDNZD=X", "AUDCAD=X", "NZDCAD=X", "USDCAD=X", "EURNOK=X", "EURSEK=X"))
+
+# H7 (CARRY-BASKET): the eight currencies, and for each but USD the pair that prices it in USD:
+# (Yahoo symbol, inverted). XXXUSD=X is the price of the currency in USD; USDXXX=X (inverted) is
+# the price of one USD in the currency, so the currency's price in USD is its inverse.
+H7_CURRENCIES = ("USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD")
+H7_PAIRS: dict[str, tuple[str, bool]] = {
+    "EUR": ("EURUSD=X", False), "GBP": ("GBPUSD=X", False), "AUD": ("AUDUSD=X", False),
+    "NZD": ("NZDUSD=X", False), "JPY": ("USDJPY=X", True), "CAD": ("USDCAD=X", True),
+    "CHF": ("USDCHF=X", True),
+}
+H7_UNIVERSE: tuple[Instrument, ...] = tuple(_ROUND1_FX[symbol] for symbol, _ in H7_PAIRS.values())
+
+_BY_SYMBOL = {i.symbol: i for i in UNIVERSE + ALT_COINS + tuple(_NEW_H6.values())}
+_BY_NAME = {i.name: i for i in UNIVERSE + ALT_COINS + tuple(_NEW_H6.values())}
 
 
 def by_symbol(symbol: str) -> Instrument:
