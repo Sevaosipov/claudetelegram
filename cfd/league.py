@@ -17,7 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
 
 import db
-from cfd import data
+from cfd import data, exits
 from cfd import indicators as ind
 from cfd import instruments as ins
 from cfd import research4 as r4
@@ -56,6 +56,15 @@ class Trade:
     reason: str | None           # stop | time
     created: str
     checkpoint: int = 0          # the highest of TP1..TP4 (+1R..+4R) reached: marks on the way, never exits
+    # The second version of the same trade (amendment A2): a quarter closes at each of TP1..TP4, the stop
+    # moves to the entry after TP1, to TP1 after TP2 and to TP2 after TP3; what is left closes at that stop or
+    # at the trade's time exit. Scored beside the first version, never instead of it.
+    stage2: int = 0
+    remaining2: float = 1.0
+    stop2: float | None = None
+    realized2: float = 0.0
+    exit2_date: str | None = None
+    result2_r: float | None = None
 
 
 _COLUMNS = [f.name for f in fields(Trade)]
@@ -161,6 +170,33 @@ def _close(t: Trade, day: dt.date, price: float, reason: str) -> None:
     t.result_r = sign * (price - t.entry) / distance - cost
 
 
+def _cost_r(t: Trade, day: dt.date) -> float:
+    """The costs of a trade closed on `day`, in R: the round trip and a financing charge per night."""
+    nights = (day - dt.date.fromisoformat(t.entry_date)).days
+    pct = ins.by_symbol(t.symbol).costs.round_trip_pct + nights * FINANCING_PCT
+    return pct / 100.0 * t.entry / abs(t.entry - t.stop)
+
+
+def _staged(t: Trade, day: dt.date, bar: Bar | None, close_at: float | None) -> None:
+    """One bar of the second version (exits.LadderState under E1, as cfd/plan.py runs it). `close_at` is
+    the price the first version left at this bar's open (its time exit, a gap through its stop): the
+    second version's remainder leaves there too. A completed bar is stepped; of today's bar only the open
+    is known, and it is left to the day it completes."""
+    if t.result2_r is not None:
+        return
+    state = exits.LadderState(t.side, t.entry, t.stop, exits.E1, stage=t.stage2, remaining=t.remaining2,
+                              stop=t.stop2 if t.stop2 is not None else t.stop)
+    sign = 1 if t.side == "long" else -1
+    distance = abs(t.entry - t.stop)
+    fills = state.close_at(close_at, "time") if close_at is not None else (state.step(bar) if bar else [])
+    for ev in fills:
+        t.realized2 += ev.fraction * sign * (ev.price - t.entry) / distance
+    t.stage2, t.remaining2, t.stop2 = state.stage, state.remaining, state.stop if not state.closed else t.stop2
+    if state.closed:
+        t.exit2_date = day.isoformat()
+        t.result2_r = t.realized2 - _cost_r(t, day)
+
+
 def advance(t: Trade, bars: Sequence[Bar], forming: float | None, today: dt.date) -> list[str]:
     """Move a trade through the bars it has not seen: fill a pending one at the open of the first bar after
     its signal bar, then, bar by bar, the time exit at the open, the stop gapped through at the open, the
@@ -173,6 +209,7 @@ def advance(t: Trade, bars: Sequence[Bar], forming: float | None, today: dt.date
     for day, open_, bar in days:
         if day.isoformat() <= (t.last_bar or t.signal_date):
             continue
+        at_open = None                   # the price the trade left at this bar's open, if it did
         if t.status == "pending":
             t.status, t.entry_date, t.entry = "open", day.isoformat(), open_
             t.stop = open_ - sign * t.stop_atr * t.atr
@@ -183,9 +220,13 @@ def advance(t: Trade, bars: Sequence[Bar], forming: float | None, today: dt.date
                 _close(t, day, open_, "stop")
             elif _due(t, day, after):
                 _close(t, day, open_, "time")
+            at_open = open_ if t.status == "closed" else None
         if t.status == "open" and bar is not None and sign * ((bar.low if sign > 0 else bar.high) - t.stop) <= 0:
             _close(t, day, t.stop, "stop")
-        if bar is not None and t.entry is not None and t.exit_price != open_:
+        _staged(t, day, bar, at_open)
+        if t.status == "closed" and t.result2_r is None:           # cannot outlive the trade: its stop is no lower
+            _staged(t, day, None, t.exit_price)
+        if bar is not None and t.entry is not None and at_open is None:
             # a mark is reached by the bar's best price; in the bar the stop closed the trade, only by its open
             # (the stop goes before a new mark, as in cfd/live.py). A trade closed at this bar's open saw none.
             best = (bar.high if sign > 0 else bar.low) if t.status == "open" else open_
@@ -495,6 +536,7 @@ class IdeaScore:
     net: float
     months: dict            # (year, month) -> the sum of the results of the trades closed in it
     open: int
+    net2: float = 0.0       # the same trades in their second version (closing at the take-profit levels)
 
     @property
     def months_up(self) -> int:
@@ -527,7 +569,8 @@ def scoreboard(conn, today: dt.date) -> Board:
             day = dt.date.fromisoformat(t.exit_date)
             months[(day.year, day.month)] = months.get((day.year, day.month), 0.0) + t.result_r
         scores.append(IdeaScore(idea, len(mine), sum(t.result_r for t in mine), dict(sorted(months.items())),
-                                sum(1 for t in running if t.idea == idea)))
+                                sum(1 for t in running if t.idea == idea),
+                                sum(t.result2_r if t.result2_r is not None else t.result_r for t in mine)))
     s = live.get_settings(conn)
     risk = round(s.balance_eur * s.risk_pct / 100.0, 2) if s.balance_eur else None
     return Board(start_date(conn, today), end_date(conn, today), today, tuple(scores), tuple(running), risk)

@@ -67,3 +67,17 @@ exit, and the scoreboard counts that result, exactly as written above. The exits
 fixed before the first trade, and because in rounds 1–2 closing in stages at such levels lowered every result. Within a
 bar the stop comes before a new mark, unless the bar opened beyond it.
 
+## Amendment A2 (2026-10-09, the league's first day, two trades open, none closed, no bar processed)
+
+The user asked for a second version of every trade that does close at the take-profit levels, to compare the two after
+13 weeks. Each trade is now scored twice:
+
+- **the first version**, as written above: the stop or the time exit, the whole position;
+- **the second version («с целями»)**: a quarter closes at each of TP1…TP4 (+1R…+4R); the stop moves to the entry after
+  TP1, to TP1 after TP2 and to TP2 after TP3; what is left closes at that stop or at the trade's time exit. Within a bar
+  the stop comes before the next level. The costs are the same round trip and the financing to the day its last part
+  closes.
+
+The scoreboard shows both. The verdict stays on the first version, as fixed before the first trade; the second is the
+comparison the user asked for.
+

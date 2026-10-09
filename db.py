@@ -691,6 +691,13 @@ CREATE TABLE IF NOT EXISTS cfd_plans (
 # databases created before it. (table, column, type declaration)
 _ADDED_COLUMNS = [
     ("league_trades", "checkpoint", "INTEGER DEFAULT 0"),      # the highest of TP1..TP4 reached (marks, not exits)
+    # the second version of a league trade, which closes a quarter at each of TP1..TP4 (amendment A2)
+    ("league_trades", "stage2", "INTEGER DEFAULT 0"),          # take-profits filled
+    ("league_trades", "remaining2", "REAL DEFAULT 1.0"),       # the share still open
+    ("league_trades", "stop2", "REAL"),                        # its stop (NULL: the trade's own)
+    ("league_trades", "realized2", "REAL DEFAULT 0.0"),        # the result of the parts closed, in R, before costs
+    ("league_trades", "exit2_date", "TEXT"),                   # the day its last part closed
+    ("league_trades", "result2_r", "REAL"),                    # after costs; NULL while a part is open
     ("cluster_alert_state", "last_total_value", "REAL"),
     # Fields Form 4 has always carried and this project used to discard. See
     # sec_edgar.InsiderPurchase for what each one is for.

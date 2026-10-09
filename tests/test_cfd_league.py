@@ -131,7 +131,7 @@ def test_take_profit_levels_are_marks_the_trade_goes_on(conn):
     assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day) == []          # said once
     text = tn.format_league_event(t, "tp:2", html=False)
     assert text == ("🟢 EURUSD!: достигнут TP2 1,08000 — бумажная сделка идёт дальше, выход через 10 торг. дн.; "
-                    "идея «Ставки», сейчас +2,0R")
+                    "в варианте с целями закрыта четверть; идея «Ставки», сейчас +2,0R")
     assert "стоп 0,96000; TP1 1,04000 · TP2 1,08000 · TP3 1,12000 · TP4 1,16000 (отметки); выход через 10 торг. дн." \
         in tn.format_league_event(t, "open", html=False)
 
@@ -152,6 +152,48 @@ def test_the_result_is_the_exit_whatever_marks_were_reached(conn):
     feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=up, upto=day, today_open=1.0)}))
     assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day) == ["tp:1", "close"]
     assert t.reason == "time" and t.result_r == pytest.approx(-(0.015 + 7 * 0.010) / 100 * 1.0 / 0.04)
+
+
+# ---- the second version: a quarter closes at each level, the stop steps up
+def test_the_second_version_takes_quarters_and_stops_the_rest_at_the_stepped_stop(conn):
+    t = _opened(conn, exit_after="bars:10")                  # entry 1.00, stop 0.96: TP1 1.04, TP2 1.08
+    day = dt.date(2026, 10, 16)
+    path = {dt.date(2026, 10, 13): (1.01, 1.05, 1.005, 1.04),        # TP1: a quarter, the stop to 1.00
+            dt.date(2026, 10, 14): (1.05, 1.09, 1.045, 1.08),        # TP2: a quarter, the stop to 1.04
+            dt.date(2026, 10, 15): (1.08, 1.085, 1.03, 1.05)}        # back through 1.04: the half left closes
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=path, upto=day, today_open=1.05)}))
+    league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day)
+    assert t.status == "open" and (t.stage2, t.remaining2, t.exit2_date) == (2, 0.0, "2026-10-15")
+    gross = 0.25 * 1 + 0.25 * 2 + 0.5 * 1
+    assert t.result2_r == pytest.approx(gross - (0.015 + 3 * 0.010) / 100 * 1.0 / 0.04)
+
+
+def test_the_second_version_leaves_with_the_time_exit_and_loses_one_r_at_the_first_stop(conn):
+    t = _opened(conn)                                         # bars:5
+    day = dt.date(2026, 10, 19)
+    up = {dt.date(2026, 10, 13): (1.01, 1.05, 1.005, 1.04)}
+    flat = {d: (1.04, 1.045, 1.035, 1.04) for d in weekdays(dt.date(2026, 10, 14), 3)}
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra={**up, **flat}, upto=day, today_open=1.04)}))
+    league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day)
+    cost = (0.015 + 7 * 0.010) / 100 * 1.0 / 0.04
+    assert t.reason == "time" and t.result_r == pytest.approx(1.0 - cost)
+    assert (t.stage2, t.exit2_date) == (1, "2026-10-19") and t.result2_r == pytest.approx(0.25 + 0.75 * 1.0 - cost)
+
+    u = _opened(conn, idea="CMD-LEAD", ref="s")
+    wed = dt.date(2026, 10, 14)
+    feed = league.Feed(wed, fetch_of({"EURUSD=X": eurusd(extra={dt.date(2026, 10, 13): (1.0, 1.01, 0.95, 0.97)}, upto=wed)}))
+    league.advance(u, feed.bars(u.symbol), feed.forming(u.symbol), wed)
+    assert u.result2_r == pytest.approx(u.result_r) and u.result_r < -1
+
+
+def test_the_close_message_gives_both_results(conn):
+    t = _opened(conn)
+    day = dt.date(2026, 10, 19)
+    up = {dt.date(2026, 10, 13): (1.0, 1.05, 1.0, 1.0)}
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=up, upto=day, today_open=1.0)}))
+    league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day)
+    # the bar that reached TP1 also traded at the entry: the second version's rest stopped there, a day in
+    assert tn.format_league_event(t, "close", html=False).endswith("итог −0,02R (с целями +0,24R)")
 
 
 def test_a_bar_is_read_once(conn):
@@ -326,10 +368,14 @@ def test_the_scoreboard_adds_up_each_idea_by_month_and_gives_the_verdict(conn):
     assert (rate.closed, rate.net, rate.months_up, rate.qualifies) == (8, 4.0, 3, True)
     assert (cmd.closed, cmd.net, cmd.qualifies) == (1, -1.0, False)
     text = tn.format_league_board(board, final=True, html=False)
-    assert "• Ставки: с начала +4,00R по 8 сделкам — проходит" in text
-    assert "• Сырьё: с начала −1,00R по 1 сделке — не проходит" in text and "Всего с начала: +3,00R" in text
+    assert "• Ставки: с начала +4,00R по 8 сделкам; с целями +4,00R — проходит" in text
+    assert "• Сырьё: с начала −1,00R по 1 сделке; с целями −1,00R — не проходит" in text
+    assert "Всего с начала: +3,00R; с целями +3,00R" in text and "по основному варианту" in text
     month = tn.format_league_board(board, month=(2026, 10), html=False)
     assert "• Ставки: за месяц +1,50R, с начала +4,00R по 8 сделкам" in month and "Всего за месяц: +0,50R." in month
+    conn.execute("UPDATE league_trades SET result2_r = 0.1 WHERE idea = 'RATE-MOM'")
+    conn.commit()
+    assert league.scoreboard(conn, dt.date(2027, 1, 12)).scores[1].net2 == pytest.approx(0.8)
 
 
 def test_seven_trades_or_one_good_month_do_not_qualify():

@@ -1383,12 +1383,14 @@ def format_league_event(t, event: str, *, html: bool = True) -> str:
     if event.startswith("tp:"):
         k = int(event[3:])
         return signal_line(DOT_GREEN, t.pair, f"достигнут TP{k} {_league_price(t, league.level(t, k))}",
-                           f"бумажная сделка идёт дальше, {_league_exit(t)}; идея «{name}»",
+                           f"бумажная сделка идёт дальше, {_league_exit(t)}; в варианте с целями закрыта "
+                           f"четверть; идея «{name}»",
                            result=_cfd_r(float(k)), label="сейчас", html=html)
     how = "сработал стоп" if t.reason == "stop" else "вышло время"
+    staged = f" (с целями {_cfd_r(t.result2_r, 2)})" if t.result2_r is not None else None
     return signal_line(DOT_GREEN if round(t.result_r, 2) >= 0 else DOT_RED, t.pair,
                        f"бумажная сделка закрыта — {how}", f"по {_league_price(t, t.exit_price)}; идея «{name}»",
-                       result=_cfd_r(t.result_r, 2), html=html)
+                       result=_cfd_r(t.result_r, 2), extra=staged, html=html)
 
 
 def _league_money(board, r: float) -> str:
@@ -1420,6 +1422,8 @@ def format_league_board(board, *, month: tuple[int, int] | None = None, final: b
             line += f"за месяц {_cfd_r(m, 2)}{_league_money(board, m)}, "
         line += (f"с начала {_cfd_r(s.net, 2)}{_league_money(board, s.net)} по {s.closed} "
                  f"{_plural(s.closed, 'сделке', 'сделкам', 'сделкам')}")
+        if s.closed:
+            line += f"; с целями {_cfd_r(s.net2, 2)}"
         if s.open:
             line += f", открыто {s.open}"
         if final:
@@ -1427,12 +1431,17 @@ def format_league_board(board, *, month: tuple[int, int] | None = None, final: b
         total += s.net
         lines.append(_e(line, html))
     summary = f"Всего с начала: {_cfd_r(total, 2)}{_league_money(board, total)}"
+    if any(s.closed for s in board.scores):
+        summary += f"; с целями {_cfd_r(sum(s.net2 for s in board.scores), 2)}"
     if month:
         summary = f"Всего за месяц: {_cfd_r(month_total, 2)}{_league_money(board, month_total)}. " + summary
     lines.append(_e(summary, html))
+    if any(s.closed for s in board.scores):
+        lines.append(_e("«С целями» — те же сделки, если закрывать четверть на каждой из TP1–TP4 и подтягивать стоп.",
+                        html))
     if final:
         lines.append(_e("«Проходит»: в плюсе после издержек, минимум два прибыльных месяца из трёх и не меньше "
-                        f"{league.MIN_TRADES} сделок.", html))
+                        f"{league.MIN_TRADES} сделок — по основному варианту.", html))
     elif board.live and not month:
         lines.append("Открытые:")
         for t in board.live:
