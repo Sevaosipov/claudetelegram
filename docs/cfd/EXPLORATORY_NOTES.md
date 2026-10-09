@@ -92,3 +92,14 @@ not independent, so the true uncertainty is larger than the t-statistic says.
 The user's EUR/USD rule does not generalise to the other pairs with OECD 3-month rates as the carry gate (the original
 uses 2-year yields, which are not freely available for most of these currencies). This says nothing new about the
 EUR/USD original itself.
+
+## Round 4 (2026-10-09): what the failed results suggest — not tested, not tradeable
+
+- **H8, against the speculators, lost in both periods** (in-sample mean −0.357R, t −3.00; out-of-sample −0.237R,
+  t −1.74). A loss that consistent hints that the opposite side — trading *with* the speculators when their position
+  reaches a three-year extreme — may have made money. This is read off a result already seen, including the
+  out-of-sample years, so it is a hypothesis for data not yet seen, not a finding: the mirror trade has other stops
+  and exits, and its out-of-sample period is spent.
+- **H9, the London breakout, made a little in 2012–2016 and lost in 2017–2024** (profit factor 1.04, then 0.94).
+  GBPUSD alone was positive out of sample (+76.5R over 1 676 trades, mean +0.046R); one pair of seven being positive
+  is what chance gives, and picking it afterwards is the per-pair picking the pre-registration rules out.
