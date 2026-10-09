@@ -631,6 +631,32 @@ CREATE TABLE IF NOT EXISTS cfd_signals (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS cfd_signals_coin_date ON cfd_signals(coin, signal_date);
 
+-- The forex paper league (cfd/league.py, docs/cfd/PAPER_LEAGUE.md): one row per paper trade of an idea run
+-- forward for 13 weeks. The bot never places an order.
+CREATE TABLE IF NOT EXISTS league_trades (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea        TEXT NOT NULL,             -- COT-WITH | RATE-MOM | CMD-LEAD | MONTH-END
+    pair        TEXT NOT NULL,             -- EURUSD
+    symbol      TEXT NOT NULL,             -- the Yahoo symbol
+    side        TEXT NOT NULL,             -- long | short
+    ref         TEXT NOT NULL,             -- what the signal was made on: a report's date, a week, a month
+    signal_date TEXT NOT NULL,             -- ISO date of the signal bar
+    atr         REAL NOT NULL,             -- ATR(14) of the signal bar
+    stop_atr    REAL NOT NULL,             -- the stop's distance in ATR
+    exit_after  TEXT NOT NULL,             -- bars:N | date:YYYY-MM-DD
+    status      TEXT NOT NULL,             -- pending | open | closed
+    entry_date  TEXT,
+    entry       REAL,
+    stop        REAL,
+    last_bar    TEXT,                      -- ISO date of the last completed bar processed
+    exit_date   TEXT,
+    exit_price  REAL,
+    result_r    REAL,                      -- after costs
+    reason      TEXT,                      -- stop | time
+    created     TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS league_trades_ref ON league_trades(idea, pair, ref);
+
 -- The user's own CFD trades (cfd/plan.py, /cfd plan): one row per trade the user told the bot about, followed
 -- through its four take-profit stages to its close. The bot never places an order.
 CREATE TABLE IF NOT EXISTS cfd_plans (

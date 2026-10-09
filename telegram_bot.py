@@ -97,6 +97,7 @@ import sources
 import signal_context
 import t212_account
 import telegram_notify
+from cfd import league as cfd_league
 from cfd import live as cfd_live
 from cfd import plan as cfd_plan
 
@@ -144,7 +145,8 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "/cfd plan XAUUSD buy 4461.80 stop 4449.10 — ваша CFD-сделка: 4 цели, риск и объём, "
              "сообщение на каждой цели и на стопе.\n"
              "Сигналы на покупку приходят по пятницам, сигнал на продажу по вашим позициям — сразу.\n"
-             "/size — на сколько евро покупать по сигналу: риск на покупку и предел доли счёта.\n"
+             "/size — на сколько евро покупать по сигналу: риск на покупку и предел доли счёта.\n"             "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
+
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
              "что-то значить на уровне одного тикера).\n"
@@ -209,6 +211,20 @@ def _position_listing(arg: str) -> tuple[str, str | None] | None:
     if ticker is None:
         return None
     return positions.split_venue(ticker) or (ticker, None)
+
+
+def _handle_league_command(conn, text: str) -> bool:
+    """/league: the forex paper league's scoreboard and its mute switch (cfd/league.py). Returns False for
+    any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/league":
+        return False
+    try:
+        telegram_notify.send_text(cfd_league.handle_command(conn, text))
+    except Exception as e:
+        print(f"[telegram_bot] /league failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /league ({type(e).__name__}). Попробуйте позже.")
+    return True
 
 
 def _handle_size_command(conn, text: str) -> bool:
@@ -665,7 +681,7 @@ def _handle_message(conn, text: str) -> None:
     the ticker analysis; anything else -- a question for the analyst."""
     text = (text or "").strip()
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
-            or _handle_size_command(conn, text)):
+            or _handle_size_command(conn, text) or _handle_league_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
         _handle_backtest(conn, text)

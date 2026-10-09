@@ -66,6 +66,7 @@ import t212_account
 import universe
 import telegram_notify
 import weekly
+from cfd import league as cfd_league
 from cfd import live as cfd_live
 from passes import (
     CSV_PATH,
@@ -396,6 +397,17 @@ def _sync_t212(conn, args) -> None:
     if result is not None and (result.opened or result.updated or result.closed):
         print(f"[T212] opened {len(result.opened)}, updated {len(result.updated)}, "
               f"closed {len(result.closed)}")
+
+
+def _league_pass(conn, args) -> None:
+    """The forex paper league (cfd/league.py): its paper trades are followed and the day's new ones made, a
+    Telegram message per event and a scoreboard at the first run of a month. On a full run only, and not
+    with --no-telegram, as the CFD pass. A crash is reported like a failed source."""
+    if _filtered_run(args) or args.no_telegram:
+        return
+    result = _run_source("LEAGUE", cfd_league.run, conn)
+    if result is not None and any(result):
+        print(f"[LEAGUE] opened {result[0]}, closed {result[1]}")
 
 
 def _cfd_pass(conn, args) -> None:
@@ -814,6 +826,7 @@ def main():
                     print("[telegram] weekly message waits for the week's scoring pass")
 
         _cfd_pass(conn, args)
+        _league_pass(conn, args)
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from
