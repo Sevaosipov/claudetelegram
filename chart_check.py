@@ -179,3 +179,14 @@ def line(name: str, ticker: str, source: str | None, side: str, extra: str = "",
     if f is None and note is None:              # no history and no review: nothing worth a line
         return None
     return compose(rule, why, note)
+
+
+WORDS = {FOR: "For", NEUTRAL: "Neutral", AGAINST: "Against"}
+
+
+def word(line: str | None) -> str | None:
+    """The verdict of a line() as one word for a signal's block: «For», «Neutral» or «Against»; None for
+    no line."""
+    verdict_, _rest = _split(line or "")
+    return WORDS.get(verdict_)
+

@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 
+import chart_check
 import crypto
 import positions
 import t212_account
@@ -47,14 +48,14 @@ def buy_text(pick: dict) -> str:
         Price 15.20
         Stop  13.68
         Size  €22
+        Chart Against
 
-    (the last close, the stop that far below it, the euros to buy: signal_context) -- and under it why it was
-    picked (its first two reasons and its score) and, for a company, what it is and how it is valued. A coin
-    is named by its symbol. Without a price the stop is its percent. «Not on Trading 212» and, for an alt,
-    «High risk» are lines of the block: both decide whether the trade can or should be placed; so is
-    «Merger pending», for a company that is a party to a merger without being its target. The last
-    line is the chart verdict -- the bot's rules, reviewed by Claude (chart_check.line). What the pick does not
-    have is left out."""
+    (the last close, the stop that far below it, the euros to buy: signal_context; the chart verdict in a
+    word: chart_check, the bot's rules reviewed by Claude) -- and, for a company, one line under it on what
+    it is and how it is valued. A coin is named by its symbol. Without a price the stop is its percent.
+    «Not on Trading 212», «High risk» (an alt) and «Merger pending» are lines of the block. Why the signal
+    was picked and the sentence of the chart check are not shown: the user asked for the trade alone (the
+    analyst gives both on request). What the pick does not have is left out."""
     rows = []
     price, stop_pct = pick.get("price"), pick.get("stop_pct")
     if price:
@@ -63,6 +64,9 @@ def buy_text(pick: dict) -> str:
         rows.append(("Stop", _plain(price * (1 - stop_pct)) if price else f"-{stop_pct * 100:.0f}%"))
     if pick.get("amount_eur"):
         rows.append(("Size", f"€{pick['amount_eur']:.0f}"))
+    verdict = chart_check.word(pick.get("chart"))
+    if verdict:
+        rows.append(("Chart", verdict))
     block = [f"{crypto.symbol_of(pick['ticker'])} Buy · {KIND}"] + [f"{name:<6}{value}" for name, value in rows]
     if pick.get("t212") is False:
         block.append("Not on Trading 212")
@@ -71,15 +75,8 @@ def buy_text(pick: dict) -> str:
     if pick.get("deal"):
         block.append("Merger pending")
     lines = [f"<pre>{telegram_notify._esc(chr(10).join(block))}</pre>"]
-    reasons = [r for r in (pick.get("reasons") or []) if r][:MAX_REASONS]
-    score = pick.get("score")
-    why = "; ".join(reasons + ([f"балл {score:.0f}"] if score is not None else []))
-    if why:
-        lines.append(telegram_notify._esc(why))
     if pick.get("about"):
         lines.append(telegram_notify._esc(pick["about"]))
-    if pick.get("chart"):
-        lines.append(telegram_notify._esc(pick["chart"]))
     return "\n".join(lines)
 
 

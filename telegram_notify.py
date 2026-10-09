@@ -1151,6 +1151,8 @@ def _cfd_entry(notice, html: bool) -> str:
     if sig.qty and sig.risk_eur and sig.r:
         # the position's value in euros: the risk in euros over the stop's share of the entry price
         rows.append(("Size", f"€{sig.risk_eur * sig.entry / sig.r:.0f}"))
+    if getattr(notice, "chart", None):
+        rows.append(("Chart", notice.chart))
     lines = [f"{_cfd_name(sig)} {'Long' if sig.side == 'long' else 'Short'} · CFD"]
     return _cfd_block("\n".join(lines + [f"{name:<6}{value}" for name, value in rows]), html)
 

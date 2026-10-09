@@ -205,6 +205,7 @@ class Notice:
     qty_per_1000: float | None = None
     over_limit: tuple[float, float] | None = None
     risk_pct: float | None = None
+    chart: str | None = None        # an entry: the chart verdict in a word (For, Neutral, Against)
 
 
 @dataclass(frozen=True)
@@ -418,12 +419,11 @@ class RunResult:
 def notify(notice: Notice) -> bool:
     """Send one event to Telegram (telegram_notify.send_text, looked up at the call). True when it went out."""
     import telegram_notify
-    text = telegram_notify.format_cfd_notice(notice)
-    if notice.kind == "entry":                  # a new signal carries its chart verdict
-        note = _chart_note(notice.signal)
-        if note:
-            text += "\n" + telegram_notify._esc(note)
-    return bool(telegram_notify.send_text(text))
+    if notice.kind == "entry":                  # a new signal carries its chart verdict, in a word
+        import chart_check
+        from dataclasses import replace
+        notice = replace(notice, chart=chart_check.word(_chart_note(notice.signal)))
+    return bool(telegram_notify.send_text(telegram_notify.format_cfd_notice(notice)))
 
 
 def _chart_note(sig: Signal) -> str | None:

@@ -114,7 +114,7 @@ def test_refresh_reads_the_price_again_and_checks_the_chart_once(conn):
     assert "Вердикт по правилам бота: график за" in facts and "Средние 20/50/200 дней:" in facts
     sc.refresh(conn, picks, TODAY, note_fn=note, closes_fn=lambda t, s: UP)
     assert len(asked) == 1                                          # kept: not asked again
-    assert weekly.buy_text(picks[0]).endswith("\nГрафик нейтрален (по правилам: за) — отчёт 14.10, через 5 дней")
+    assert weekly.buy_text(picks[0]).endswith("\nChart Neutral</pre>")
 
 
 def test_without_claude_the_rules_verdict_goes_out_marked_and_with_nothing_there_is_no_line(conn):
@@ -162,7 +162,6 @@ def test_a_pick_gets_its_company_line_and_amount_and_the_message_says_them(conn)
     assert pick["price"] == 15.2
     assert weekly.buy_text(pick) == (
         "<pre>RXO Buy · Invest\nPrice 15.20\nStop  13.68\nSize  €19</pre>\n"
-        "активист 13D: 19,3%; 6 мес. +81%; балл 65\n"
         "Trucking (Industrials) · кап. $2,8 млрд · P/E 31 (прогноз 18,2) · P/S 0,6 · "
         "выручка −4% г/г · маржа 1,2%")
 
@@ -171,4 +170,4 @@ def test_a_pick_with_no_context_reads_as_before(conn):
     pick = {"ticker": "CRYPTO:SOL", "score": 61.0, "stop_pct": 0.2, "reasons": ["тренд"], "risk": True}
     sc.enrich(conn, pick, TODAY, info_fn=lambda s: RXO)
     assert "about" not in pick and "amount_eur" not in pick and "price" not in pick
-    assert weekly.buy_text(pick) == "<pre>SOL Buy · Invest\nStop  -20%\nHigh risk</pre>\nтренд; балл 61"
+    assert weekly.buy_text(pick) == "<pre>SOL Buy · Invest\nStop  -20%\nHigh risk</pre>"

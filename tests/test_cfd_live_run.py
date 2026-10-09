@@ -140,11 +140,11 @@ def test_a_new_signal_carries_its_chart_verdict_when_there_is_one(monkeypatch):
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     monkeypatch.setattr(chart_check, "line", lambda name, ticker, source, side, extra="": f"График за — {name} {ticker} {side}")
     assert live.notify(entry()) and live.notify(checkpoint(1, 119.4, 134.8))
-    assert sent[0].endswith("</pre>\nГрафик за — SOLUSD CRYPTO:SOL long") and "График" not in sent[1]
+    assert sent[0].endswith("\nChart For</pre>") and "График" not in sent[0] and "Chart" not in sent[1]
 
     def boom(*a, **k):
         raise RuntimeError("down")
     monkeypatch.setattr(chart_check, "line", boom)
-    assert live.notify(entry()) and "График" not in sent[-1]
+    assert live.notify(entry()) and "Chart" not in sent[-1]
     monkeypatch.setattr(chart_check, "line", lambda *a, **k: None)
     assert live.notify(entry()) and sent[-1].endswith("</pre>")
