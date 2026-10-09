@@ -37,20 +37,26 @@ def buy_text(pick: dict) -> str:
     """«🟢 GME!: покупка — 2 инсайдера из руководства; CEO среди покупателей; балл 70, стоп −10%»: a picked
     buy (signals_weekly.pick_record) -- its first two reasons, its score and its stop, and «нет на
     Trading 212» when the score says the broker does not list it. A coin is named by its symbol; an alt
-    (a pick with `risk`) ends with «, высокий риск». What the pick does not have is left out. There is
-    no money in it: the bot holds nothing."""
+    (a pick with `risk`) ends with «, высокий риск». With `amount_eur` (signal_context: the user's own
+    /size settings over the stop) it says «купить на €19», and with `about` a second line says what the
+    company is and how it is valued. What the pick does not have is left out."""
     reasons = [r for r in (pick.get("reasons") or []) if r][:MAX_REASONS]
     score = pick.get("score")
     head = reasons + ([f"балл {score:.0f}"] if score is not None else [])
     tail = []
     if pick.get("stop_pct"):
         tail.append(f"стоп −{pick['stop_pct'] * 100:.0f}%")
+    if pick.get("amount_eur"):
+        tail.append(f"купить на {telegram_notify.money(pick['amount_eur'])}")
     if pick.get("t212") is False:
         tail.append("нет на Trading 212")
     if pick.get("risk"):
         tail.append(RISK_TAG)
     details = ", ".join((["; ".join(head)] if head else []) + tail)
-    return telegram_notify.signal_line(DOT_GREEN, crypto.symbol_of(pick["ticker"]), "покупка", details or None)
+    line = telegram_notify.signal_line(DOT_GREEN, crypto.symbol_of(pick["ticker"]), "покупка", details or None)
+    if pick.get("about"):
+        line += "\n" + telegram_notify._esc(f"Компания: {pick['about']}")
+    return line
 
 
 def week_exits(conn, start: str, end: str) -> list[tuple[int, str, list[str]]]:
