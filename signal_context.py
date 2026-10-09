@@ -6,9 +6,11 @@ put next to it.
 
   * about(): the company's industry, its size and a few ratios (P/E, P/S, revenue growth, margin) from
     Yahoo, as one line. A coin has none.
-  * amount_eur(): the position's size from the user's own settings -- the share of the account risked on
-    one signal over the signal's stop, and no more than a share of the account -- and the value of the
-    Trading 212 account the sync stored. The settings are the user's (/size); the bot never places an order.
+  * amount_eur(): the position's size from the user's own settings (/size). With a weekly budget -- the
+    money the user adds to the account each Friday -- the budget split evenly between the week's signals;
+    without one, the share of the account risked on one signal over the signal's stop, and no more than a
+    share of the account, from the value of the Trading 212 account the sync stored. The bot never places
+    an order.
 """
 from __future__ import annotations
 
@@ -22,13 +24,15 @@ import positions
 import t212_account
 
 # ------------------------------------------------------------------ the size of a position
-KV_KEYS = {"risk": "size_risk_pct", "max": "size_max_pct"}
-DEFAULTS = {"risk": 1.0, "max": 10.0}           # percent of the account
-LIMITS = {"risk": (0.1, 5.0), "max": (1.0, 100.0)}
+KV_KEYS = {"risk": "size_risk_pct", "max": "size_max_pct", "budget": "size_budget_eur"}
+DEFAULTS = {"risk": 1.0, "max": 10.0, "budget": 0.0}    # percent of the account; euros a week (0: no budget)
+LIMITS = {"risk": (0.1, 5.0), "max": (1.0, 100.0), "budget": (0.0, 1e6)}
 _FOREVER = 100 * 365 * 24 * 3600
 USAGE = {
     "risk": "/size risk 1 — риск на одну покупку, % счёта: от 0,1 до 5",
     "max": "/size max 10 — не больше этой доли счёта в одной покупке, %: от 1 до 100",
+    "budget": "/size budget 30 — сколько евро вы вкладываете в неделю: делится поровну между сигналами "
+              "пятницы (0 — считать от риска и счёта)",
 }
 
 
@@ -40,10 +44,14 @@ def settings(conn) -> dict:
     return out
 
 
-def amount_eur(conn, stop_pct: float | None, today: dt.date) -> float | None:
-    """How many euros of a signal to buy: the account's value times the risk percent, over the stop's
-    distance (a stop hit then costs that share of the account), and no more than the maximum share.
-    None with no stop or no fresh account value in euros."""
+def amount_eur(conn, stop_pct: float | None, today: dt.date, picks: int = 1) -> float | None:
+    """How many euros of a signal to buy. With a weekly budget set (the money the user adds each Friday):
+    the budget split evenly between the week's `picks`. Without one: the account's value times the risk
+    percent, over the stop's distance (a stop hit then costs that share of the account), and no more than
+    the maximum share -- None with no stop or no fresh account value in euros."""
+    budget = settings(conn)["budget"]
+    if budget:
+        return budget / max(1, picks)
     account = t212_account.account_value(conn, today, max_age_days=t212_account.STALE_DAYS)
     if not stop_pct or account is None or not account[0] or (account[1] or "EUR") != "EUR":
         return None
@@ -59,6 +67,9 @@ def settings_text(conn, today: dt.date | None = None) -> str:
     """«Риск 1% счёта на покупку, не больше 10% счёта в одной. Сейчас: счёт €192 — при стопе −10% это €19.»"""
     import telegram_notify
     s = settings(conn)
+    if s["budget"]:
+        return (f"Бюджет {telegram_notify.money(s['budget'])} в неделю: делится поровну между сигналами "
+                "пятницы (один сигнал — весь бюджет, пять — по пятой части).")
     text = f"Риск {_pct(s['risk'])}% счёта на покупку, не больше {_pct(s['max'])}% счёта в одной."
     today = today or dt.date.today()
     account = t212_account.account_value(conn, today, max_age_days=t212_account.STALE_DAYS)
@@ -79,7 +90,7 @@ def handle_command(conn, text: str) -> str:
     if name not in KV_KEYS or len(args) != 2:
         return "\n".join(USAGE.values())
     try:
-        value = float(args[1].replace(",", ".").rstrip("%"))
+        value = float(args[1].replace(",", ".").rstrip("%").lstrip("€"))
     except ValueError:
         return USAGE[name]
     low, high = LIMITS[name]
@@ -165,7 +176,7 @@ def about(ticker: str, source: str | None = None, *, info_fn=None) -> str | None
         return None
 
 
-def enrich(conn, pick: dict, today: dt.date, *, info_fn=None) -> dict:
+def enrich(conn, pick: dict, today: dt.date, *, info_fn=None, picks: int = 1) -> dict:
     """A pick (signals_weekly.pick_record) with what its message adds: `about` (the company line), `price`
     (the last close: the message's price and the level of its stop) and `amount_eur` (the size), each only
     when there is one."""
@@ -179,7 +190,7 @@ def enrich(conn, pick: dict, today: dt.date, *, info_fn=None) -> dict:
         price = None
     if price:
         pick["price"] = price
-    amount = amount_eur(conn, pick.get("stop_pct"), today)
+    amount = amount_eur(conn, pick.get("stop_pct"), today, picks)
     if amount is not None:
         pick["amount_eur"] = round(amount, 2)
     return pick

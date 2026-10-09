@@ -337,7 +337,7 @@ def _pick_week(conn, today: dt.date, report) -> bool:
     picks = [signals_weekly.pick_record(s) for s in signals_weekly.pick_buys(conn, today, report.scored)]
     for pick in picks:                  # the company line and the size: facts beside the score, never a gate
         try:
-            signal_context.enrich(conn, pick, today)
+            signal_context.enrich(conn, pick, today, picks=len(picks))
         except Exception as e:
             print(f"[weekly] {pick['ticker']}: no context: {type(e).__name__}: {e}", file=sys.stderr)
     db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)

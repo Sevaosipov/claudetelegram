@@ -68,6 +68,18 @@ def test_no_amount_without_a_stop_a_fresh_account_or_euros(conn):
     assert sc.amount_eur(conn, 0.10, TODAY) is None
 
 
+def test_a_weekly_budget_is_split_evenly_between_the_weeks_signals_whatever_the_account(conn):
+    assert sc.handle_command(conn, "/size budget €30") == (
+        "Бюджет €30 в неделю: делится поровну между сигналами пятницы (один сигнал — весь бюджет, "
+        "пять — по пятой части).")
+    assert sc.amount_eur(conn, 0.10, TODAY) == 30.0 and sc.amount_eur(conn, None, TODAY, picks=4) == 7.5
+    pick = {"ticker": "CRYPTO:SOL", "stop_pct": 0.2}
+    assert sc.enrich(conn, pick, TODAY, picks=3)["amount_eur"] == 10.0
+    account(conn, 2000.0)
+    sc.handle_command(conn, "/size budget 0")                       # back to the risk and the account
+    assert sc.amount_eur(conn, 0.20, TODAY) == pytest.approx(100.0)
+
+
 # ------------------------------------------------------------------ /size
 def test_size_shows_and_changes_the_settings(conn, monkeypatch):
     sent = []
@@ -79,7 +91,7 @@ def test_size_shows_and_changes_the_settings(conn, monkeypatch):
                         "при стопе −10% это €19.\n" + "\n".join(sc.USAGE.values()))
     tb._handle_message(conn, "/size risk 0,5")
     assert sent[-1].startswith("Риск 0,5% счёта на покупку, не больше 10% счёта в одной.")
-    assert sc.settings(conn) == {"risk": 0.5, "max": 10.0}
+    assert sc.settings(conn) == {"risk": 0.5, "max": 10.0, "budget": 0.0}
 
 
 @pytest.mark.parametrize("text, answer", [("/size risk 9", sc.USAGE["risk"]), ("/size max 0", sc.USAGE["max"]),
