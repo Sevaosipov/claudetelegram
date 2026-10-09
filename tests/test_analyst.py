@@ -152,7 +152,12 @@ def test_the_allow_list_is_three_read_commands_and_the_tradingview_read_tools():
     assert analyst.ALLOWED_TOOLS == (
         f"Bash({cmd} context:*)", f"Bash({cmd} portfolio)", f"Bash({cmd} news:*)",
         *(f"mcp__tradingview__{t}" for t in analyst.TV_TOOLS),
-        *(f"mcp__tv__{t}" for t in analyst.TV_DATA_TOOLS))
+        *(f"mcp__tv__{t}" for t in analyst.TV_DATA_TOOLS),
+        *(f"mcp__tvc__{t}" for t in analyst.TV_COMMUNITY_TOOLS))
+    # of the community server: what analyses one asset or reads a price -- none of its ready-made
+    # decisions, its sentiment, its news, its scanners or its backtests
+    assert analyst.TV_COMMUNITY_TOOLS == ("coin_analysis", "multi_timeframe_analysis", "volume_confirmation_analysis",
+                                          "yahoo_price", "stock_prices", "stock_extended_hours", "market_snapshot")
     # of TradingView's own server: market data only -- no alert, watchlist or document tool
     assert all(t.startswith(("mcp-tv-get-", "mcp-tv-search-")) for t in analyst.TV_DATA_TOOLS)
     assert not any(w in t for t in analyst.TV_DATA_TOOLS for w in ("alert", "watchlist", "document"))
@@ -171,15 +176,17 @@ def test_claude_gets_no_edit_mode_no_file_tools_and_never_the_whole_shell():
     assert not {"Write", "Read", "Edit", "MultiEdit", "NotebookEdit", "WebFetch"} & set(cmd)
     assert cmd.count("Bash") == 1 and cmd[cmd.index("--tools") + 1] == "Bash"    # the tool, not a rule
     assert "Bash" not in analyst.ALLOWED_TOOLS
-    assert all(t.startswith(f"Bash({analyst.ANALYST_CMD} ") or t.startswith(("mcp__tradingview__", "mcp__tv__"))
+    assert all(t.startswith(f"Bash({analyst.ANALYST_CMD} ") or t.startswith(("mcp__tradingview__", "mcp__tv__", "mcp__tvc__"))
                for t in analyst.ALLOWED_TOOLS)
 
 
-def test_the_only_mcp_servers_are_tradingviews_own_and_the_desktop_one():
+def test_the_only_mcp_servers_are_the_three_tradingview_ones():
     import json
     assert json.loads(analyst.MCP_CONFIG_JSON) == {
         "mcpServers": {"tradingview": {"command": "node", "args": [analyst.TV_MCP_PATH]},
-                       "tv": {"type": "http", "url": "https://mcp.tradingview.com/mcp"}}}
+                       "tv": {"type": "http", "url": "https://mcp.tradingview.com/mcp"},
+                       "tvc": {"command": analyst.TV_COMMUNITY_BIN, "args": []}}}
+    assert analyst.TV_COMMUNITY_BIN.endswith("/Tools/tradingview-mcp-community/.venv/bin/tradingview-mcp")
     cmd = analyst.claude_command("x")
     assert "--strict-mcp-config" in cmd and cmd[cmd.index("--mcp-config") + 1] == analyst.MCP_CONFIG_JSON
 

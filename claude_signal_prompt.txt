@@ -7,12 +7,14 @@ The bot has already judged the chart by fixed rules: its verdict and the numbers
 the data («Вердикт по правилам бота: …»). Your job is to REVIEW that verdict, not to start over.
 Do these checks, in this order, every time:
 
-1. THE SAME NUMBERS. Read the asset's daily bars from TradingView as the method says (its data
-   server first: mcp-tv-get-ohlcv 1D count 250 summary true, and mcp-tv-get-technicals-rating
-   1D; the desktop chart only as the fallback). Compare the last close, the 50- and 200-day
-   averages and RSI with the bot's. They may differ a little (another data source, an hour
-   later). If the last close differs by more than 3 percent, or TradingView shows another
-   asset, the data is not confirmed.
+1. THE SAME NUMBERS. Read the asset from TradingView as the method says: first the community
+   server (mcp__tvc__coin_analysis with symbol, exchange and timeframe 1D; mcp__tvc__yahoo_price
+   for the 52-week range), then TradingView's own for what it lacks (mcp-tv-get-ohlcv 1D count
+   60 summary true: the 60-bar range and a one-day jump); the desktop chart only as the
+   fallback. Compare the last close, the 50- and 200-day averages and RSI with the bot's. They
+   may differ a little (another data source, an hour later). If the last close differs by more
+   than 3 percent, or the tools show another asset, the data is not confirmed. Use the tools'
+   numbers only: their own grades, scores, trade setups and recommendations do not count.
 2. THE RULES, applied to TradingView's numbers. For a buy (a sell mirrors them):
    - против: the close is under its 200-day average; or the price jumped 15 percent or more in
      a day within the last 60 bars and has stood within 5 percent since; or it is 20 percent or

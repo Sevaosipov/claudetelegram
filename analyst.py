@@ -72,11 +72,20 @@ TV_MCP_PATH = os.environ.get("TV_MCP_PATH") or str(Path.home() / "Tools" / "trad
 # its tools fail and the method falls back to the desktop chart.
 TV_OFFICIAL_NAME = "tv"
 TV_OFFICIAL_URL = os.environ.get("TV_OFFICIAL_MCP_URL") or "https://mcp.tradingview.com/mcp"
-# The only MCP servers the headless Claude gets (with --strict-mcp-config): TradingView's own, and the
-# local one that drives the owner's TradingView Desktop chart.
+# The community TradingView server (atilaahmettaner/tradingview-mcp, the PyPI package tradingview-mcp-server
+# pinned at 0.8.1 in an environment of its own; its source was read before it was installed). The owner
+# chose it as the FIRST source of market analysis: indicator snapshots, trend alignment across timeframes,
+# volume confirmation, prices. It needs no login; it reads TradingView's public screener and Yahoo.
+TV_COMMUNITY_NAME = "tvc"
+TV_COMMUNITY_BIN = os.environ.get("TV_COMMUNITY_MCP_BIN") or str(
+    Path.home() / "Tools" / "tradingview-mcp-community" / ".venv" / "bin" / "tradingview-mcp")
+# The only MCP servers the headless Claude gets (with --strict-mcp-config): the community server (first),
+# TradingView's own (the supplement: bars, financials, forecasts, news, calendars) and the local one that
+# drives the owner's TradingView Desktop chart (the fallback).
 MCP_CONFIG_JSON = json.dumps({"mcpServers": {
     "tradingview": {"command": "node", "args": [TV_MCP_PATH]},
-    TV_OFFICIAL_NAME: {"type": "http", "url": TV_OFFICIAL_URL}}})
+    TV_OFFICIAL_NAME: {"type": "http", "url": TV_OFFICIAL_URL},
+    TV_COMMUNITY_NAME: {"command": TV_COMMUNITY_BIN, "args": []}}})
 
 # What Claude may call: the three read commands, run from BASE_DIR, and the TradingView tools that
 # read the chart, move it to an asset and back and look a symbol up. Nothing that edits
@@ -96,8 +105,14 @@ ANALYST_CMD = f"{BASE_DIR}/.venv/bin/python {BASE_DIR}/analyst.py"
 ANALYST_CMD_PLACEHOLDER = "{ANALYST_CMD}"          # in the prompt files; build_prompt fills it in
 BASH_RULES = (f"Bash({ANALYST_CMD} context:*)", f"Bash({ANALYST_CMD} portfolio)",
               f"Bash({ANALYST_CMD} news:*)")
+# ... and of the community server the tools that analyse one named asset or read a price. Not its scanners,
+# and not what would undo the bot's own design: no ready-made buy/sell decision (multi_agent_analysis,
+# combined_analysis), no Reddit sentiment or its news (the bot has its trusted sources), no backtests.
+TV_COMMUNITY_TOOLS = ("coin_analysis", "multi_timeframe_analysis", "volume_confirmation_analysis",
+                      "yahoo_price", "stock_prices", "stock_extended_hours", "market_snapshot")
 ALLOWED_TOOLS = (BASH_RULES + tuple(f"mcp__tradingview__{t}" for t in TV_TOOLS)
-                 + tuple(f"mcp__{TV_OFFICIAL_NAME}__{t}" for t in TV_DATA_TOOLS))
+                 + tuple(f"mcp__{TV_OFFICIAL_NAME}__{t}" for t in TV_DATA_TOOLS)
+                 + tuple(f"mcp__{TV_COMMUNITY_NAME}__{t}" for t in TV_COMMUNITY_TOOLS))
 # launchd's PATH lacks these; the TradingView MCP server is started with `node` from one of them.
 EXTRA_PATH = ("/usr/local/bin", "/opt/homebrew/bin")
 CHILD_ENV = "DISCLOSURE_ANALYST_CHILD"
