@@ -368,7 +368,7 @@ def nasdaq_analyst(symbol: str) -> dict | None:
 
 
 # ------------------------------------------------------------------------- news
-NEWS_LIMIT = 8
+NEWS_LIMIT = 10
 CRYPTO_FEEDS = (("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
                 ("Cointelegraph", "https://cointelegraph.com/rss"))
 
@@ -434,12 +434,160 @@ def _crypto_feed_news(symbol: str, name: str | None) -> list[dict]:
     return sorted(out, key=lambda i: i["published"], reverse=True)[:NEWS_LIMIT]
 
 
+# ---- whom to believe. A headline is as good as who wrote it: the company's own filing or press release and
+# the wire and newspaper desks first; the sites that turn every price move into an article not at all.
+TIER_PRIMARY, TIER_OTHER, TIER_NOISE = 1, 2, 3
+_PRIMARY = ("sec.gov", "sec (8-k)", "business wire", "businesswire", "pr newswire", "prnewswire", "globenewswire",
+            "globe newswire", "reuters", "bloomberg", "wall street journal", "wsj", "financial times", "ft.com",
+            "associated press", "apnews", "ap news", "cnbc", "barron", "marketwatch", "dow jones", "the economist",
+            "new york times", "nytimes", "nikkei", "coindesk", "the block", "theblock")
+_NOISE = ("motley fool", "fool.com", "zacks", "benzinga", "investorplace", "simply wall st", "simplywall",
+          "24/7 wall st", "247wallst", "tipranks", "insider monkey", "insidermonkey", "gurufocus", "stockstory",
+          "marketbeat", "stocktwits", "investing.com", "thestreet", "invezz", "fxstreet", "stock traders daily",
+          "defense world", "etf daily news", "ticker report", "american banking news")
+# A press-release wire also carries what law firms pay to post about every falling stock and every merger:
+# «shareholder alert», «investigates whether ... a fair deal». Noise, whoever the wire is.
+_NOISE_TITLE = re.compile(r"(shareholder|investor|stock) alert|\$hareholder|class action|law (firm|offices)|"
+                          r"investigat\w+ (whether|adequacy|the fairness|claims)|reminds (investors|shareholders)|"
+                          r"lead plaintiff|halper sadeh|kahn swick|levi & korsinsky|rosen law|pomerantz", re.I)
+_NAME_FILLER = {"inc", "corp", "corporation", "co", "company", "ltd", "plc", "group", "holdings", "the", "and",
+                "sa", "ag", "nv", "stock", "crypto", "class"}
+TRUSTED_SITES = ("reuters.com", "bloomberg.com", "wsj.com", "ft.com", "cnbc.com", "apnews.com",
+                 "businesswire.com", "prnewswire.com", "globenewswire.com", "marketwatch.com", "barrons.com")
+TRUSTED_LABEL = "Reuters/Bloomberg/WSJ/FT/CNBC/AP и пресс-релизы"
+SEC_LABEL = "SEC 8-K"
+SEC_NEWS_DAYS = 45
+MIN_TRUSTED = 3             # with fewer headlines than this from the trusted sources, the general search is added
+# What an 8-K says, by its item numbers (exhibits, 9.01, say nothing). The wording of 1.03, 3.01 and 4.02
+# is the score's own red flags (model_score.RED_FLAGS): the company's own filing is the surest place to
+# read them.
+SEC_8K_ITEMS = {
+    "1.01": "entered a material agreement", "1.02": "terminated a material agreement",
+    "1.03": "bankruptcy or receivership", "2.01": "completed an acquisition or a disposal",
+    "2.02": "reported results of operations", "2.03": "took on a new debt obligation",
+    "2.04": "debt default or acceleration", "2.05": "restructuring costs", "2.06": "material impairment",
+    "3.01": "notice of delisting or of failing a listing rule", "3.02": "unregistered sale of shares",
+    "4.01": "change of auditor", "4.02": "restatement: earlier financial statements not to be relied on",
+    "5.01": "change of control", "5.02": "officer or director change", "5.07": "shareholder vote results",
+    "7.01": "Regulation FD disclosure", "8.01": "other material event",
+}
+_CIK_MAP = None
+
+
+def tier(item: dict) -> int:
+    """How far a headline's publisher is to be trusted: TIER_PRIMARY (a filing, a press-release wire, a
+    wire or newspaper desk), TIER_NOISE (a site that writes an article per price move) or TIER_OTHER."""
+    who = f"{item.get('publisher') or ''} {item.get('url') or ''}".lower()
+    title = (item.get("title") or "").lower()
+    tail = title.rsplit(" - ", 1)[-1] if " - " in title else ""          # Google News: «... - Reuters»
+    if any(n in who or n in tail for n in _NOISE) or _NOISE_TITLE.search(title):
+        return TIER_NOISE
+    if any(p in who or p in tail for p in _PRIMARY):
+        return TIER_PRIMARY
+    return TIER_OTHER
+
+
+def _title_key(title: str) -> str:
+    base = title.rsplit(" - ", 1)[0] if " - " in title else title
+    return re.sub(r"[^a-z0-9а-я]+", " ", base.lower()).strip()
+
+
+def ranked(items: list[dict], limit: int | None = None) -> list[dict]:
+    """The headlines worth reading, best first: the noise dropped, one of each title (the most trusted
+    copy), the primary sources before the rest and, within a tier, the newest first."""
+    best: dict[str, dict] = {}
+    for item in items:
+        if not item.get("title") or tier(item) == TIER_NOISE:
+            continue
+        key = _title_key(item["title"])
+        if key not in best or tier(item) < tier(best[key]):
+            best[key] = item
+    newest = sorted(best.values(), key=lambda i: i.get("published") or "", reverse=True)
+    return sorted(newest, key=tier)[:limit or NEWS_LIMIT]
+
+
+def about(items: list[dict], *names: str | None) -> list[dict]:
+    """The headlines that name the asset: its ticker or a word of its name (a search engine also returns
+    what merely sits near the query: «RXO stock» brings a story about Lukoil)."""
+    words = {w for n in names if n for w in re.findall(r"[a-zа-я0-9]+", n.lower())
+             if len(w) >= 2 and w not in _NAME_FILLER}
+    if not words:
+        return items
+    pattern = re.compile(r"\b(" + "|".join(map(re.escape, sorted(words))) + r")\b")
+    return [i for i in items if pattern.search((i.get("title") or "").lower())]
+
+
+def _trusted_google_news(query: str) -> list[dict]:
+    """Google News restricted to the trusted desks and the press-release wires, the last 30 days."""
+    sites = " OR ".join(f"site:{s}" for s in TRUSTED_SITES)
+    items = _rss_items("https://news.google.com/rss/search", q=f"{query} ({sites}) when:30d", hl="en-US",
+                       gl="US", ceid="US:en")
+    for i in items:
+        i["publisher"] = i["publisher"] or "Google News"
+    return items[:NEWS_LIMIT]
+
+
+def _sec_8k_news(symbol: str, today: dt.date | None = None, session=None) -> list[dict]:
+    """The company's own 8-K filings of the last SEC_NEWS_DAYS days as headlines, «8-K: reported results of
+    operations; officer or director change» -- what it told the SEC itself. [] for a ticker with no CIK."""
+    global _CIK_MAP
+    import cik_map
+    import sec_edgar
+    _CIK_MAP = _CIK_MAP or cik_map.CikMap()
+    cik = _CIK_MAP.cik(symbol)
+    if not cik:
+        return []
+    number = str(cik).lstrip("0") or "0"
+    resp = (session or sec_edgar.new_session()).get(sec_edgar.SUBMISSIONS_URL.format(cik=number), timeout=30)
+    resp.raise_for_status()
+    recent = resp.json().get("filings", {}).get("recent", {})
+    since = ((today or dt.date.today()) - dt.timedelta(days=SEC_NEWS_DAYS)).isoformat()
+    out = []
+    for form, day, items, acc in zip(recent.get("form", []), recent.get("filingDate", []),
+                                     recent.get("items", []), recent.get("accessionNumber", [])):
+        if form != "8-K" or day < since:
+            continue
+        said = [SEC_8K_ITEMS[i] for i in (x.strip() for x in (items or "").split(",")) if i in SEC_8K_ITEMS]
+        if said:
+            out.append({"title": "8-K: " + "; ".join(said), "publisher": "SEC (8-K)", "published": day,
+                        "url": f"https://www.sec.gov/Archives/edgar/data/{number}/{acc.replace('-', '')}/"})
+    return out[:NEWS_LIMIT]
+
+
 def news(asset, name: str | None = None):
+    """(the headlines on an asset, where they came from), the most trusted first (ranked): a US company's
+    own 8-K filings, the trusted desks and press-release wires, Yahoo's feed, a coin's trade press -- every
+    source is asked, a failing one is skipped -- and the general news search only when those gave fewer
+    than MIN_TRUSTED. (None, None) with nothing, or for an asset with no listing."""
     if asset.is_isin or not asset.yahoo:
         return None, None
-    query = f"{name or asset.symbol} {'crypto' if asset.kind == 'crypto' else 'stock'}"
-    attempts = [("Yahoo", lambda: _yahoo_news(asset.yahoo)),
-                ("Google News", lambda: _google_news(query))]
-    if asset.kind == "crypto":
+    crypto_asset = asset.kind == "crypto"
+    query = f"{name or asset.symbol} {'crypto' if crypto_asset else 'stock'}"
+    attempts = []
+    if not crypto_asset and "." not in asset.symbol:
+        attempts.append((SEC_LABEL, lambda: _sec_8k_news(asset.symbol)))
+    attempts += [(TRUSTED_LABEL, lambda: about(_trusted_google_news(query), name, asset.symbol)),
+                 ("Yahoo", lambda: _yahoo_news(asset.yahoo))]
+    if crypto_asset:
         attempts.append(("CoinDesk/Cointelegraph", lambda: _crypto_feed_news(asset.symbol, name)))
-    return first_available(attempts)
+    found, used = _gather(attempts)
+    if len(ranked(found)) < MIN_TRUSTED:
+        more, more_used = _gather([("Google News", lambda: about(_google_news(query), name, asset.symbol))])
+        found, used = found + more, used + more_used
+    best = ranked(found)
+    return (best, ", ".join(used)) if best else (None, None)
+
+
+def _gather(attempts: list[tuple[str, Callable]]) -> tuple[list[dict], list[str]]:
+    """(the items of every source that answered, the names of those that gave any)."""
+    found, used = [], []
+    for label, fetch in attempts:
+        try:
+            items = fetch() or []
+        except Exception as e:
+            print(f"[sources] {label} недоступен: {type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
+            continue
+        if items:
+            found += items
+            used.append(label)
+    return found, used

@@ -1154,16 +1154,28 @@ def test_the_analyst_uses_the_one_venue_split_the_bot_uses():
 def test_news_prints_dated_headlines(monkeypatch):
     items = [{"title": f"Заголовок {i}", "publisher": "Reuters", "published": f"2026-09-{i + 1:02d}",
               "url": "u"} for i in range(12)]
+    monkeypatch.setattr(analyst.sources, "_trusted_google_news", lambda q: [])
     monkeypatch.setattr(analyst.sources, "_google_news", lambda q: items)
     lines = analyst.news("NVDA stock").splitlines()
     assert len(lines) == 10
-    assert lines[0] == "01.09 · Reuters · Заголовок 0"
+    assert lines[0] == "12.09 · Reuters · Заголовок 11"                 # the newest first
+
+
+def test_news_puts_the_trusted_desks_first_and_leaves_the_noise_out(monkeypatch):
+    general = [{"title": "Why RXO Stock Is Soaring Today", "publisher": "The Motley Fool", "published": "2026-10-09"},
+               {"title": "RXO deal draws scrutiny", "publisher": "Trade Weekly", "published": "2026-10-09"}]
+    trusted = [{"title": "C.H. Robinson to buy RXO - Reuters", "publisher": "Reuters", "published": "2026-10-01"}]
+    monkeypatch.setattr(analyst.sources, "_trusted_google_news", lambda q: trusted)
+    monkeypatch.setattr(analyst.sources, "_google_news", lambda q: general)
+    assert analyst.news("RXO stock").splitlines() == ["01.10 · Reuters · C.H. Robinson to buy RXO - Reuters",
+                                                      "09.10 · Trade Weekly · RXO deal draws scrutiny"]
 
 
 def test_news_failure_and_empty(monkeypatch):
     def boom(q):
         raise RuntimeError("offline")
 
+    monkeypatch.setattr(analyst.sources, "_trusted_google_news", boom)
     monkeypatch.setattr(analyst.sources, "_google_news", boom)
     assert analyst.news("x") == "новости недоступны"
     monkeypatch.setattr(analyst.sources, "_google_news", lambda q: [])

@@ -813,10 +813,17 @@ def portfolio(conn, *, scored=None) -> str:
 
 
 def news(query: str) -> str:
-    """Up to 10 Google News headlines as «DD.MM · publisher · title»."""
-    try:
-        items = sources._google_news(query)[:NEWS_MAX]
-    except Exception:
+    """Up to 10 headlines as «DD.MM · publisher · title», the trusted desks and press-release wires first
+    (sources.ranked): Google News restricted to them, then the general search; the noise sites are left
+    out."""
+    found = []
+    for fetch in (sources._trusted_google_news, sources._google_news):
+        try:
+            found += fetch(query)
+        except Exception:
+            continue
+    items = sources.ranked(found, NEWS_MAX)
+    if not items:
         return "новости недоступны"
     lines = []
     for i in items:

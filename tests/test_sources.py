@@ -439,3 +439,124 @@ def test_stock_universe_symbols(monkeypatch):
 ])
 def test_source_note(used, empty, note):
     assert sources.source_note("цены", used, "Yahoo", empty=empty) == note
+
+
+# ------------------------------------------------------------------ whom to believe
+@pytest.mark.parametrize("item, expected", [
+    ({"title": "x", "publisher": "Reuters"}, sources.TIER_PRIMARY),
+    ({"title": "x", "publisher": "SEC (8-K)"}, sources.TIER_PRIMARY),
+    ({"title": "x", "publisher": "?", "url": "https://www.businesswire.com/news/1"}, sources.TIER_PRIMARY),
+    ({"title": "Nvidia beats estimates - The Wall Street Journal", "publisher": "Google News"}, sources.TIER_PRIMARY),
+    ({"title": "x", "publisher": "Trade Weekly"}, sources.TIER_OTHER),
+    ({"title": "x", "publisher": "Yahoo Finance"}, sources.TIER_OTHER),
+    ({"title": "x", "publisher": "The Motley Fool"}, sources.TIER_NOISE),
+    ({"title": "Why NVDA is falling - Zacks", "publisher": "Google News"}, sources.TIER_NOISE),
+    ({"title": "x", "publisher": "?", "url": "https://www.benzinga.com/a"}, sources.TIER_NOISE)])
+def test_a_headline_is_as_good_as_who_wrote_it(item, expected):
+    assert sources.tier(item) == expected
+
+
+def test_ranked_drops_the_noise_keeps_one_of_each_title_and_puts_the_primary_first():
+    items = [{"title": "Deal talk", "publisher": "Trade Weekly", "published": "2026-10-09"},
+             {"title": "Stock soars!", "publisher": "Zacks", "published": "2026-10-09"},
+             {"title": "RXO to be acquired - Reuters", "publisher": "Google News", "published": "2026-10-01"},
+             {"title": "RXO to be acquired", "publisher": "Yahoo Finance", "published": "2026-10-02"},
+             {"title": "8-K: reported results of operations", "publisher": "SEC (8-K)", "published": "2026-10-05"},
+             {"title": "", "publisher": "Reuters"}]
+    got = sources.ranked(items)
+    assert [i["publisher"] for i in got] == ["SEC (8-K)", "Google News", "Trade Weekly"]
+    assert sources.ranked(items, 1)[0]["publisher"] == "SEC (8-K)"
+
+
+class _JsonResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def test_the_companys_own_8k_filings_become_headlines(monkeypatch):
+    import datetime as dt
+    recent = {"form": ["8-K", "4", "8-K", "8-K", "8-K"],
+              "filingDate": ["2026-10-05", "2026-10-04", "2026-10-01", "2026-09-20", "2026-07-01"],
+              "items": ["2.02,9.01", "", "4.02,5.02", "9.01", "1.03"],
+              "accessionNumber": ["0001-26-000001", "0001-26-000002", "0001-26-000003", "0001-26-000004", "0001-26-000005"]}
+
+    class Session:
+        def get(self, url, timeout):
+            assert url.endswith("CIK0000001234.json")
+            return _JsonResp({"filings": {"recent": recent}})
+    monkeypatch.setattr(sources, "_CIK_MAP", type("M", (), {"cik": lambda self, t: {"AAA": "1234"}.get(t)})())
+    items = sources._sec_8k_news("AAA", dt.date(2026, 10, 9), Session())
+    assert [(i["published"], i["title"]) for i in items] == [
+        ("2026-10-05", "8-K: reported results of operations"),
+        ("2026-10-01", "8-K: restatement: earlier financial statements not to be relied on; officer or director change")]
+    assert items[0]["publisher"] == "SEC (8-K)" and items[0]["url"].endswith("/data/1234/000126000001/")
+    assert sources._sec_8k_news("NOPE", dt.date(2026, 10, 9), Session()) == []
+    # the wording of a restatement, a delisting and a bankruptcy is what the score blocks a buy on
+    import model_score
+    for item in ("4.02", "3.01", "1.03"):
+        assert model_score.news_part([{"title": "8-K: " + sources.SEC_8K_ITEMS[item]}])[1] is not None
+    for item in ("2.02", "5.02", "3.02", "1.01"):
+        assert model_score.news_part([{"title": "8-K: " + sources.SEC_8K_ITEMS[item]}])[1] is None
+
+
+def test_news_asks_every_trusted_source_and_the_general_search_only_when_they_gave_little(monkeypatch):
+    asked = []
+
+    def source(name, items):
+        return lambda *a: asked.append(name) or items
+    reuters = [{"title": f"NVDA R{i}", "publisher": "Reuters", "published": f"2026-10-0{i + 1}"} for i in range(3)]
+    monkeypatch.setattr(sources, "_sec_8k_news", source("sec", [{"title": "8-K: other material event",
+                                                                 "publisher": "SEC (8-K)", "published": "2026-10-08"}]))
+    monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", reuters))
+    monkeypatch.setattr(sources, "_yahoo_news", source("yahoo", [{"title": "Hot stock!", "publisher": "Zacks"}]))
+    monkeypatch.setattr(sources, "_google_news", source("general", [{"title": "NVDA G", "publisher": "Blog"}]))
+    items, used = sources.news(NVDA)
+    assert asked == ["sec", "trusted", "yahoo"]                               # enough: no general search
+    assert [i["title"] for i in items] == ["8-K: other material event", "NVDA R2", "NVDA R1", "NVDA R0"]
+    assert used == f"{sources.SEC_LABEL}, {sources.TRUSTED_LABEL}, Yahoo"
+
+    asked.clear()
+    monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", []))
+    items, used = sources.news(NVDA)
+    assert asked == ["sec", "trusted", "yahoo", "general"] and [i["title"] for i in items][-1] == "NVDA G"
+    assert "Google News" in used
+
+
+def test_a_coin_is_not_asked_at_the_sec(monkeypatch):
+    asked = []
+    monkeypatch.setattr(sources, "_sec_8k_news", lambda *a: asked.append("sec") or [])
+    for name in ("_trusted_google_news", "_yahoo_news", "_google_news"):
+        monkeypatch.setattr(sources, name, lambda *a: [])
+    monkeypatch.setattr(sources, "_crypto_feed_news", lambda s, n: [])
+    assert sources.news(BTC, "Bitcoin") == (None, None) and asked == []
+
+
+@pytest.mark.parametrize("title", [
+    "SSTI Stock Alert: Halper Sadeh LLC is Investigating Whether SoundThinking, Inc. is Obtaining a Fair Deal",
+    "$HAREHOLDER ALERT: The M&A Class Action Firm Announces An Investigation of SoundThinking, Inc.",
+    "SoundThinking Investor Alert: Kahn Swick & Foti, LLC Investigates Adequacy of Price and Process",
+    "Rosen Law Firm Reminds Investors of the Lead Plaintiff Deadline"])
+def test_a_law_firms_alert_is_noise_even_on_a_press_release_wire(title):
+    assert sources.tier({"title": title, "publisher": "Business Wire"}) == sources.TIER_NOISE
+
+
+def test_a_real_press_release_on_the_same_wire_is_primary():
+    assert sources.tier({"title": "SoundThinking to be Acquired by Transom Capital Group",
+                         "publisher": "GlobeNewswire"}) == sources.TIER_PRIMARY
+
+
+def test_about_keeps_the_headlines_that_name_the_asset():
+    items = [{"title": "C.H. Robinson to Buy RXO for About $5.8 Billion - WSJ"},
+             {"title": "Carlyle drops out of race for Lukoil international assets - Reuters"},
+             {"title": "SoundThinking to Be Taken Private - WSJ"}]
+    assert [i["title"][:12] for i in sources.about(items, "RXO Inc", "RXO")] == ["C.H. Robinso"]
+    assert len(sources.about(items, "SoundThinking, Inc.", "SSTI")) == 1
+    assert sources.about(items, None, "") == items                      # nothing to go by: all kept
+    assert sources.about(items, "The Company Inc") == items
+
