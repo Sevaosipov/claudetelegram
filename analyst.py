@@ -67,8 +67,16 @@ import telegram_notify
 BASE_DIR = Path(__file__).resolve().parent
 CLAUDE_BIN = Path.home() / ".local" / "bin" / "claude"
 TV_MCP_PATH = os.environ.get("TV_MCP_PATH") or str(Path.home() / "Tools" / "tradingview-mcp")
-# The only MCP server the headless Claude gets (with --strict-mcp-config).
-MCP_CONFIG_JSON = json.dumps({"mcpServers": {"tradingview": {"command": "node", "args": [TV_MCP_PATH]}}})
+# TradingView's own MCP server (market data: bars, indicator ratings, financials, forecasts, news) -- the
+# first choice: it needs no desktop app. The owner signs in to it once (`claude mcp login tv`); until then
+# its tools fail and the method falls back to the desktop chart.
+TV_OFFICIAL_NAME = "tv"
+TV_OFFICIAL_URL = os.environ.get("TV_OFFICIAL_MCP_URL") or "https://mcp.tradingview.com/mcp"
+# The only MCP servers the headless Claude gets (with --strict-mcp-config): TradingView's own, and the
+# local one that drives the owner's TradingView Desktop chart.
+MCP_CONFIG_JSON = json.dumps({"mcpServers": {
+    "tradingview": {"command": "node", "args": [TV_MCP_PATH]},
+    TV_OFFICIAL_NAME: {"type": "http", "url": TV_OFFICIAL_URL}}})
 
 # What Claude may call: the three read commands, run from BASE_DIR, and the TradingView tools that
 # read the chart, move it to an asset and back and look a symbol up. Nothing that edits
@@ -76,12 +84,20 @@ MCP_CONFIG_JSON = json.dumps({"mcpServers": {"tradingview": {"command": "node", 
 # the user's private scripts) -- see analyst_method.txt.
 TV_TOOLS = ("tv_health_check", "tv_launch", "chart_get_state", "chart_set_symbol",
             "chart_set_timeframe", "quote_get", "data_get_ohlcv", "symbol_info", "symbol_search")
+# ... and of TradingView's own server the tools that read market data. Nothing that touches the owner's
+# alerts, watchlists or documents.
+TV_DATA_TOOLS = ("mcp-tv-search-symbols", "mcp-tv-get-ohlcv", "mcp-tv-get-technicals-rating",
+                 "mcp-tv-get-symbol-data", "mcp-tv-get-symbol-data-batch", "mcp-tv-get-financials",
+                 "mcp-tv-get-financial-history", "mcp-tv-get-forecasts", "mcp-tv-get-news",
+                 "mcp-tv-get-news-story", "mcp-tv-get-earnings-calendar", "mcp-tv-get-dividends-calendar",
+                 "mcp-tv-get-economic-calendar")
 # Absolute: Claude runs in an empty folder outside the project (see _run_claude).
 ANALYST_CMD = f"{BASE_DIR}/.venv/bin/python {BASE_DIR}/analyst.py"
 ANALYST_CMD_PLACEHOLDER = "{ANALYST_CMD}"          # in the prompt files; build_prompt fills it in
 BASH_RULES = (f"Bash({ANALYST_CMD} context:*)", f"Bash({ANALYST_CMD} portfolio)",
               f"Bash({ANALYST_CMD} news:*)")
-ALLOWED_TOOLS = BASH_RULES + tuple(f"mcp__tradingview__{t}" for t in TV_TOOLS)
+ALLOWED_TOOLS = (BASH_RULES + tuple(f"mcp__tradingview__{t}" for t in TV_TOOLS)
+                 + tuple(f"mcp__{TV_OFFICIAL_NAME}__{t}" for t in TV_DATA_TOOLS))
 # launchd's PATH lacks these; the TradingView MCP server is started with `node` from one of them.
 EXTRA_PATH = ("/usr/local/bin", "/opt/homebrew/bin")
 CHILD_ENV = "DISCLOSURE_ANALYST_CHILD"
