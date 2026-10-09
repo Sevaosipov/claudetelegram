@@ -127,7 +127,10 @@ POSITIONS_USAGE = ("/bought TICKER [цена] — отметить покупк�
                    "/sold TICKER — отметить продажу\n"
                    "Просто /bought или /sold — бот спросит, что именно\n"
                    "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»\n"
-                   "/portfolio — ваши позиции, /crypto — ваши монеты")
+                   "Портфель — в приложении Trading 212: здесь его нет")
+PORTFOLIO_GONE = ("Портфель смотрите в приложении Trading 212 — здесь его больше нет. "
+                  "/bought и /sold остаются: по записанным позициям приходят сигналы на продажу.")
+_GONE_VIEWS = ("/portfolio", "/positions", "/crypto", "/coins")
 
 LOOKUP_HINT = ("Любой тикер или монета: NVDA, BTC, SOL, EQNR.OL, VOLV-B.ST. "
                "$BTC — акция с таким тикером, BTC-USD — монета.")
@@ -136,8 +139,7 @@ HELP_TEXT = ("Пришлите тикер (например, AAPL) — чере�
              "разбор: опинион, вход/цель, новости, итоговый вердикт.\n"
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
-             "/portfolio — ваш счёт Trading 212 и позиции /bought.\n"
-             "/crypto — ваши монеты: /bought BTC 80000 0.01, итог в долларах.\n"
+             "/bought и /sold — записать покупку и продажу вне Trading 212 (сам счёт бот видит).\n"
              "/cfd — CFD-сигналы по 13 монетам (эксперимент): открытые, итоги, настройки.\n"
              "/cfd plan XAUUSD buy 4461.80 stop 4449.10 — ваша CFD-сделка: 4 цели, риск и объём, "
              "сообщение на каждой цели и на стопе.\n"
@@ -207,19 +209,6 @@ def _position_listing(arg: str) -> tuple[str, str | None] | None:
     if ticker is None:
         return None
     return positions.split_venue(ticker) or (ticker, None)
-
-
-def _handle_my_portfolio(conn, coins: bool = False) -> None:
-    """/portfolio and /positions: «💼 Trading 212» -- the account, asked live (or what the last
-    sync stored, with why) -- then the positions recorded with /bought, each with how it stands
-    now, the coins among them only counted. /crypto (`coins`): those coins, with their totals."""
-    try:
-        text = (t212_account.crypto_text if coins else t212_account.portfolio_text)(conn, dt.date.today())
-        telegram_notify.send_text(text)
-    except Exception as e:
-        print(f"[telegram_bot] /portfolio failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось собрать список позиций ({type(e).__name__}). "
-                                  "Попробуйте позже.")
 
 
 def _handle_size_command(conn, text: str) -> bool:
@@ -418,33 +407,30 @@ def _normalise_trade_text(text: str) -> tuple[str, str | None, str | None] | Non
 
 
 def _handle_positions_command(conn, text: str) -> bool:
-    """/portfolio (/positions too), /bought, /sold -- the positions that positions.py tracks for
-    close alerts. Returns False for anything else. A buy or a sale may be typed loosely
+    """/bought and /sold -- the positions that positions.py tracks for close alerts (the views
+    /portfolio and /crypto are gone: the user reads the portfolio in the Trading 212 app, and the
+    commands say so). Returns False for anything else. A buy or a sale may be typed loosely
     (_normalise_trade_text): /buy, /sell, without the slash, with a currency sign on the price."""
     text = _complete_pending(text) or text
     text, qty_token = _split_quantity(text)
     parts = text.split()
     cmd = parts[0].lower().split("@")[0] if parts else ""
-    if cmd not in ("/portfolio", "/positions", "/crypto", "/coins"):
-        trade = _normalise_trade_text(text)
-        if trade is None:
-            return False
-        cmd, ticker_text, price_text = trade
-        if cmd == "?":
-            _set_pending("which", ticker_text, price_text)
-            telegram_notify.send_text(BUY_OR_SELL_HINT.format(
-                t=telegram_notify._esc(ticker_text.upper()), p=telegram_notify._esc(price_text)))
-            return True
-        if ticker_text is None:                 # a bare /bought or /sold: a tap on the command
-            _ask_what(conn, cmd)
-            return True
-        parts = [cmd] + [x for x in (ticker_text, price_text) if x]
-    if cmd in ("/portfolio", "/positions"):
-        _handle_my_portfolio(conn)
+    if cmd in _GONE_VIEWS:
+        telegram_notify.send_text(PORTFOLIO_GONE)
         return True
-    if cmd in ("/crypto", "/coins"):
-        _handle_my_portfolio(conn, coins=True)
+    trade = _normalise_trade_text(text)
+    if trade is None:
+        return False
+    cmd, ticker_text, price_text = trade
+    if cmd == "?":
+        _set_pending("which", ticker_text, price_text)
+        telegram_notify.send_text(BUY_OR_SELL_HINT.format(
+            t=telegram_notify._esc(ticker_text.upper()), p=telegram_notify._esc(price_text)))
         return True
+    if ticker_text is None:                 # a bare /bought or /sold: a tap on the command
+        _ask_what(conn, cmd)
+        return True
+    parts = [cmd] + [x for x in (ticker_text, price_text) if x]
     if cmd not in ("/bought", "/sold"):
         return False
     listing = _position_listing(parts[1]) if len(parts) > 1 else None
@@ -674,7 +660,7 @@ def _handle_ticker(conn, asset) -> None:
 
 
 def _handle_message(conn, text: str) -> None:
-    """Routing: the positions commands (/portfolio, /positions, /bought, /sold), /backtest, /ask,
+    """Routing: the positions commands (/bought, /sold), /backtest, /ask,
     any other /command (help, /model included); then a single token that is an asset with a price --
     the ticker analysis; anything else -- a question for the analyst."""
     text = (text or "").strip()

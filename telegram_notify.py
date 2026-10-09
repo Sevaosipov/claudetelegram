@@ -1070,7 +1070,6 @@ def format_my_portfolio(rows: list, *, html: bool = True, t212=None) -> str:
 # ---- /crypto: the coins the user recorded with /bought, apart from the stocks of /portfolio
 _CRYPTO_HEADER = "🪙 Крипто-портфель"
 NO_COINS = "Монет пока нет. Запишите покупку: /bought BTC 80000 0.01 (цена и сколько купили)."
-COINS_FOOTER = "🪙 Монеты ({n}) — /crypto"
 
 
 def format_crypto_portfolio(rows: list, *, html: bool = True) -> str:

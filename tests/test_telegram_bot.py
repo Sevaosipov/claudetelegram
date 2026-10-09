@@ -13,6 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import datetime as dt
+
+import t212_account
 import telegram_bot as tb
 
 REAL_POPEN = subprocess.Popen
@@ -35,6 +38,12 @@ def _offline_lookup(monkeypatch):
     monkeypatch.setattr(sources, "cached_coin_symbols", lambda conn: {"BTC", "ETH", "SOL"})
     monkeypatch.setattr(sources, "stock_universe_symbols", lambda: set())
     monkeypatch.setattr(sources, "current_price", lambda asset: (100.0, "Yahoo"))
+
+
+def _show_portfolio(conn, replies):
+    """The portfolio text (the terminal menu's: Telegram has no portfolio view), put where a test reads
+    the bot's replies."""
+    replies.append(t212_account.portfolio_text(conn, dt.date.today()))
 
 
 @pytest.fixture
@@ -263,7 +272,7 @@ def test_sold_closes_and_unknown_sold_says_so(conn, replies):
 def test_positions_lists_open_positions(conn, replies, monkeypatch):
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
     tb._handle_message(conn, "/bought GRAB 40")
-    tb._handle_message(conn, "/positions")
+    _show_portfolio(conn, replies)
     assert "GRAB" in replies[-1] and "+25,0%" in replies[-1]
 
 
@@ -467,7 +476,7 @@ def test_portfolio_shows_an_oslo_position_at_its_oslo_price(conn, monkeypatch):
     monkeypatch.setattr(positions, "_yahoo_close", lambda symbol: prices.get(symbol))
     tb._handle_message(conn, "/bought EQNR.OL 250")
     out.clear()
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, out)
     assert "• EQNR: вход 250,00 (" in out[0] and "сейчас 270,00 (+8,0%)" in out[0]
 
 
@@ -679,7 +688,7 @@ def test_portfolio_shows_your_own_positions_with_their_status(conn, replies, mon
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: 50.0)
     tb._handle_message(conn, "/bought GRAB 40")
     replies.clear()
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, replies)
     [text] = replies
     # «💼 Trading 212» comes first (no key here: see the Trading 212 tests below), then what was /bought
     assert "\n\n<b>✍️ Вне Trading 212</b>\n\n• GRAB: вход 40,00 (" in text
@@ -696,7 +705,7 @@ def test_a_price_at_the_peak_can_fall_by_the_stop_before_it_fires(conn, replies,
     monkeypatch.setattr(prices, "_closes", _august_closes)
     tb._handle_message(conn, "/bought NVDA 180")
     replies.clear()
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, replies)
     assert "   стоп 162,00 (−10% от максимума 180,00), до стопа 10,0%" in replies[0]
 
 
@@ -708,9 +717,8 @@ def test_portfolio_and_positions_send_format_my_portfolio_of_the_rows(conn, sent
     monkeypatch.setattr("positions.position_status", lambda pos, today, **kw: dict(status, d=pos.ticker))
     monkeypatch.setattr("telegram_notify.format_my_portfolio", lambda rows, **kw: seen.append(rows) or "MINE")
     positions.open_position(conn, "GRAB", 18.0, today=dt.date.today(), closes_fn=lambda t, s=None: [])
-    for text in ("/portfolio", "/positions", "/Portfolio@my_bot"):
-        tb._handle_message(conn, text)
-    assert sent == ["MINE"] * 3
+    _show_portfolio(conn, sent)
+    assert sent == ["MINE"]
     [(pos, st)] = seen[0]
     assert (pos.ticker, st) == ("GRAB", {"last": 1.0, "d": "GRAB"})
 
@@ -725,24 +733,24 @@ def test_portfolio_has_no_model_line_even_when_the_old_virtual_books_hold_the_na
     conn.commit()
     tb._handle_message(conn, "/bought GRAB 40")
     replies.clear()
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, replies)
     [text] = replies
     assert "• GRAB: вход 40,00" in text and "модел" not in text.lower()
 
 
 def test_portfolio_with_nothing_bought_says_how_to_add_one(conn, sent, monkeypatch):
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, sent)
     [text] = sent
     assert text.endswith("\n\nВаших позиций нет. Купили? /bought TICKER [цена] — например /bought GME 23.10.")
     assert text.startswith("<b>💼 Trading 212</b>\n")              # and why it shows no account: no key
 
 
-def test_portfolio_failure_is_a_reply_not_a_crash(conn, sent, monkeypatch):
-    def boom(*a, **k):
-        raise ValueError("bad row")
-    monkeypatch.setattr("positions.portfolio_rows", boom)
-    tb._handle_message(conn, "/portfolio")
-    assert len(sent) == 1 and "ValueError" in sent[0]
+@pytest.mark.parametrize("text", ["/portfolio", "/positions", "/crypto", "/coins", "/Portfolio@my_bot"])
+def test_telegram_has_no_portfolio_view_and_says_where_it_is(conn, sent, analysis, text):
+    """The user reads the portfolio in the Trading 212 app: the old commands answer with one line."""
+    tb._handle_message(conn, text)
+    assert sent == [tb.PORTFOLIO_GONE] and analysis.labels == []
+    assert not hasattr(tb, "_handle_my_portfolio")
 
 
 @pytest.mark.parametrize("text", ["/start", "/help", "/whatever", "", "   ", "/HELP@my_bot"])
@@ -755,7 +763,7 @@ def test_help_for_start_help_unknown_commands_and_empty(conn, analysis, sent, te
 def test_help_text_lists_questions_and_the_portfolio():
     assert "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком TradingView " \
            "и данными бота." in tb.HELP_TEXT
-    assert "/portfolio — ваш счёт Trading 212 и позиции /bought." in tb.HELP_TEXT.splitlines()
+    assert "/portfolio" not in tb.HELP_TEXT and "/crypto" not in tb.HELP_TEXT
     assert "/backtest" in tb.HELP_TEXT and "/bought" in tb.HELP_TEXT
 
 
@@ -777,7 +785,7 @@ def test_the_positions_usage_says_how_to_record_a_buy_and_a_sale():
         "/sold TICKER — отметить продажу",
         "Просто /bought или /sold — бот спросит, что именно",
         "Можно и так: /buy XRP 1.37, /sell XRP, «купил XRP €1,37», «продал XRP»",
-        "/portfolio — ваши позиции, /crypto — ваши монеты"]
+        "Портфель — в приложении Trading 212: здесь его нет"]
     assert tb.POSITIONS_USAGE in tb.HELP_TEXT
 
 
@@ -796,8 +804,8 @@ def test_the_positions_commands_and_backtest_come_first(conn, analysis, sent, mo
     monkeypatch.setattr(backtest, "backtest_ticker", lambda conn, t: {"n_purchases": 0, "ticker": t})
     monkeypatch.setattr("telegram_notify.format_ticker_backtest", lambda r: f"BT {r['ticker']}")
     tb._handle_message(conn, "/backtest aapl")
-    tb._handle_message(conn, "/positions")
-    assert sent[0] == "BT AAPL" and analysis.labels == []
+    tb._handle_message(conn, "/bought")
+    assert sent == ["BT AAPL", tb.ASK_BOUGHT] and analysis.labels == []
 
 
 # ------------------------------------------------------------------ Trading 212
@@ -906,7 +914,7 @@ def test_portfolio_asks_trading_212_live_and_shows_the_account_then_the_rest(con
     _t212_synced(conn, _t212_holding(current_price=23.0))
     _t212_account(monkeypatch, _t212_holding())                     # now it is 24,05
     replies.clear()
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, replies)
     [text] = replies
     blocks = text.split("\n\n")
     assert blocks[0] == "<b>💼 Trading 212</b>\n" + _T212_SUMMARY_LINE
@@ -928,7 +936,7 @@ def test_portfolio_shows_the_stored_holdings_when_trading_212_does_not_answer(co
     import t212_account as ta
     _t212_synced(conn, _t212_holding(), at=dt.datetime.now().replace(hour=14, minute=5, second=0))
     _t212_account(monkeypatch, error=ta.T212Error("ReadTimeout", "network"))
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, replies)
     [text] = replies
     head, block = text.split("\n\n")[:2]
     assert head == ("<b>💼 Trading 212</b>\n"
@@ -940,14 +948,14 @@ def test_portfolio_shows_the_stored_holdings_when_trading_212_does_not_answer(co
 
 
 def test_portfolio_with_no_key_says_so_and_how_to_get_one(conn, replies):
-    tb._handle_message(conn, "/portfolio")                          # no key in the tests
+    _show_portfolio(conn, replies)                          # no key in the tests
     assert replies[0].split("\n\n")[0] == "<b>💼 Trading 212</b>\n⚠️ Ключ Trading 212 не задан\n" + _KEY_HINT
 
 
 def test_portfolio_with_a_key_that_lacks_the_rights_says_so_and_how_to_get_one(conn, replies, monkeypatch):
     import t212_account as ta
     _t212_account(monkeypatch, error=ta.T212Error(ta.NO_RIGHTS, "forbidden"))
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, replies)
     assert replies[0].split("\n\n")[0] == (
         "<b>💼 Trading 212</b>\n⚠️ Ключу Trading 212 не хватает прав: нужны чтение портфеля и счёта\n"
         + _KEY_HINT)
@@ -956,7 +964,7 @@ def test_portfolio_with_a_key_that_lacks_the_rights_says_so_and_how_to_get_one(c
 def test_a_trading_212_holding_is_not_listed_again_outside_trading_212(conn, replies, monkeypatch):
     _t212_synced(conn, _t212_holding())
     _t212_account(monkeypatch, _t212_holding())
-    tb._handle_message(conn, "/portfolio")
+    _show_portfolio(conn, replies)
     assert replies[0].count("GME") == 1 and "Вне Trading 212" not in replies[0]
     assert "• GME — 10 шт." in replies[0]
 
@@ -1528,7 +1536,7 @@ def test_crypto_shows_the_coins_with_their_totals_and_portfolio_only_counts_them
     tb._handle_message(conn, "/bought NVDA 180 2")
     prices = {"CRYPTO:XRP": 1.5, "CRYPTO:SOL": None, "NVDA": 198.0}
     monkeypatch.setattr("positions.last_close", lambda ticker, source=None: prices[ticker])
-    tb._handle_message(conn, "/crypto")
+    replies.append(t212_account.crypto_text(conn, dt.date.today()))
     text = replies[-1]
     assert text.startswith("<b>🪙 Крипто-портфель — 2 монеты</b>\n"
                            "Вложено $125,00 · сейчас $150,00 · P/L +$25,00 (+20,0%) — по 1 из 2: "
@@ -1536,17 +1544,18 @@ def test_crypto_shows_the_coins_with_their_totals_and_portfolio_only_counts_them
                            "Ваш результат: неделя +$25,00 (+20,0%) · месяц +$25,00 (+20,0%) · "
                            "год +$25,00 (+20,0%)\n\n• XRP: 100 шт., вход 1,25")
     assert "• SOL: вход 150,00" in text and "NVDA" not in text
-    tb._handle_message(conn, "/portfolio")
-    assert "NVDA" in replies[-1] and "XRP" not in replies[-1] and replies[-1].endswith("\n🪙 Монеты (2) — /crypto")
+    _show_portfolio(conn, replies)
+    stocks, coins = replies[-1].split("\n\n<b>🪙 Крипто-портфель")       # the menu's text: stocks, then coins
+    assert "NVDA" in stocks and "XRP" not in stocks and "XRP" in coins and "NVDA" not in coins
 
 
 def test_crypto_with_no_coins_says_how_to_record_one(conn, replies):
     import telegram_notify as tn
     tb._handle_message(conn, "/bought NVDA 180")
-    tb._handle_message(conn, "/crypto")
+    replies.append(t212_account.crypto_text(conn, dt.date.today()))
     assert replies[-1] == f"<b>🪙 Крипто-портфель</b>\n\n{tn.NO_COINS}"
-    tb._handle_message(conn, "/portfolio")
-    assert "/crypto" not in replies[-1]
+    _show_portfolio(conn, replies)
+    assert "Крипто-портфель" not in replies[-1]
 
 
 def test_buying_more_of_a_recorded_coin_averages_the_entry(conn, replies):

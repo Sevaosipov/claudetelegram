@@ -1181,21 +1181,22 @@ def portfolio_view(conn, today: dt.date, *, fetch=None, now: dt.datetime | None 
 
 
 def portfolio_text(conn, today: dt.date, *, html: bool = True) -> str:
-    """What /portfolio says, and the menu's «Мой портфель»: «💼 Trading 212» -- the account, asked live
+    """The terminal menu's «Мой портфель» (Telegram has no portfolio view: the user reads it in the
+    Trading 212 app): «💼 Trading 212» -- the account, asked live
     (portfolio_view; or what the last sync stored, with why) -- then the positions recorded with /bought
     (positions.portfolio_rows), as telegram_notify.format_my_portfolio writes them. Plain text with
-    html=False. The coins among them are counted in a last line and shown by /crypto (crypto_text). The
+    html=False. The coins among them follow as a portfolio of their own (crypto_text). The
     bot holds no portfolio of its own: this is the whole of it."""
     view = portfolio_view(conn, today)
     rows = positions.portfolio_rows(conn, today, origin=positions.MANUAL)
     coins = sum(1 for pos, _ in rows if crypto.is_crypto(pos.ticker))
     text = telegram_notify.format_my_portfolio([r for r in rows if not crypto.is_crypto(r[0].ticker)],
                                                html=html, t212=view)
-    return f"{text}\n{telegram_notify.COINS_FOOTER.format(n=coins)}" if coins else text
+    return f"{text}\n\n{crypto_text(conn, today, html=html)}" if coins else text
 
 
 def crypto_text(conn, today: dt.date, *, html: bool = True) -> str:
-    """What /crypto says: the coins recorded with /bought, apart from the stocks of /portfolio
+    """The coins recorded with /bought, apart from the stocks, with their totals
     (telegram_notify.format_crypto_portfolio)."""
     rows = positions.portfolio_rows(conn, today, origin=positions.MANUAL)
     return telegram_notify.format_crypto_portfolio([r for r in rows if crypto.is_crypto(r[0].ticker)],
