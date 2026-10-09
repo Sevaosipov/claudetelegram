@@ -332,10 +332,10 @@ def test_no_new_trade_after_thirteen_weeks_and_the_final_board_once(conn):
     late = MON + dt.timedelta(weeks=13)
     sent.clear()
     _run(conn, late, sent, {"EURUSD=X": eurusd(upto=late)}, yields=lambda today: _yields(+0.12))
-    assert league.live_trades(conn) == [] and any("итог 13 недель" in s for s in sent)
+    assert league.live_trades(conn) == [] and any("League final" in s for s in sent)
     again = []
     _run(conn, late + dt.timedelta(days=1), again, {"EURUSD=X": eurusd(upto=late + dt.timedelta(days=1))})
-    assert not any("итог 13 недель" in s for s in again)
+    assert not any("League final" in s for s in again)
 
 
 def test_the_months_board_goes_out_at_the_first_run_of_the_next_month_once(conn):
@@ -344,7 +344,7 @@ def test_the_months_board_goes_out_at_the_first_run_of_the_next_month_once(conn)
     assert sent == []                                                              # September is before the start
     nov = dt.date(2026, 11, 2)
     _run(conn, nov, sent, {})
-    assert len(sent) == 1 and "итог месяца 10.2026" in sent[0]
+    assert len(sent) == 1 and "League 10.2026" in sent[0]
     _run(conn, nov + dt.timedelta(days=1), sent, {})
     assert len(sent) == 1
 
@@ -368,11 +368,17 @@ def test_the_scoreboard_adds_up_each_idea_by_month_and_gives_the_verdict(conn):
     assert (rate.closed, rate.net, rate.months_up, rate.qualifies) == (8, 4.0, 3, True)
     assert (cmd.closed, cmd.net, cmd.qualifies) == (1, -1.0, False)
     text = tn.format_league_board(board, final=True, html=False)
-    assert "• Ставки: с начала +4,00R по 8 сделкам; с целями +4,00R — проходит" in text
-    assert "• Сырьё: с начала −1,00R по 1 сделке; с целями −1,00R — не проходит" in text
-    assert "Всего с начала: +3,00R; с целями +3,00R" in text and "по основному варианту" in text
-    month = tn.format_league_board(board, month=(2026, 10), html=False)
-    assert "• Ставки: за месяц +1,50R, с начала +4,00R по 8 сделкам" in month and "Всего за месяц: +0,50R." in month
+    assert text.splitlines() == [
+        "League final 12.10-11.01",
+        "                 R   TP-R  Cl Op",
+        "Speculators  +0.00  +0.00   0  0 fail",
+        "Rates        +4.00  +4.00   8  0 pass",
+        "Commodities  -1.00  -1.00   1  0 fail",
+        "Month-end    +0.00  +0.00   0  0 fail",
+        "Total        +3.00  +3.00   9  0"]
+    month = tn.format_league_board(board, month=(2026, 10), html=False).splitlines()
+    assert month[0] == "League 10.2026 12.10-11.01" and month[3] == "Rates        +1.50  +4.00   8  0"
+    assert month[6:] == ["Total        +0.50  +3.00   9  0", "Since start +3.00R"]
     conn.execute("UPDATE league_trades SET result2_r = 0.1 WHERE idea = 'RATE-MOM'")
     conn.commit()
     assert league.scoreboard(conn, dt.date(2027, 1, 12)).scores[1].net2 == pytest.approx(0.8)
@@ -393,9 +399,10 @@ def test_league_in_telegram_shows_the_board_with_the_open_trades_and_the_euros(c
     _closed(conn, "CMD-LEAD", 1.5, "2026-10-12", "c")
     tb._handle_message(conn, "/league")
     text = sent[-1]
-    assert text.startswith("<b>Бумажная лига форекс-идей</b>\n") and "• Сырьё: с начала +1,50R (+€15,00) по 1 сделке" in text
-    assert ("Открытые:\n🟢 EURUSD — покупка по 1,00000, стоп 0,96000, TP1 1,04000 · TP2 1,08000 · TP3 1,12000 · "
-            "TP4 1,16000; «Ставки»") in text
+    assert text.startswith("<pre>League 12.10-11.01\n") and text.endswith("</pre>")
+    assert "\nCommodities  +1.50  +1.50   1  0\n" in text and "\n1R = €10.00\n" in text
+    assert text.endswith("\n\nEURUSD Long\n1.00000  SL 0.96000  TP1 1.04000</pre>")
+    assert "идея" not in text and "•" not in text
     tb._handle_message(conn, "/league what")
     assert sent[-1] == league.USAGE
     tb._handle_message(conn, "/league off")
@@ -414,4 +421,16 @@ def test_the_days_openings_are_one_message_a_block_each_and_the_yen_has_three_de
     assert sent == ["<pre>EURUSD Long · CFD test\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\nTP3   1.12000\n"
                     "TP4   1.16000\n\nUSDJPY Short · CFD test\nEntry 150.000\nStop  154.000\nTP1   146.000\nTP2   142.000\n"
                     "TP3   138.000\nTP4   134.000</pre>"]
+
+
+def test_the_board_names_the_next_target_and_a_trade_not_yet_entered(conn):
+    feed = league.Feed(MON, fetch_of({"EURUSD=X": eurusd()}))
+    waiting = league.make(conn, signal(), feed)
+    board = league.scoreboard(conn, MON)
+    assert tn.format_league_board(board, html=False).endswith("\n\nEURUSD Long\nEntry at next open")
+    league.advance(waiting, feed.bars(waiting.symbol), feed.forming(waiting.symbol), MON)
+    waiting.checkpoint = 2
+    league._save(conn, waiting)
+    assert tn.format_league_board(league.scoreboard(conn, MON), html=False).endswith(
+        "\n\nEURUSD Long\n1.00000  SL 0.96000  TP3 1.12000")
 

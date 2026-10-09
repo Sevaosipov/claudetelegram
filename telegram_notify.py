@@ -1349,26 +1349,6 @@ def format_cfd_plans(open_plans: list, closed_plans: list, *, html: bool = True)
 
 
 # ------------------------------------------------------------------ the forex paper league (cfd/league.py)
-LEAGUE_HEADER = "Бумажная лига форекс-идей"
-
-
-def _league_price(t, x: float) -> str:
-    return _plan_price(t, x)
-
-
-def _league_exit(t) -> str:
-    kind, _, value = t.exit_after.partition(":")
-    if kind == "bars":
-        return f"выход через {value} торг. дн."
-    return f"выход {dt.date.fromisoformat(value):%d.%m}"
-
-
-def _league_levels(t, first: int = 1) -> str:
-    from cfd import league
-    return " · ".join(f"TP{k} {_league_price(t, league.level(t, k))}"
-                      for k in range(first, league.CHECKPOINTS + 1))
-
-
 def _league_plain(t, x: float) -> str:
     """A price as a trading terminal writes it: a point, no spaces; five decimals for an FX pair, three with
     the yen."""
@@ -1407,67 +1387,58 @@ def format_league_event(t, event: str, *, html: bool = True) -> str:
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
-def _league_money(board, r: float) -> str:
-    return f" ({money_cents(r * board.balance_risk_eur)})" if board.balance_risk_eur else ""
+LEAGUE_NAMES = {"COT-WITH": "Speculators", "RATE-MOM": "Rates", "CMD-LEAD": "Commodities",
+                "MONTH-END": "Month-end"}
 
 
 def format_league_board(board, *, month: tuple[int, int] | None = None, final: bool = False,
                         html: bool = True) -> str:
-    """The league's scoreboard (cfd.league.Board): per idea the trades closed and the result -- of `month`
-    and since the start when a month is given, since the start otherwise --, the open trades, and with
-    `final` the verdict of each idea."""
+    """The league's scoreboard (cfd.league.Board), bare, in a fixed-width font: a row per idea --
+
+        League 09.10-08.01
+                     R     TP-R  Cl Op
+        Speculators  +0.00 +0.00  0  2
+        ...
+        Total        +0.00 +0.00  0  3
+
+    -- R the result after costs (of `month` when one is given, since the start otherwise), TP-R the same
+    trades in the version that closes at the take-profit levels (since the start), Cl the trades closed,
+    Op the trades open; with `final` each row ends «pass» or «fail» (the verdict of PAPER_LEAGUE.md, on
+    the first version). Under it: with a month, the result since the start; with a /cfd balance, what
+    one R is in euros; and, on the plain board, the open trades in two lines each (the pair and the side;
+    the entry, the stop and the next target)."""
     from cfd import league
     if final:
-        title = f"{LEAGUE_HEADER}: итог 13 недель"
+        title = "League final"
     elif month:
-        title = f"{LEAGUE_HEADER}: итог месяца {month[1]:02d}.{month[0]}"
+        title = f"League {month[1]:02d}.{month[0]}"
     else:
-        title = LEAGUE_HEADER
-    lines = [_b(title, html),
-             _e(f"С {board.start:%d.%m.%Y} по {board.end:%d.%m.%Y}; результат в R (риск одной сделки) после издержек.",
-                html)]
-    total = month_total = 0.0
+        title = "League"
+    lines = [f"{title} {board.start:%d.%m}-{board.end:%d.%m}", f"{'':<12}{'R':>6}{'TP-R':>7}{'Cl':>4}{'Op':>3}"]
+    shown = total = total2 = 0.0
+    closed = open_ = 0
     for s in board.scores:
-        name = league.IDEAS.get(s.idea, s.idea)
-        line = f"• {name}: "
-        if month:
-            m = s.months.get(month, 0.0)
-            month_total += m
-            line += f"за месяц {_cfd_r(m, 2)}{_league_money(board, m)}, "
-        line += (f"с начала {_cfd_r(s.net, 2)}{_league_money(board, s.net)} по {s.closed} "
-                 f"{_plural(s.closed, 'сделке', 'сделкам', 'сделкам')}")
-        if s.closed:
-            line += f"; с целями {_cfd_r(s.net2, 2)}"
-        if s.open:
-            line += f", открыто {s.open}"
-        if final:
-            line += " — " + ("проходит" if s.qualifies else "не проходит")
-        total += s.net
-        lines.append(_e(line, html))
-    summary = f"Всего с начала: {_cfd_r(total, 2)}{_league_money(board, total)}"
-    if any(s.closed for s in board.scores):
-        summary += f"; с целями {_cfd_r(sum(s.net2 for s in board.scores), 2)}"
+        r = s.months.get(month, 0.0) if month else s.net
+        shown, total, total2 = shown + r, total + s.net, total2 + s.net2
+        closed, open_ = closed + s.closed, open_ + s.open
+        row = f"{LEAGUE_NAMES.get(s.idea, s.idea):<12}{r:>+6.2f}{s.net2:>+7.2f}{s.closed:>4}{s.open:>3}"
+        lines.append(row + ((" pass" if s.qualifies else " fail") if final else ""))
+    lines.append(f"{'Total':<12}{shown:>+6.2f}{total2:>+7.2f}{closed:>4}{open_:>3}")
     if month:
-        summary = f"Всего за месяц: {_cfd_r(month_total, 2)}{_league_money(board, month_total)}. " + summary
-    lines.append(_e(summary, html))
-    if any(s.closed for s in board.scores):
-        lines.append(_e("«С целями» — те же сделки, если закрывать четверть на каждой из TP1–TP4 и подтягивать стоп.",
-                        html))
-    if final:
-        lines.append(_e("«Проходит»: в плюсе после издержек, минимум два прибыльных месяца из трёх и не меньше "
-                        f"{league.MIN_TRADES} сделок — по основному варианту.", html))
-    elif board.live and not month:
-        lines.append("Открытые:")
+        lines.append(f"Since start {total:+.2f}R")
+    if board.balance_risk_eur:
+        lines.append(f"1R = €{board.balance_risk_eur:.2f}")
+    if board.live and not month and not final:
         for t in board.live:
-            long = t.side == "long"
-            where = "вход по открытию следующего дня"
-            if t.entry:
-                where = f"по {_league_price(t, t.entry)}, стоп {_league_price(t, t.stop)}"
-                if t.checkpoint < league.CHECKPOINTS:
-                    where += f", {_league_levels(t, t.checkpoint + 1)}"
-                if t.checkpoint:
-                    where += f", взят TP{t.checkpoint}"
-            lines.append(_e(f"{DOT_GREEN if long else DOT_RED} {t.pair} — {'покупка' if long else 'продажа'} "
-                            f"{where}; «{league.IDEAS.get(t.idea, t.idea)}»", html))
-    return "\n".join(lines)
-
+            lines.append("")
+            lines.append(f"{t.pair} {'Long' if t.side == 'long' else 'Short'}")
+            if not t.entry:
+                lines.append("Entry at next open")
+                continue
+            row = f"{_league_plain(t, t.entry)}  SL {_league_plain(t, t.stop)}"
+            if t.checkpoint < league.CHECKPOINTS:
+                k = t.checkpoint + 1
+                row += f"  TP{k} {_league_plain(t, league.level(t, k))}"
+            lines.append(row)
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
