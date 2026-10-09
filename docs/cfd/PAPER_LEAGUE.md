@@ -58,3 +58,12 @@ The user's rule is "profitable when checking at the end of each month". An idea 
 its result after costs is above zero, at least two of its three month-end checks were in profit, and it closed at least
 8 trades. A qualifying idea is reported to the user, who decides whether it becomes a real signal; three months and a
 handful of trades cannot show that an idea works, only that it has not failed yet.
+
+## Amendment A1 (2026-10-09, the league's first day, two trades open, none closed)
+
+The user asked for take-profit levels on the league's trades. Every trade now shows TP1–TP4 = +1R…+4R from its entry,
+and a message says when one is reached. They are **marks, not exits**: the trade still leaves at its stop or its time
+exit, and the scoreboard counts that result, exactly as written above. The exits are not changed because the rules were
+fixed before the first trade, and because in rounds 1–2 closing in stages at such levels lowered every result. Within a
+bar the stop comes before a new mark, unless the bar opened beyond it.
+

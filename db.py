@@ -690,6 +690,7 @@ CREATE TABLE IF NOT EXISTS cfd_plans (
 # already exists, so a new column on an existing table needs an entry here to reach
 # databases created before it. (table, column, type declaration)
 _ADDED_COLUMNS = [
+    ("league_trades", "checkpoint", "INTEGER DEFAULT 0"),      # the highest of TP1..TP4 reached (marks, not exits)
     ("cluster_alert_state", "last_total_value", "REAL"),
     # Fields Form 4 has always carried and this project used to discard. See
     # sec_edgar.InsiderPurchase for what each one is for.

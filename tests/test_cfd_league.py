@@ -120,6 +120,40 @@ def test_a_short_mirrors_and_a_date_exit_waits_for_the_date(conn):
     assert t.reason == "time" and t.result_r > 0
 
 
+def test_take_profit_levels_are_marks_the_trade_goes_on(conn):
+    t = _opened(conn, exit_after="bars:10")
+    assert [league.level(t, k) for k in (1, 2)] == [pytest.approx(1.04), pytest.approx(1.08)]
+    day = dt.date(2026, 10, 15)
+    up = {dt.date(2026, 10, 13): (1.0, 1.05, 0.99, 1.04), dt.date(2026, 10, 14): (1.04, 1.13, 1.03, 1.12)}
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=up, upto=day, today_open=1.12)}))
+    assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day) == ["tp:1", "tp:2", "tp:3"]
+    assert (t.status, t.checkpoint) == ("open", 3)
+    assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day) == []          # said once
+    text = tn.format_league_event(t, "tp:2", html=False)
+    assert text == ("🟢 EURUSD!: достигнут TP2 1,08000 — бумажная сделка идёт дальше, выход через 10 торг. дн.; "
+                    "идея «Ставки», сейчас +2,0R")
+    assert "стоп 0,96000; TP1 1,04000 · TP2 1,08000 · TP3 1,12000 · TP4 1,16000 (отметки); выход через 10 торг. дн." \
+        in tn.format_league_event(t, "open", html=False)
+
+
+def test_in_the_bar_of_the_stop_a_mark_counts_only_by_the_open(conn):
+    t = _opened(conn, exit_after="bars:10")
+    day = dt.date(2026, 10, 14)
+    both = {dt.date(2026, 10, 13): (1.0, 1.05, 0.95, 0.97)}                 # up to TP1 and down through the stop
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=both, upto=day)}))
+    assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day) == ["close"]
+    assert (t.reason, t.checkpoint) == ("stop", 0)
+
+
+def test_the_result_is_the_exit_whatever_marks_were_reached(conn):
+    t = _opened(conn)                                                        # bars:5
+    day = dt.date(2026, 10, 19)
+    up = {dt.date(2026, 10, 13): (1.0, 1.05, 0.99, 1.0)}
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=up, upto=day, today_open=1.0)}))
+    assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day) == ["tp:1", "close"]
+    assert t.reason == "time" and t.result_r == pytest.approx(-(0.015 + 7 * 0.010) / 100 * 1.0 / 0.04)
+
+
 def test_a_bar_is_read_once(conn):
     t = _opened(conn)
     day = dt.date(2026, 10, 14)
@@ -314,7 +348,8 @@ def test_league_in_telegram_shows_the_board_with_the_open_trades_and_the_euros(c
     tb._handle_message(conn, "/league")
     text = sent[-1]
     assert text.startswith("<b>Бумажная лига форекс-идей</b>\n") and "• Сырьё: с начала +1,50R (+€15,00) по 1 сделке" in text
-    assert "Открытые:\n🟢 EURUSD — покупка по 1,00000, стоп 0,96000; «Ставки»" in text
+    assert ("Открытые:\n🟢 EURUSD — покупка по 1,00000, стоп 0,96000, TP1 1,04000 · TP2 1,08000 · TP3 1,12000 · "
+            "TP4 1,16000; «Ставки»") in text
     tb._handle_message(conn, "/league what")
     assert sent[-1] == league.USAGE
     tb._handle_message(conn, "/league off")

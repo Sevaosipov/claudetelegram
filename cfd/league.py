@@ -55,6 +55,7 @@ class Trade:
     result_r: float | None
     reason: str | None           # stop | time
     created: str
+    checkpoint: int = 0          # the highest of TP1..TP4 (+1R..+4R) reached: marks on the way, never exits
 
 
 _COLUMNS = [f.name for f in fields(Trade)]
@@ -71,6 +72,15 @@ def live_trades(conn) -> list[Trade]:
 
 def closed_trades(conn) -> list[Trade]:
     return trades(conn, "WHERE status = 'closed'")
+
+
+CHECKPOINTS = 4                  # TP1..TP4 = +1R..+4R
+
+
+def level(t: Trade, k: int) -> float:
+    """The price of TPk: k times the stop's distance in the trade's favour of the entry."""
+    sign = 1 if t.side == "long" else -1
+    return t.entry + sign * k * abs(t.entry - t.stop)
 
 
 def _save(conn, t: Trade) -> None:
@@ -155,7 +165,8 @@ def advance(t: Trade, bars: Sequence[Bar], forming: float | None, today: dt.date
     """Move a trade through the bars it has not seen: fill a pending one at the open of the first bar after
     its signal bar, then, bar by bar, the time exit at the open, the stop gapped through at the open, the
     stop inside the bar. Today's bar is known by its open alone: it can fill, and it can close at the open.
-    `t` is changed in place; returns the events, "open" and/or "close"."""
+    A bar's best price marks the take-profit levels it reached (TP1..TP4: marks, the trade goes on).
+    `t` is changed in place; returns the events in order: "open", "tp:K", "close"."""
     events = []
     days = [(b.ts.date(), b.open, b) for b in bars] + ([(today, forming, None)] if forming else [])
     sign = 1 if t.side == "long" else -1
@@ -174,6 +185,13 @@ def advance(t: Trade, bars: Sequence[Bar], forming: float | None, today: dt.date
                 _close(t, day, open_, "time")
         if t.status == "open" and bar is not None and sign * ((bar.low if sign > 0 else bar.high) - t.stop) <= 0:
             _close(t, day, t.stop, "stop")
+        if bar is not None and t.entry is not None and t.exit_price != open_:
+            # a mark is reached by the bar's best price; in the bar the stop closed the trade, only by its open
+            # (the stop goes before a new mark, as in cfd/live.py). A trade closed at this bar's open saw none.
+            best = (bar.high if sign > 0 else bar.low) if t.status == "open" else open_
+            while t.checkpoint < CHECKPOINTS and sign * (best - level(t, t.checkpoint + 1)) >= 0:
+                t.checkpoint += 1
+                events.append(f"tp:{t.checkpoint}")
         if bar is not None:
             t.last_bar = day.isoformat()
         if t.status == "closed":

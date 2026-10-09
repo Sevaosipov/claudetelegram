@@ -1364,6 +1364,12 @@ def _league_exit(t) -> str:
     return f"выход {dt.date.fromisoformat(value):%d.%m}"
 
 
+def _league_levels(t, first: int = 1) -> str:
+    from cfd import league
+    return " · ".join(f"TP{k} {_league_price(t, league.level(t, k))}"
+                      for k in range(first, league.CHECKPOINTS + 1))
+
+
 def format_league_event(t, event: str, *, html: bool = True) -> str:
     """One paper trade's message (cfd.league.Trade): opened, or closed with its result in R."""
     from cfd import league
@@ -1372,7 +1378,13 @@ def format_league_event(t, event: str, *, html: bool = True) -> str:
     if event == "open":
         return signal_line(DOT_GREEN if long else DOT_RED, t.pair,
                            f"бумажная {'покупка' if long else 'продажа'} по {_league_price(t, t.entry)}",
-                           f"стоп {_league_price(t, t.stop)}, {_league_exit(t)}; идея «{name}», тест", html=html)
+                           f"стоп {_league_price(t, t.stop)}; {_league_levels(t)} (отметки); {_league_exit(t)}; "
+                           f"идея «{name}», тест", html=html)
+    if event.startswith("tp:"):
+        k = int(event[3:])
+        return signal_line(DOT_GREEN, t.pair, f"достигнут TP{k} {_league_price(t, league.level(t, k))}",
+                           f"бумажная сделка идёт дальше, {_league_exit(t)}; идея «{name}»",
+                           result=_cfd_r(float(k)), label="сейчас", html=html)
     how = "сработал стоп" if t.reason == "stop" else "вышло время"
     return signal_line(DOT_GREEN if round(t.result_r, 2) >= 0 else DOT_RED, t.pair,
                        f"бумажная сделка закрыта — {how}", f"по {_league_price(t, t.exit_price)}; идея «{name}»",
@@ -1425,8 +1437,13 @@ def format_league_board(board, *, month: tuple[int, int] | None = None, final: b
         lines.append("Открытые:")
         for t in board.live:
             long = t.side == "long"
-            where = (f"по {_league_price(t, t.entry)}, стоп {_league_price(t, t.stop)}" if t.entry
-                     else "вход по открытию следующего дня")
+            where = "вход по открытию следующего дня"
+            if t.entry:
+                where = f"по {_league_price(t, t.entry)}, стоп {_league_price(t, t.stop)}"
+                if t.checkpoint < league.CHECKPOINTS:
+                    where += f", {_league_levels(t, t.checkpoint + 1)}"
+                if t.checkpoint:
+                    where += f", взят TP{t.checkpoint}"
             lines.append(_e(f"{DOT_GREEN if long else DOT_RED} {t.pair} — {'покупка' if long else 'продажа'} "
                             f"{where}; «{league.IDEAS.get(t.idea, t.idea)}»", html))
     return "\n".join(lines)
