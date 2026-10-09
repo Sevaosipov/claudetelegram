@@ -1151,7 +1151,7 @@ def _cfd_entry(notice, html: bool) -> str:
     if sig.qty and sig.risk_eur and sig.r:
         # the position's value in euros: the risk in euros over the stop's share of the entry price
         rows.append(("Size", f"€{sig.risk_eur * sig.entry / sig.r:.0f}"))
-    lines = [f"{_cfd_name(sig)} {'Long' if sig.side == 'long' else 'Short'}"]
+    lines = [f"{_cfd_name(sig)} {'Long' if sig.side == 'long' else 'Short'} · CFD"]
     return _cfd_block("\n".join(lines + [f"{name:<6}{value}" for name, value in rows]), html)
 
 
@@ -1383,7 +1383,7 @@ def format_league_opens(trades: list, *, html: bool = True) -> str:
     for t in trades:
         rows = [("Entry", t.entry), ("Stop", t.stop)]
         rows += [(f"TP{k}", league.level(t, k)) for k in range(1, league.CHECKPOINTS + 1)]
-        blocks.append("\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'}"]
+        blocks.append("\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD test"]
                                 + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]))
     text = "\n\n".join(blocks)
     return f"<pre>{_esc(text)}</pre>" if html else text

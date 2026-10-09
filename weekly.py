@@ -27,6 +27,7 @@ from telegram_notify import DOT_GREEN, DOT_RED, signed_pct
 WEEK_DAYS = 6               # the week is today - 6 days ... today
 MAX_REASONS = 2             # a buy names this many of its reasons
 RISK_TAG = "High risk"      # a line of an alt's buy block
+KIND = "Invest"             # what a weekly buy is: the asset itself is bought (a CFD signal says «CFD»)
 MAX_SELLERS = 5             # a group exit names this many sellers, then «и ещё N»
 BEST_WORST = 3              # the summary names this many best and this many worst positions
 LEFT_OUT_KEY = "weekly_left_out_{week}"     # kv: [{"ticker", "why"}] the week's pick left out (bot._pick_week)
@@ -42,7 +43,7 @@ def _plain(x: float) -> str:
 def buy_text(pick: dict) -> str:
     """A picked buy (signals_weekly.pick_record), bare: a fixed-width block with nothing but the trade --
 
-        RXO Buy
+        RXO Buy · Invest
         Price 15.20
         Stop  13.68
         Size  €22
@@ -62,7 +63,7 @@ def buy_text(pick: dict) -> str:
         rows.append(("Stop", _plain(price * (1 - stop_pct)) if price else f"-{stop_pct * 100:.0f}%"))
     if pick.get("amount_eur"):
         rows.append(("Size", f"€{pick['amount_eur']:.0f}"))
-    block = [f"{crypto.symbol_of(pick['ticker'])} Buy"] + [f"{name:<6}{value}" for name, value in rows]
+    block = [f"{crypto.symbol_of(pick['ticker'])} Buy · {KIND}"] + [f"{name:<6}{value}" for name, value in rows]
     if pick.get("t212") is False:
         block.append("Not on Trading 212")
     if pick.get("risk"):

@@ -45,7 +45,7 @@ def test_prices_have_the_precision_of_their_size(x, text):
 
 
 # ------------------------------------------------------------------ the entry
-ENTRY = "SOLUSD Long\nEntry 121.50\nStop  108.20\nTP1   134.80\nTP2   148.10\nTP3   161.40\nTP4   174.70"
+ENTRY = "SOLUSD Long · CFD\nEntry 121.50\nStop  108.20\nTP1   134.80\nTP2   148.10\nTP3   161.40\nTP4   174.70"
 
 
 @pytest.mark.parametrize("x, text", [(121.5, "121.50"), (65000.0, "65000.00"), (99.99, "99.9900"),
@@ -61,7 +61,7 @@ def test_entry_is_a_bare_block_with_the_size_when_there_is_a_balance():
 def test_a_short_says_short_and_has_the_levels_below():
     short = sig(side="short", stop0=134.8, stop=134.8)
     assert tn.format_cfd_notice(entry(short), html=False) == (
-        "SOLUSD Short\nEntry 121.50\nStop  134.80\nTP1   108.20\nTP2   94.9000\nTP3   81.6000\nTP4   68.3000\n"
+        "SOLUSD Short · CFD\nEntry 121.50\nStop  134.80\nTP1   108.20\nTP2   94.9000\nTP3   81.6000\nTP4   68.3000\n"
         "Size  €46")
 
 
@@ -79,7 +79,7 @@ def test_entry_says_nothing_else():
 def test_a_cheap_coin_has_six_decimals_and_whole_coins():
     doge = sig(coin="DOGE", symbol="DOGE-USD", entry=0.152, stop0=0.1402, stop=0.1402, r=0.0118, qty=424.0)
     text = tn.format_cfd_notice(entry(doge), html=False)
-    assert text.startswith("DOGEUSD Long\nEntry 0.152000\nStop  0.140200\nTP1   0.163800") and text.endswith("Size  €64")
+    assert text.startswith("DOGEUSD Long · CFD\nEntry 0.152000\nStop  0.140200\nTP1   0.163800") and text.endswith("Size  €64")
 
 
 # ------------------------------------------------------------------ the checkpoints

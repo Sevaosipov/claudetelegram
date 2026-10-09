@@ -103,17 +103,17 @@ def _lines(conn, **kw):
 # ===================================================================== a buy
 def test_a_buy_is_a_bare_block_then_why_it_was_picked():
     assert weekly.buy_text(_pick(price=23.1, amount_eur=19.2)) == (
-        "<pre>GME Buy\nPrice 23.10\nStop  20.79\nSize  €19</pre>\n"
+        "<pre>GME Buy · Invest\nPrice 23.10\nStop  20.79\nSize  €19</pre>\n"
         "2 инсайдера из руководства; CEO среди покупателей; балл 70")
 
 
 def test_a_buy_without_a_price_gives_the_stop_as_a_percent_and_without_a_size_has_no_size_line():
-    assert weekly.buy_text(_pick()) == ("<pre>GME Buy\nStop  -10%</pre>\n"
+    assert weekly.buy_text(_pick()) == ("<pre>GME Buy · Invest\nStop  -10%</pre>\n"
                                         "2 инсайдера из руководства; CEO среди покупателей; балл 70")
 
 
 def test_a_buy_the_user_cannot_make_at_trading_212_says_so_in_the_block():
-    assert weekly.buy_text(_pick(t212=False)).startswith("<pre>GME Buy\nStop  -10%\nNot on Trading 212</pre>\n")
+    assert weekly.buy_text(_pick(t212=False)).startswith("<pre>GME Buy · Invest\nStop  -10%\nNot on Trading 212</pre>\n")
 
 
 @pytest.mark.parametrize("t212", [True, None])
@@ -128,33 +128,33 @@ def test_a_buy_shows_at_most_two_reasons():
 
 
 @pytest.mark.parametrize("pick, text", [
-    (dict(reasons=["3 инсайдера"]), "<pre>GME Buy\nStop  -10%</pre>\n3 инсайдера; балл 70"),
-    (dict(reasons=[]), "<pre>GME Buy\nStop  -10%</pre>\nбалл 70"),
-    (dict(reasons=["3 инсайдера"], stop_pct=None), "<pre>GME Buy</pre>\n3 инсайдера; балл 70"),
-    (dict(reasons=["3 инсайдера"], score=None), "<pre>GME Buy\nStop  -10%</pre>\n3 инсайдера"),
-    (dict(reasons=[], score=None, stop_pct=None), "<pre>GME Buy</pre>")])
+    (dict(reasons=["3 инсайдера"]), "<pre>GME Buy · Invest\nStop  -10%</pre>\n3 инсайдера; балл 70"),
+    (dict(reasons=[]), "<pre>GME Buy · Invest\nStop  -10%</pre>\nбалл 70"),
+    (dict(reasons=["3 инсайдера"], stop_pct=None), "<pre>GME Buy · Invest</pre>\n3 инсайдера; балл 70"),
+    (dict(reasons=["3 инсайдера"], score=None), "<pre>GME Buy · Invest\nStop  -10%</pre>\n3 инсайдера"),
+    (dict(reasons=[], score=None, stop_pct=None), "<pre>GME Buy · Invest</pre>")])
 def test_a_buy_leaves_out_what_the_pick_does_not_have(pick, text):
     assert weekly.buy_text(_pick(**pick)) == text
 
 
 def test_a_buy_rounds_the_score_and_the_stop_to_whole_numbers():
-    assert weekly.buy_text(_pick(score=64.4, stop_pct=0.1249, reasons=[])) == "<pre>GME Buy\nStop  -12%</pre>\nбалл 64"
+    assert weekly.buy_text(_pick(score=64.4, stop_pct=0.1249, reasons=[])) == "<pre>GME Buy · Invest\nStop  -12%</pre>\nбалл 64"
 
 
 def test_a_coin_buy_is_named_by_its_symbol_and_a_cheap_one_has_more_decimals():
     text = weekly.buy_text(_pick("CRYPTO:BTC", kind="crypto", source="CRYPTO", company="BTC", score=75.0,
                                  stop_pct=0.15, reasons=["выше 100-дн. средней"], t212=None, price=80000.0))
-    assert text == "<pre>BTC Buy\nPrice 80000.00\nStop  68000.00</pre>\nвыше 100-дн. средней; балл 75"
+    assert text == "<pre>BTC Buy · Invest\nPrice 80000.00\nStop  68000.00</pre>\nвыше 100-дн. средней; балл 75"
     assert "CRYPTO" not in text
     doge = weekly.buy_text(_pick("CRYPTO:DOGE", price=0.152, stop_pct=0.2, reasons=[], score=None))
-    assert doge == "<pre>DOGE Buy\nPrice 0.1520\nStop  0.1216</pre>"
+    assert doge == "<pre>DOGE Buy · Invest\nPrice 0.1520\nStop  0.1216</pre>"
 
 
 def test_an_alts_buy_says_high_risk_in_the_block():
     text = weekly.buy_text(_pick("CRYPTO:SOL", kind="crypto", source="CRYPTO", company="SOL", score=75.0,
                                  stop_pct=0.22, reasons=["выше 100-дн. средней", "приток в ETF"], t212=None,
                                  risk=True))
-    assert text == ("<pre>SOL Buy\nStop  -22%\nHigh risk</pre>\n"
+    assert text == ("<pre>SOL Buy · Invest\nStop  -22%\nHigh risk</pre>\n"
                     "выше 100-дн. средней; приток в ETF; балл 75")
     assert "CRYPTO" not in text
 
@@ -169,8 +169,8 @@ def test_bitcoin_and_ether_buys_have_no_risk_tag():
 
 def test_the_risk_tag_comes_after_the_trading_212_note_and_stands_alone_when_there_is_nothing_else():
     assert weekly.buy_text(_pick(t212=False, risk=True)).startswith(
-        "<pre>GME Buy\nStop  -10%\nNot on Trading 212\nHigh risk</pre>")
-    assert weekly.buy_text(_pick(reasons=[], score=None, stop_pct=None, risk=True)) == "<pre>GME Buy\nHigh risk</pre>"
+        "<pre>GME Buy · Invest\nStop  -10%\nNot on Trading 212\nHigh risk</pre>")
+    assert weekly.buy_text(_pick(reasons=[], score=None, stop_pct=None, risk=True)) == "<pre>GME Buy · Invest\nHigh risk</pre>"
 
 
 def test_a_pick_kept_before_the_flag_existed_has_no_tag():

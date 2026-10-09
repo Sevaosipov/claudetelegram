@@ -57,7 +57,7 @@ def test_the_first_run_makes_the_signal_and_sends_the_entry_message(conn, sent):
     assert (result.tracked, result.made) == (0, 1)
     (sig,) = live.open_signals(conn)
     assert sent == [telegram_notify.format_cfd_notice(live.Notice("entry", sig, risk_pct=1.0))]
-    assert sent[0].startswith("<pre>SOLUSD Long\nEntry 110.50\nStop  ") and "\nTP4   " in sent[0]
+    assert sent[0].startswith("<pre>SOLUSD Long · CFD\nEntry 110.50\nStop  ") and "\nTP4   " in sent[0]
 
 
 def test_the_next_day_tracks_the_checkpoint_and_the_same_run_scans_too(conn, sent):

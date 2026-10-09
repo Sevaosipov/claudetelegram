@@ -449,9 +449,9 @@ def test_a_real_week_goes_out_as_one_message_a_signal_then_the_summary(conn, mon
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
     assert bot._send_weekly(conn, FRI) is True
-    assert sent[:3] == ["<pre>AAA Buy\nStop  -10%\nNot on Trading 212</pre>\n"
+    assert sent[:3] == ["<pre>AAA Buy · Invest\nStop  -10%\nNot on Trading 212</pre>\n"
                         "2 инсайдера из руководства; CEO среди покупателей; балл 70",
-                        "<pre>BTC Buy\nStop  -15%</pre>\nвыше 100-дн. средней; балл 75",
+                        "<pre>BTC Buy · Invest\nStop  -15%</pre>\nвыше 100-дн. средней; балл 75",
                         "🔴 <b>ZZZ!</b>: продают те, кто покупал — Ann Lee, Bo Chen"]
     assert len(sent) == 4 and sent[3].startswith("📊 <b>Неделя 03.10–09.10</b>")
     assert "Сигналов за неделю: покупок 2, на продажу 0, групповых выходов 1" in sent[3]
@@ -516,9 +516,9 @@ def test_the_week_keeps_two_coins_at_most_and_marks_the_alts_high_risk(conn):
     assert [p.get("risk") for p in kept] == [None, None, None, None, True]
     # ... and what a retry sends is read back from the kept records
     texts = dict(weekly.week_signals(conn, FRI, bot._week_picks(conn, FRI)))
-    assert texts["buy:CRYPTO:SOL"] == ("<pre>SOL Buy\nStop  -22%\nHigh risk</pre>\n"
+    assert texts["buy:CRYPTO:SOL"] == ("<pre>SOL Buy · Invest\nStop  -22%\nHigh risk</pre>\n"
                                        "выше 100-дн. средней; покупают крупные игроки; балл 90")
-    assert texts["buy:CRYPTO:BTC"].startswith("<pre>BTC Buy\nStop  -22%</pre>") and texts["buy:CRYPTO:BTC"].endswith("балл 89")
+    assert texts["buy:CRYPTO:BTC"].startswith("<pre>BTC Buy · Invest\nStop  -22%</pre>") and texts["buy:CRYPTO:BTC"].endswith("балл 89")
 
 
 def test_a_week_with_nothing_to_signal_is_still_picked_once(conn):
@@ -920,7 +920,7 @@ def test_a_real_week_through_main_picks_sends_records_and_does_not_repeat_the_ti
     monkeypatch.setattr(weekly, "format_summary", REAL_FORMAT_SUMMARY)
     calls = main_run()
     sent = [c[1] for c in calls if c[0] == "send"]
-    assert sent == ["<pre>AAA Buy\nStop  -10%</pre>\n2 инсайдера из руководства; CEO среди покупателей; балл 70",
+    assert sent == ["<pre>AAA Buy · Invest\nStop  -10%</pre>\n2 инсайдера из руководства; CEO среди покупателей; балл 70",
                     "📊 <b>Неделя 03.10–09.10</b>\nПозиций нет.\n"
                     "Сигналов за неделю: покупок 1, на продажу 0, групповых выходов 0"]
     conn = main_run.db()

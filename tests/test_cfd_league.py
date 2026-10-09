@@ -132,7 +132,7 @@ def test_take_profit_levels_are_marks_the_trade_goes_on(conn):
     text = tn.format_league_event(t, "tp:2", html=False)
     assert text == "EURUSD TP2 1.08000"
     assert tn.format_league_event(t, "open", html=False) == (
-        "EURUSD Long\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\nTP3   1.12000\nTP4   1.16000")
+        "EURUSD Long · CFD test\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\nTP3   1.12000\nTP4   1.16000")
 
 
 def test_in_the_bar_of_the_stop_a_mark_counts_only_by_the_open(conn):
@@ -300,7 +300,7 @@ def test_the_pass_opens_follows_and_closes_and_says_each(conn):
     sent = []
     table = {"EURUSD=X": eurusd()}
     assert _run(conn, MON, sent, table, yields=lambda today: _yields(+0.12)) == (1, 0)     # USDCAD has no bars
-    assert sent == ["<pre>EURUSD Long\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\n"
+    assert sent == ["<pre>EURUSD Long · CFD test\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\n"
                     "TP3   1.12000\nTP4   1.16000</pre>"]
     assert _run(conn, MON, sent, table, yields=lambda today: _yields(+0.12)) == (0, 0)     # the same day again
     day = dt.date(2026, 10, 19)
@@ -411,7 +411,7 @@ def test_the_days_openings_are_one_message_a_block_each_and_the_yen_has_three_de
     y = _yields(+0.12)
     y["JP"] = dict(y["EA"])
     _run(conn, MON, sent, table, yields=lambda today: y)
-    assert sent == ["<pre>EURUSD Long\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\nTP3   1.12000\n"
-                    "TP4   1.16000\n\nUSDJPY Short\nEntry 150.000\nStop  154.000\nTP1   146.000\nTP2   142.000\n"
+    assert sent == ["<pre>EURUSD Long · CFD test\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\nTP3   1.12000\n"
+                    "TP4   1.16000\n\nUSDJPY Short · CFD test\nEntry 150.000\nStop  154.000\nTP1   146.000\nTP2   142.000\n"
                     "TP3   138.000\nTP4   134.000</pre>"]
 

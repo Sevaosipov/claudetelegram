@@ -1040,7 +1040,7 @@ skip) или `caution` для медвежьего сигнала по моне�
 блока. Под блоком — почему выбран (две причины и балл) и, у компании, чем она занимается и как оценена:
 
 ```none
-GME Buy
+GME Buy · Invest
 Price 23.10
 Stop  20.79
 Size  €19
@@ -1050,7 +1050,7 @@ Specialty Retail (Consumer Cyclical) · кап. $10,3 млрд · P/E 25 · P/S 
 ```
 
 ```none
-SOL Buy
+SOL Buy · Invest
 Price 150.00
 Stop  117.00
 High risk
@@ -1908,7 +1908,7 @@ HYPE, SUI) и сообщает в Telegram, что происходит с ка�
 сторона, вход, стоп, TP1–TP4, размер позиции в евро — при заданном балансе), отметка и закрытие — одной строкой:
 
 ```text
-SOLUSD Long
+SOLUSD Long · CFD
 Entry 121.50
 Stop  108.20
 TP1   134.80
