@@ -378,12 +378,12 @@ def _get(url: str, tries: int = 8) -> bytes | None:
     raise RuntimeError(f"no answer from {url}")
 
 
-def _cached(path: Path, url: str, *, final: bool) -> bytes | None:
+def _cached(path: Path, url: str, *, final: bool, get=None) -> bytes | None:
     """`url` through a file cache. `final` is whether the file can no longer change (a past year, a past
     month): only then is an answer kept."""
     if path.exists():
         return path.read_bytes() or None
-    body = _get(url)
+    body = (get or _get)(url)
     if final:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body or b"")
@@ -391,14 +391,15 @@ def _cached(path: Path, url: str, *, final: bool) -> bytes | None:
 
 
 def load_cot(first_year: int = 2002, today: dt.date | None = None,
-             cache_dir: Path = CACHE_DIR) -> dict[str, list[tuple[dt.date, float]]]:
+             cache_dir: Path = CACHE_DIR, get=None) -> dict[str, list[tuple[dt.date, float]]]:
     """contract code -> [(report date, net non-commercial ÷ open interest)], oldest first, from the CFTC's
     yearly archives of the legacy futures-only report."""
     today = today or dt.date.today()
     out: dict[str, dict[dt.date, float]] = defaultdict(dict)
     for year in range(first_year, today.year + 1):
         body = _cached(cache_dir / "cot" / f"deacot{year}.zip",
-                       f"https://www.cftc.gov/files/dea/history/deacot{year}.zip", final=year < today.year)
+                       f"https://www.cftc.gov/files/dea/history/deacot{year}.zip", final=year < today.year,
+                       get=get)
         if not body:
             continue
         archive = zipfile.ZipFile(io.BytesIO(body))

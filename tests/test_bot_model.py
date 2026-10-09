@@ -796,6 +796,13 @@ def main_run(monkeypatch, tmp_path):
         return types.SimpleNamespace(tracked=1, made=2, paused=False)
     monkeypatch.setattr(bot.cfd_live, "run", cfd_pass)
 
+    def league_pass(conn):
+        run.league.append(list(calls))
+        if run.league_crashes:
+            raise RuntimeError("cftc is down")
+        return (1, 0)
+    monkeypatch.setattr(bot.cfd_league, "run", league_pass)
+
     def run(*argv):
         monkeypatch.setattr(sys, "argv", ["bot.py", "--once", *argv])
         monkeypatch.setattr(sys, "stdout", sys.stdout)     # main() wraps the streams: restore them after
@@ -813,6 +820,7 @@ def main_run(monkeypatch, tmp_path):
     run.complete = True                                           # False: a scoring pass that did not get through
     run.syncs, run.sync_silent, run.sync_crashes = [], [], False  # the Trading 212 sync (stubbed)
     run.cfd, run.cfd_crashes = [], False                          # the CFD pass (stubbed): `calls` as it was
+    run.league, run.league_crashes = [], False                    # the paper league's pass (stubbed), the same
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 
@@ -1339,3 +1347,19 @@ def test_a_crashing_cfd_pass_is_reported_and_the_run_goes_on(main_run, capsys):
 def test_the_cfd_pass_logs_what_it_did(main_run, capsys):
     main_run()
     assert "[CFD] 1 update message(s), 2 new signal(s)" in capsys.readouterr().out
+
+
+def test_the_league_pass_runs_after_the_cfd_pass_on_a_full_run_only(main_run, capsys):
+    main_run()
+    assert len(main_run.league) == 1 and "[LEAGUE] opened 1, closed 0" in capsys.readouterr().out
+    main_run("--no-telegram")
+    main_run("--sec-only")
+    assert len(main_run.league) == 1
+
+
+def test_a_crashing_league_pass_is_reported_and_the_run_goes_on(main_run, capsys):
+    main_run.league_crashes = True
+    main_run()
+    out = capsys.readouterr()
+    assert len(main_run.league) == 1 and "LEAGUE" in out.out + out.err
+

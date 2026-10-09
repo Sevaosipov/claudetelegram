@@ -1347,3 +1347,87 @@ def format_cfd_plans(open_plans: list, closed_plans: list, *, html: bool = True)
             total += f" ({money_cents(sum(p.result_r * p.risk_eur for p in sized))})"
         lines.append(total)
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ the forex paper league (cfd/league.py)
+LEAGUE_HEADER = "Бумажная лига форекс-идей"
+
+
+def _league_price(t, x: float) -> str:
+    return _plan_price(t, x)
+
+
+def _league_exit(t) -> str:
+    kind, _, value = t.exit_after.partition(":")
+    if kind == "bars":
+        return f"выход через {value} торг. дн."
+    return f"выход {dt.date.fromisoformat(value):%d.%m}"
+
+
+def format_league_event(t, event: str, *, html: bool = True) -> str:
+    """One paper trade's message (cfd.league.Trade): opened, or closed with its result in R."""
+    from cfd import league
+    name = league.IDEAS.get(t.idea, t.idea)
+    long = t.side == "long"
+    if event == "open":
+        return signal_line(DOT_GREEN if long else DOT_RED, t.pair,
+                           f"бумажная {'покупка' if long else 'продажа'} по {_league_price(t, t.entry)}",
+                           f"стоп {_league_price(t, t.stop)}, {_league_exit(t)}; идея «{name}», тест", html=html)
+    how = "сработал стоп" if t.reason == "stop" else "вышло время"
+    return signal_line(DOT_GREEN if round(t.result_r, 2) >= 0 else DOT_RED, t.pair,
+                       f"бумажная сделка закрыта — {how}", f"по {_league_price(t, t.exit_price)}; идея «{name}»",
+                       result=_cfd_r(t.result_r, 2), html=html)
+
+
+def _league_money(board, r: float) -> str:
+    return f" ({money_cents(r * board.balance_risk_eur)})" if board.balance_risk_eur else ""
+
+
+def format_league_board(board, *, month: tuple[int, int] | None = None, final: bool = False,
+                        html: bool = True) -> str:
+    """The league's scoreboard (cfd.league.Board): per idea the trades closed and the result -- of `month`
+    and since the start when a month is given, since the start otherwise --, the open trades, and with
+    `final` the verdict of each idea."""
+    from cfd import league
+    if final:
+        title = f"{LEAGUE_HEADER}: итог 13 недель"
+    elif month:
+        title = f"{LEAGUE_HEADER}: итог месяца {month[1]:02d}.{month[0]}"
+    else:
+        title = LEAGUE_HEADER
+    lines = [_b(title, html),
+             _e(f"С {board.start:%d.%m.%Y} по {board.end:%d.%m.%Y}; результат в R (риск одной сделки) после издержек.",
+                html)]
+    total = month_total = 0.0
+    for s in board.scores:
+        name = league.IDEAS.get(s.idea, s.idea)
+        line = f"• {name}: "
+        if month:
+            m = s.months.get(month, 0.0)
+            month_total += m
+            line += f"за месяц {_cfd_r(m, 2)}{_league_money(board, m)}, "
+        line += (f"с начала {_cfd_r(s.net, 2)}{_league_money(board, s.net)} по {s.closed} "
+                 f"{_plural(s.closed, 'сделке', 'сделкам', 'сделкам')}")
+        if s.open:
+            line += f", открыто {s.open}"
+        if final:
+            line += " — " + ("проходит" if s.qualifies else "не проходит")
+        total += s.net
+        lines.append(_e(line, html))
+    summary = f"Всего с начала: {_cfd_r(total, 2)}{_league_money(board, total)}"
+    if month:
+        summary = f"Всего за месяц: {_cfd_r(month_total, 2)}{_league_money(board, month_total)}. " + summary
+    lines.append(_e(summary, html))
+    if final:
+        lines.append(_e("«Проходит»: в плюсе после издержек, минимум два прибыльных месяца из трёх и не меньше "
+                        f"{league.MIN_TRADES} сделок.", html))
+    elif board.live and not month:
+        lines.append("Открытые:")
+        for t in board.live:
+            long = t.side == "long"
+            where = (f"по {_league_price(t, t.entry)}, стоп {_league_price(t, t.stop)}" if t.entry
+                     else "вход по открытию следующего дня")
+            lines.append(_e(f"{DOT_GREEN if long else DOT_RED} {t.pair} — {'покупка' if long else 'продажа'} "
+                            f"{where}; «{league.IDEAS.get(t.idea, t.idea)}»", html))
+    return "\n".join(lines)
+
