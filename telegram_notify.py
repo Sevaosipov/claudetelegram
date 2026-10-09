@@ -1095,9 +1095,9 @@ def format_crypto_portfolio(rows: list, *, html: bool = True) -> str:
 
 
 # ------------------------------------------------- the experimental live CFD signals (cfd/live.py)
-# Spec 2026-10-08-cfd-live-crypto-breakout.md. One message per event, in the signal-line style:
-#   «🟢 SOLUSD!: покупка по 121,50 — стоп 108,20, трейлинг-стоп 3×ATR; TP1 134,80 · … (отметки, позиция не
-#   закрывается); риск 1% = €5,00, объём 0,43 SOL; эксперимент»
+# Spec 2026-10-08-cfd-live-crypto-breakout.md. One message per event, bare (the user asked for nothing but the
+# trade): a new signal is a fixed-width block -- «SOLUSD Long», then Entry, Stop, TP1..TP4 and Size, a value a
+# line --, a level reached «SOLUSD TP1 134.80 stop 119.40», a close «SOLUSD closed 152.30 +2.32R (+€11.60)».
 # TP1..TP4 are checkpoints (+1R..+4R), not exits. Nothing here places an order.
 CFD_HEADER = "CFD-сигналы (эксперимент): пробой тренда на 13 монетах, выход по трейлинг-стопу"
 CFD_NO_SIGNALS = "Сигналов пока не было."
@@ -1131,26 +1131,26 @@ def _cfd_name(sig) -> str:
     return f"{sig.coin}USD"
 
 
+def cfd_plain(x: float) -> str:
+    """A coin's price as a trading terminal writes it: a point, no spaces, the precision of cfd_price."""
+    return f"{x:.{2 if x >= 100 else 4 if x >= 1 else 6}f}"
+
+
+def _cfd_block(text: str, html: bool) -> str:
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
 def _cfd_entry(notice, html: bool) -> str:
+    """A new signal, nothing but what is needed to place it: the pair and the side, the entry, the stop,
+    TP1..TP4 and -- with a balance set -- the quantity; one value a line, in a fixed-width font."""
     sig = notice.signal
-    long = sig.side == "long"
-    sign = 1 if long else -1
-    levels = " · ".join(f"TP{k} {cfd_price(sig.entry + sign * k * sig.r)}" for k in range(1, 5))
-    if sig.risk_eur is not None:
-        pct = sig.risk_pct if sig.risk_pct is not None else notice.risk_pct
-        sizing = f"риск {_cfd_pct(pct)}% = {_cfd_eur(sig.risk_eur)}, " + _cfd_qty(sig.qty, sig.coin)
-    else:
-        sizing = (f"риск {_cfd_pct(notice.risk_pct)}%, объём на {CFD_REFERENCE_BALANCE} баланса: "
-                  + _cfd_qty(notice.qty_per_1000, sig.coin, short=True))
-    parts = [f"стоп {cfd_price(sig.stop0)}, трейлинг-стоп 3×ATR; {levels} (отметки, позиция не закрывается)",
-             sizing]
-    if notice.over_limit is not None:
-        total, limit = notice.over_limit
-        parts.append(f"открытый риск уже {_cfd_pct(total)}% — выше вашего лимита {_cfd_pct(limit)}%")
-    parts.append("эксперимент")
-    return signal_line(DOT_GREEN if long else DOT_RED, _cfd_name(sig),
-                       f"{'покупка' if long else 'продажа'} по {cfd_price(sig.entry)}", "; ".join(parts),
-                       html=html)
+    sign = 1 if sig.side == "long" else -1
+    rows = [("Entry", cfd_plain(sig.entry)), ("Stop", cfd_plain(sig.stop0))]
+    rows += [(f"TP{k}", cfd_plain(sig.entry + sign * k * sig.r)) for k in range(1, 5)]
+    if sig.qty:
+        rows.append(("Size", f"{sig.qty:.4f}".rstrip("0").rstrip(".")))
+    lines = [f"{_cfd_name(sig)} {'Long' if sig.side == 'long' else 'Short'}"]
+    return _cfd_block("\n".join(lines + [f"{name:<6}{value}" for name, value in rows]), html)
 
 
 def _cfd_qty(qty: float | None, coin: str, short: bool = False) -> str:
@@ -1160,26 +1160,21 @@ def _cfd_qty(qty: float | None, coin: str, short: bool = False) -> str:
 
 
 def _cfd_checkpoint(notice, html: bool) -> str:
+    """«SOLUSD TP1 134.80 stop 119.40»: the level reached and the trailing stop now in force."""
     sig = notice.signal
-    sign = 1 if sig.side == "long" else -1
-    pulled = sign * (notice.stop - sig.stop) > 0
-    stop = f"стоп подтянут до {cfd_price(notice.stop)}" if pulled else f"стоп {cfd_price(notice.stop)}"
-    extra = f" ({money_cents(notice.k * sig.risk_eur)})" if sig.risk_eur is not None else None
-    return signal_line(DOT_GREEN, _cfd_name(sig), f"достигнут TP{notice.k} {cfd_price(notice.level)}", stop,
-                       result=_cfd_r(float(notice.k)), extra=extra, label="сейчас", html=html)
+    return _cfd_block(f"{_cfd_name(sig)} TP{notice.k} {cfd_plain(notice.level)} stop {cfd_plain(notice.stop)}",
+                      html)
 
 
 def _cfd_close(notice, html: bool) -> str:
+    """«SOLUSD closed 152.30 +2.32R (+€11.60)»: the price the stop closed it at and the result, in euros too
+    when the signal was sized."""
     sig = notice.signal
-    event = "сработал трейлинг-стоп" if notice.trailed else "сработал стоп"
-    details = f"закрыто по {cfd_price(notice.price)}"
+    text = f"{_cfd_name(sig)} closed {cfd_plain(notice.price)} {(round(notice.result_r, 2) or 0.0):+.2f}R"
     if sig.risk_eur is not None:
-        money_ = notice.result_r * sig.risk_eur
-        result, extra, gain = money_cents(money_), f" ({_cfd_r(notice.result_r)})", round(money_, 2) >= 0
-    else:
-        result, extra, gain = _cfd_r(notice.result_r), None, round(notice.result_r, 1) >= 0
-    return signal_line(DOT_GREEN if gain else DOT_RED, _cfd_name(sig), event, details, result=result,
-                       extra=extra, html=html)
+        money_ = round(notice.result_r * sig.risk_eur, 2) or 0.0
+        text += f" ({'-' if money_ < 0 else '+'}€{abs(money_):.2f})"
+    return _cfd_block(text, html)
 
 
 def format_cfd_notice(notice, *, html: bool = True) -> str:

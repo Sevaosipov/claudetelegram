@@ -57,7 +57,7 @@ def test_the_first_run_makes_the_signal_and_sends_the_entry_message(conn, sent):
     assert (result.tracked, result.made) == (0, 1)
     (sig,) = live.open_signals(conn)
     assert sent == [telegram_notify.format_cfd_notice(live.Notice("entry", sig, risk_pct=1.0))]
-    assert sent[0].startswith("🟢 <b>SOLUSD!</b>: покупка по 110,50 — стоп ") and sent[0].endswith("; эксперимент")
+    assert sent[0].startswith("<pre>SOLUSD Long\nEntry 110.50\nStop  ") and "\nTP4   " in sent[0]
 
 
 def test_the_next_day_tracks_the_checkpoint_and_the_same_run_scans_too(conn, sent):
@@ -68,7 +68,7 @@ def test_the_next_day_tracks_the_checkpoint_and_the_same_run_scans_too(conn, sen
     sent.clear()
     result = live.run(conn, fetch=fetch_for(day2, D1 + DAY, tp1 - 1.0), today=D1 + DAY)
     assert (result.tracked, result.made) == (1, 0)
-    assert len(sent) == 1 and sent[0].startswith("🟢 <b>SOLUSD!</b>: достигнут TP1 ")
+    assert len(sent) == 1 and sent[0].startswith("<pre>SOLUSD TP1 ") and " stop " in sent[0]
     assert live.get_signal(conn, sig.id).checkpoint == 1
     sent.clear()
     live.run(conn, fetch=fetch_for(day2, D1 + DAY, tp1 - 1.0), today=D1 + DAY)     # the same day again
@@ -81,7 +81,7 @@ def test_a_closed_signal_is_told_and_its_coin_is_free_again(conn, sent):
     crash = sol_series([(110.5, 111.0, sig.stop0 - 5, sig.stop0 - 4)])
     sent.clear()
     live.run(conn, fetch=fetch_for(crash, D1 + DAY, 100.0), today=D1 + DAY)
-    assert len(sent) == 1 and "сработал стоп — закрыто по " in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("<pre>SOLUSD closed ") and sent[0].endswith("R</pre>")
     assert live.open_signals(conn) == [] and live.closed_signals(conn)[0].exit_price == pytest.approx(sig.stop0)
 
 
