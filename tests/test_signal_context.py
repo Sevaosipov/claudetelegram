@@ -161,9 +161,7 @@ def test_a_pick_gets_its_company_line_and_amount_and_the_message_says_them(conn)
     assert pick["amount_eur"] == 19.2 and pick["about"].startswith("Trucking (Industrials)")
     assert pick["price"] == 15.2
     assert weekly.buy_text(pick) == (
-        "<pre>RXO Buy · Invest\nPrice 15.20\nStop  13.68\nSize  €19</pre>\n"
-        "Trucking (Industrials) · кап. $2,8 млрд · P/E 31 (прогноз 18,2) · P/S 0,6 · "
-        "выручка −4% г/г · маржа 1,2%")
+        "<pre>RXO Buy · Invest\nPrice 15.20\nStop  13.68\nSize  €19</pre>")
 
 
 def test_a_pick_with_no_context_reads_as_before(conn):

@@ -113,9 +113,10 @@ def test_the_chart_verdict_is_one_word_in_the_block(chart, row):
     assert weekly.buy_text(_pick(chart=chart)) == f"<pre>GME Buy · Invest\nStop  -10%{row}</pre>"
 
 
-def test_a_company_keeps_its_line_under_the_block():
-    assert weekly.buy_text(_pick(about="Specialty Retail · кап. $10,3 млрд")) == (
-        "<pre>GME Buy · Invest\nStop  -10%</pre>\nSpecialty Retail · кап. $10,3 млрд")
+def test_the_company_line_is_not_shown_but_the_analyst_still_gets_it():
+    pick = _pick(about="Specialty Retail · кап. $10,3 млрд")
+    assert weekly.buy_text(pick) == "<pre>GME Buy · Invest\nStop  -10%</pre>"
+    assert "Компания: Specialty Retail · кап. $10,3 млрд" in weekly.facts(pick)
 
 
 def test_a_buy_without_a_price_gives_the_stop_as_a_percent_and_without_a_size_has_no_size_line():
@@ -186,7 +187,7 @@ def test_the_weeks_signals_carry_the_tag_of_the_picks_that_have_it(conn):
 
 def test_a_buy_has_only_the_pre_tag_and_every_dynamic_part_escaped():
     text = weekly.buy_text(_pick("A&B", reasons=["<b>bold</b> & co"], about="R&D <labs>"))
-    assert "A&amp;B Buy" in text and "R&amp;D &lt;labs&gt;" in text and "bold" not in text
+    assert "A&amp;B Buy" in text and "labs" not in text and "bold" not in text
     assert set(_TAGS.findall(text)) == {"<pre>", "</pre>"}
 
 

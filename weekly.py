@@ -51,11 +51,11 @@ def buy_text(pick: dict) -> str:
         Chart Against
 
     (the last close, the stop that far below it, the euros to buy: signal_context; the chart verdict in a
-    word: chart_check, the bot's rules reviewed by Claude) -- and, for a company, one line under it on what
-    it is and how it is valued. A coin is named by its symbol. Without a price the stop is its percent.
-    «Not on Trading 212», «High risk» (an alt) and «Merger pending» are lines of the block. Why the signal
-    was picked and the sentence of the chart check are not shown: the user asked for the trade alone (the
-    analyst gives both on request). What the pick does not have is left out."""
+    word: chart_check, the bot's rules reviewed by Claude). A coin is named by its symbol. Without a price
+    the stop is its percent. «Not on Trading 212», «High risk» (an alt) and «Merger pending» are lines of
+    the block. Why the signal was picked, the company line and the sentence of the chart check are not
+    shown: the user asked for the trade alone (the analyst gives all three on request, and gets them as
+    its facts: facts()). What the pick does not have is left out."""
     rows = []
     price, stop_pct = pick.get("price"), pick.get("stop_pct")
     if price:
@@ -74,10 +74,7 @@ def buy_text(pick: dict) -> str:
         block.append(RISK_TAG)
     if pick.get("deal"):
         block.append("Merger pending")
-    lines = [f"<pre>{telegram_notify._esc(chr(10).join(block))}</pre>"]
-    if pick.get("about"):
-        lines.append(telegram_notify._esc(pick["about"]))
-    return "\n".join(lines)
+    return f"<pre>{telegram_notify._esc(chr(10).join(block))}</pre>"
 
 
 def facts(pick: dict) -> str:
