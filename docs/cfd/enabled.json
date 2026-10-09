@@ -22,5 +22,13 @@
       "CARRY-BASKET": "monthly"
     },
     "run_at": "2026-10-08T16:47:04+00:00"
+  },
+  "round4": {
+    "enabled": [],
+    "exit": {
+      "COT-EXT": "report/stop/time",
+      "LDN-BO": "evening/stop"
+    },
+    "run_at": "2026-10-09T16:19:09+00:00"
   }
 }
