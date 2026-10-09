@@ -166,11 +166,19 @@ def about(ticker: str, source: str | None = None, *, info_fn=None) -> str | None
 
 
 def enrich(conn, pick: dict, today: dt.date, *, info_fn=None) -> dict:
-    """A pick (signals_weekly.pick_record) with what its message adds: `about` (the company line) and
-    `amount_eur` (the size), each only when there is one."""
+    """A pick (signals_weekly.pick_record) with what its message adds: `about` (the company line), `price`
+    (the last close: the message's price and the level of its stop) and `amount_eur` (the size), each only
+    when there is one."""
     line = about(pick["ticker"], pick.get("source"), info_fn=info_fn)
     if line:
         pick["about"] = line
+    try:
+        price = positions.last_close(pick["ticker"], pick.get("source"))
+    except Exception as e:
+        print(f"[signal_context] {pick['ticker']}: no price: {type(e).__name__}: {e}", file=sys.stderr)
+        price = None
+    if price:
+        pick["price"] = price
     amount = amount_eur(conn, pick.get("stop_pct"), today)
     if amount is not None:
         pick["amount_eur"] = round(amount, 2)

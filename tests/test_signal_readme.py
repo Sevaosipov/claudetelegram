@@ -99,17 +99,21 @@ def _busy_week(conn):
 
 def test_the_readme_examples_are_what_the_code_renders(conn):
     pick = dict(ticker="GME", source="SEC", company="GameStop", kind="stock", score=70.0, stop_pct=0.10,
-                reasons=["2 инсайдера из руководства", "CEO среди покупателей", "первая покупка"], t212=False)
+                reasons=["2 инсайдера из руководства", "CEO среди покупателей", "первая покупка"], t212=False,
+                price=23.10, amount_eur=19.2,
+                about="Specialty Retail (Consumer Cyclical) · кап. $10,3 млрд · P/E 25 · P/S 2,7 · "
+                      "выручка −3% г/г · маржа 10,8%")
     stop = positions.CloseAlert(_position(), "trailing_stop", "−10% от максимума 25.80", 20.70)
     insider = positions.CloseAlert(_position(), "insider_sell", "Ryan Cohen — Form 4, 2026-10-01", 20.70)
     holding = ta.T212Position("GME_US_EQ", None, "US36467W1099", "USD", 10.0, 23.10, 24.05,
                               "2026-09-28T14:03:11.000+02:00", 207.3, 199.0, 8.30, "EUR")
     alt = dict(ticker="CRYPTO:SOL", source="CRYPTO", company="SOL", kind="crypto", score=75.0, stop_pct=0.22,
-               reasons=["выше 100-дн. средней", "20 дн. +12%", "60 дн. +30%"], t212=None, risk=True)
+               reasons=["выше 100-дн. средней", "20 дн. +12%", "60 дн. +30%"], t212=None, risk=True,
+               price=150.0)
     state = dict(close=1.2000, ma=1.1500, diff=0.35, atr=0.008)
+    for buy in (pick, alt):                              # the two buys: blocks of their own, above the list
+        assert f"```none\n{re.sub('</?pre>', '', _shown(weekly.buy_text(buy)))}\n```" in _section()
     expected = [
-        weekly.buy_text(pick),
-        weekly.buy_text(alt),
         weekly.exit_text("XYZ", ["Anna Lee", "Bo Chen"]),
         tn.format_close_alert(stop),
         tn.format_close_alert(insider),
@@ -134,7 +138,7 @@ def test_the_readme_summary_examples_are_what_the_code_renders(conn):
 
 def test_the_readme_has_three_example_blocks_and_the_summary_ones_follow_the_signals():
     blocks = _blocks()
-    assert len(blocks) == 3 and blocks[0][0].startswith("🟢 GME!: покупка")
+    assert len(blocks) == 3 and blocks[0][0].startswith("🔴 XYZ!: продают")
     assert blocks[1][0].startswith("📊 Неделя ") and blocks[2][0].startswith("📊 Неделя ")
 
 

@@ -90,20 +90,27 @@ def test_a_bad_size_gets_the_usage_and_changes_nothing(conn, text, answer):
 
 
 # ------------------------------------------------------------------ in the signal
+@pytest.fixture(autouse=True)
+def last_close(monkeypatch):
+    monkeypatch.setattr("positions.last_close", lambda ticker, source=None: {"RXO": 15.2}.get(ticker))
+
+
 def test_a_pick_gets_its_company_line_and_amount_and_the_message_says_them(conn):
     account(conn, 192.0)
     pick = {"ticker": "RXO", "source": "SEC13DG", "score": 65.0, "stop_pct": 0.10,
             "reasons": ["активист 13D: 19,3%", "6 мес. +81%"], "t212": True}
     sc.enrich(conn, pick, TODAY, info_fn=lambda s: RXO)
     assert pick["amount_eur"] == 19.2 and pick["about"].startswith("Trucking (Industrials)")
+    assert pick["price"] == 15.2
     assert weekly.buy_text(pick) == (
-        "🟢 <b>RXO!</b>: покупка — активист 13D: 19,3%; 6 мес. +81%; балл 65, стоп −10%, купить на €19\n"
-        "Компания: Trucking (Industrials) · кап. $2,8 млрд · P/E 31 (прогноз 18,2) · P/S 0,6 · "
+        "<pre>RXO Buy\nPrice 15.20\nStop  13.68\nSize  €19</pre>\n"
+        "активист 13D: 19,3%; 6 мес. +81%; балл 65\n"
+        "Trucking (Industrials) · кап. $2,8 млрд · P/E 31 (прогноз 18,2) · P/S 0,6 · "
         "выручка −4% г/г · маржа 1,2%")
 
 
 def test_a_pick_with_no_context_reads_as_before(conn):
     pick = {"ticker": "CRYPTO:SOL", "score": 61.0, "stop_pct": 0.2, "reasons": ["тренд"], "risk": True}
     sc.enrich(conn, pick, TODAY, info_fn=lambda s: RXO)
-    assert "about" not in pick and "amount_eur" not in pick
-    assert weekly.buy_text(pick) == "🟢 <b>SOL!</b>: покупка — тренд; балл 61, стоп −20%, высокий риск"
+    assert "about" not in pick and "amount_eur" not in pick and "price" not in pick
+    assert weekly.buy_text(pick) == "<pre>SOL Buy\nStop  -20%\nHigh risk</pre>\nтренд; балл 61"

@@ -26,37 +26,53 @@ from telegram_notify import DOT_GREEN, DOT_RED, signed_pct
 
 WEEK_DAYS = 6               # the week is today - 6 days ... today
 MAX_REASONS = 2             # a buy names this many of its reasons
-RISK_TAG = "высокий риск"   # the last words of an alt's buy
+RISK_TAG = "High risk"      # a line of an alt's buy block
 MAX_SELLERS = 5             # a group exit names this many sellers, then «и ещё N»
 BEST_WORST = 3              # the summary names this many best and this many worst positions
 SCORING_FAILED_WARNING = "⚠️ Оценка сигналов на этой неделе не отработала — покупок не было."
 
 
 # ----------------------------------------------------------------- the signals
+def _plain(x: float) -> str:
+    """A price as a trading terminal writes it: a point, no spaces; two decimals from 1, more below."""
+    return f"{x:.{2 if x >= 1 else 4 if x >= 0.01 else 6}f}"
+
+
 def buy_text(pick: dict) -> str:
-    """«🟢 GME!: покупка — 2 инсайдера из руководства; CEO среди покупателей; балл 70, стоп −10%»: a picked
-    buy (signals_weekly.pick_record) -- its first two reasons, its score and its stop, and «нет на
-    Trading 212» when the score says the broker does not list it. A coin is named by its symbol; an alt
-    (a pick with `risk`) ends with «, высокий риск». With `amount_eur` (signal_context: the user's own
-    /size settings over the stop) it says «купить на €19», and with `about` a second line says what the
-    company is and how it is valued. What the pick does not have is left out."""
+    """A picked buy (signals_weekly.pick_record), bare: a fixed-width block with nothing but the trade --
+
+        RXO Buy
+        Price 15.20
+        Stop  13.68
+        Size  €22
+
+    (the last close, the stop that far below it, the euros to buy: signal_context) -- and under it why it was
+    picked (its first two reasons and its score) and, for a company, what it is and how it is valued. A coin
+    is named by its symbol. Without a price the stop is its percent. «Not on Trading 212» and, for an alt,
+    «High risk» are lines of the block: both decide whether the trade can or should be placed. What the pick
+    does not have is left out."""
+    rows = []
+    price, stop_pct = pick.get("price"), pick.get("stop_pct")
+    if price:
+        rows.append(("Price", _plain(price)))
+    if stop_pct:
+        rows.append(("Stop", _plain(price * (1 - stop_pct)) if price else f"-{stop_pct * 100:.0f}%"))
+    if pick.get("amount_eur"):
+        rows.append(("Size", f"€{pick['amount_eur']:.0f}"))
+    block = [f"{crypto.symbol_of(pick['ticker'])} Buy"] + [f"{name:<6}{value}" for name, value in rows]
+    if pick.get("t212") is False:
+        block.append("Not on Trading 212")
+    if pick.get("risk"):
+        block.append(RISK_TAG)
+    lines = [f"<pre>{telegram_notify._esc(chr(10).join(block))}</pre>"]
     reasons = [r for r in (pick.get("reasons") or []) if r][:MAX_REASONS]
     score = pick.get("score")
-    head = reasons + ([f"балл {score:.0f}"] if score is not None else [])
-    tail = []
-    if pick.get("stop_pct"):
-        tail.append(f"стоп −{pick['stop_pct'] * 100:.0f}%")
-    if pick.get("amount_eur"):
-        tail.append(f"купить на {telegram_notify.money(pick['amount_eur'])}")
-    if pick.get("t212") is False:
-        tail.append("нет на Trading 212")
-    if pick.get("risk"):
-        tail.append(RISK_TAG)
-    details = ", ".join((["; ".join(head)] if head else []) + tail)
-    line = telegram_notify.signal_line(DOT_GREEN, crypto.symbol_of(pick["ticker"]), "покупка", details or None)
+    why = "; ".join(reasons + ([f"балл {score:.0f}"] if score is not None else []))
+    if why:
+        lines.append(telegram_notify._esc(why))
     if pick.get("about"):
-        line += "\n" + telegram_notify._esc(f"Компания: {pick['about']}")
-    return line
+        lines.append(telegram_notify._esc(pick["about"]))
+    return "\n".join(lines)
 
 
 def week_exits(conn, start: str, end: str) -> list[tuple[int, str, list[str]]]:
