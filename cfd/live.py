@@ -419,21 +419,22 @@ def notify(notice: Notice) -> bool:
     """Send one event to Telegram (telegram_notify.send_text, looked up at the call). True when it went out."""
     import telegram_notify
     text = telegram_notify.format_cfd_notice(notice)
-    if notice.kind == "entry":                  # a new signal carries Claude's read of its chart, when there is one
+    if notice.kind == "entry":                  # a new signal carries its chart verdict
         note = _chart_note(notice.signal)
         if note:
-            text += "\n" + telegram_notify._esc(f"Claude: {note}")
+            text += "\n" + telegram_notify._esc(note)
     return bool(telegram_notify.send_text(text))
 
 
 def _chart_note(sig: Signal) -> str | None:
-    """analyst.signal_note for a new signal (TradingView, the daily chart); None when it gives nothing or
-    fails -- the signal goes out either way."""
+    """The chart verdict of a new signal (chart_check.line: the bot's fixed rules on the daily closes,
+    reviewed by Claude with TradingView's data); None when even that fails -- the signal goes out
+    either way."""
     try:
-        import analyst
+        import chart_check
         facts = (f"CFD-сигнал: пробой 55-дневного диапазона при цене выше SMA200\n"
                  f"Вход: {sig.entry:g}\nСтоп: {sig.stop0:g} (трейлинг 3 ATR)")
-        return analyst.signal_note(f"{sig.coin}USD", "покупка" if sig.side == "long" else "продажа", facts)
+        return chart_check.line(f"{sig.coin}USD", f"CRYPTO:{sig.coin}", None, sig.side, facts)
     except Exception as e:
         print(f"[CFD] {sig.coin}: chart check failed: {type(e).__name__}: {e}", file=sys.stderr)
         return None

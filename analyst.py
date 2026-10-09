@@ -734,6 +734,7 @@ def context(conn, ticker: str, *, scored=None) -> str:
     return "\n".join(model_lines + _position_lines(conn, ticker) + [_dossier(conn, ticker)])
 
 
+
 # ---------------------------------------------------------------- portfolio, news
 def _buy_signals(conn, today: dt.date) -> list[str]:
     """«СИГНАЛЫ НА ПОКУПКУ ЗА 30 ДНЕЙ:» and the weekly buy signals the bot sent in that time (the buy_signals

@@ -133,17 +133,18 @@ def test_a_send_that_raises_costs_that_coin_only(conn, monkeypatch, capsys):
     assert live.all_signals(conn) == [] and "RuntimeError" in capsys.readouterr().err
 
 
-def test_a_new_signal_carries_claudes_read_of_the_chart_when_there_is_one(monkeypatch):
-    import analyst
+def test_a_new_signal_carries_its_chart_verdict_when_there_is_one(monkeypatch):
+    import chart_check
     from tests.test_cfd_live_messages import entry, checkpoint
     sent = []
     monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
-    monkeypatch.setattr(analyst, "signal_note", lambda name, side, facts="": f"график за — {name} {side}")
+    monkeypatch.setattr(chart_check, "line", lambda name, ticker, source, side, extra="": f"График за — {name} {ticker} {side}")
     assert live.notify(entry()) and live.notify(checkpoint(1, 119.4, 134.8))
-    assert sent[0].endswith("</pre>\nClaude: график за — SOLUSD покупка") and "Claude" not in sent[1]
+    assert sent[0].endswith("</pre>\nГрафик за — SOLUSD CRYPTO:SOL long") and "График" not in sent[1]
 
     def boom(*a, **k):
         raise RuntimeError("down")
-    monkeypatch.setattr(analyst, "signal_note", boom)
-    assert live.notify(entry()) and "Claude" not in sent[-1]
-
+    monkeypatch.setattr(chart_check, "line", boom)
+    assert live.notify(entry()) and "График" not in sent[-1]
+    monkeypatch.setattr(chart_check, "line", lambda *a, **k: None)
+    assert live.notify(entry()) and sent[-1].endswith("</pre>")

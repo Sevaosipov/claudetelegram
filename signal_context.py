@@ -206,12 +206,13 @@ def enrich(conn, pick: dict, today: dt.date, *, info_fn=None, share: float = 1.0
     return pick
 
 
-def refresh(conn, picks: list[dict], today: dt.date, *, note_fn=None) -> list[dict]:
+def refresh(conn, picks: list[dict], today: dt.date, *, note_fn=None, closes_fn=None) -> list[dict]:
     """The week's picks made ready to send, just before they go out (the Friday evening run): each one's
     price read again -- the message shows the price of the hour, not of the morning's pick -- and, once
-    per pick, Claude's one-line read of its chart (analyst.signal_note, TradingView), kept as `claude`.
-    A pick whose check gave nothing goes out without the line. The picks are changed in place."""
-    import analyst
+    per pick, its chart verdict (chart_check.line: the bot's fixed rules on the daily closes, reviewed by
+    Claude with TradingView's data), kept as `chart`. A pick always gets a line: without Claude, the
+    rules' own. The picks are changed in place."""
+    import chart_check
     import weekly
     for pick in picks:
         try:
@@ -220,15 +221,10 @@ def refresh(conn, picks: list[dict], today: dt.date, *, note_fn=None) -> list[di
                 pick["price"] = price
         except Exception as e:
             print(f"[signal_context] {pick['ticker']}: no fresh price: {type(e).__name__}", file=sys.stderr)
-        if pick.get("claude"):
+        if pick.get("chart"):
             continue
-        try:
-            note = (note_fn or analyst.signal_note)(crypto.symbol_of(pick["ticker"]), "покупка",
-                                                    weekly.facts(pick))
-        except Exception as e:
-            print(f"[signal_context] {pick['ticker']}: chart check failed: {type(e).__name__}: {e}",
-                  file=sys.stderr)
-            note = None
-        if note:
-            pick["claude"] = note
+        line = chart_check.line(crypto.symbol_of(pick["ticker"]), pick["ticker"], pick.get("source"),
+                                "long", weekly.facts(pick), closes_fn=closes_fn, note_fn=note_fn)
+        if line:
+            pick["chart"] = line
     return picks

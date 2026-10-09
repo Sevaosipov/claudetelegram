@@ -129,6 +129,17 @@ project's files. The commands find the keys they need themselves.
         panes or anything by clicking the UI. Only the nine tools above.
 
 5. REASON
+   - The chart verdict comes from FIXED RULES, the same every time, applied to TradingView's daily
+     numbers -- not from an impression. For a buy (a sell mirrors them):
+       против: the close is under its 200-day average; or the price jumped 15 percent or more in
+               a day within the last 60 bars and has stood within 5 percent since; or it is 20
+               percent or more under its 60-bar high and under its 50-day average;
+       за: the close is above its 50-day and 200-day averages, the 50-day is not under the
+           200-day, RSI is under 75 and the close is not within 3 percent of its 1-year high;
+       нейтрален: anything else.
+     Only what a price series cannot show moves that verdict, and only towards caution: a buyout
+     or an offer that pins the price; a share offering, a delisting, a bankruptcy, a fraud or an
+     investigation in the news; an earnings report due within 5 days. Say which it was.
    - The trend on the daily and the weekly range (250 and 104 bars).
    - Where the price sits in its 3-month range (60 bars) and its 1-year range (250 bars).
    - Levels: the 3-month low, the 3-month high, the 1-year high -- from TradingView's numbers.

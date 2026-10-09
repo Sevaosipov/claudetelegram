@@ -52,7 +52,7 @@ def buy_text(pick: dict) -> str:
     is named by its symbol. Without a price the stop is its percent. «Not on Trading 212» and, for an alt,
     «High risk» are lines of the block: both decide whether the trade can or should be placed; so is
     «Merger pending», for a company that is a party to a merger without being its target. The last
-    line, «Claude: …», is the analyst's read of the chart (signal_context.refresh). What the pick does not
+    line is the chart verdict -- the bot's rules, reviewed by Claude (chart_check.line). What the pick does not
     have is left out."""
     rows = []
     price, stop_pct = pick.get("price"), pick.get("stop_pct")
@@ -77,8 +77,8 @@ def buy_text(pick: dict) -> str:
         lines.append(telegram_notify._esc(why))
     if pick.get("about"):
         lines.append(telegram_notify._esc(pick["about"]))
-    if pick.get("claude"):
-        lines.append(telegram_notify._esc(f"Claude: {pick['claude']}"))
+    if pick.get("chart"):
+        lines.append(telegram_notify._esc(pick["chart"]))
     return "\n".join(lines)
 
 

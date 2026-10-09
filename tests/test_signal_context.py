@@ -87,31 +87,43 @@ def test_the_shares_follow_the_points_above_fifty():
     assert sum(sc.shares([95.0, 81.5, 64.0, 60.0, 60.0])) == pytest.approx(1.0)
 
 
-def test_refresh_reads_the_price_again_and_asks_claude_once(conn, monkeypatch):
+def _healthy():
+    out = [10.0 + 0.08 * i for i in range(240)]
+    out += [out[-1] - 0.142 * i for i in range(1, 11)]
+    for i in range(10):
+        out.append(out[-1] + (0.10 if i % 2 == 0 else -0.02))
+    return out
+
+
+UP = [(f"d{i}", c) for i, c in enumerate(_healthy())]      # a rise, a dip, a recovery: «за» by the rules
+
+
+def test_refresh_reads_the_price_again_and_checks_the_chart_once(conn):
     asked = []
 
     def note(name, side, facts):
         asked.append((name, side, facts))
-        return "график за — восходящий тренд, цена над поддержкой 14,80"
+        return "график нейтрален — отчёт 14.10, через 5 дней"
     picks = [{"ticker": "RXO", "source": "SEC13DG", "score": 65.0, "stop_pct": 0.1, "reasons": ["активист 13D"],
-              "price": 14.0}, {"ticker": "CRYPTO:SOL", "score": 61.0}]
-    sc.refresh(conn, picks, TODAY, note_fn=note)
-    assert picks[0]["price"] == 15.2 and picks[0]["claude"].startswith("график за")
-    assert [a[:2] for a in asked] == [("RXO", "покупка"), ("SOL", "покупка")]
-    assert "Причины сигнала: активист 13D" in asked[0][2] and "Балл: 65" in asked[0][2]
-    sc.refresh(conn, picks, TODAY, note_fn=note)
-    assert len(asked) == 2                                          # kept: not asked again
-    assert weekly.buy_text(picks[0]).endswith("\nClaude: график за — восходящий тренд, цена над поддержкой 14,80")
+              "price": 14.0}]
+    sc.refresh(conn, picks, TODAY, note_fn=note, closes_fn=lambda t, s: UP)
+    assert picks[0]["price"] == 15.2
+    assert picks[0]["chart"] == "График нейтрален (по правилам: за) — отчёт 14.10, через 5 дней"
+    [(name, side, facts)] = asked
+    assert (name, side) == ("RXO", "покупка") and "Причины сигнала: активист 13D" in facts
+    assert "Вердикт по правилам бота: график за" in facts and "Средние 20/50/200 дней:" in facts
+    sc.refresh(conn, picks, TODAY, note_fn=note, closes_fn=lambda t, s: UP)
+    assert len(asked) == 1                                          # kept: not asked again
+    assert weekly.buy_text(picks[0]).endswith("\nГрафик нейтрален (по правилам: за) — отчёт 14.10, через 5 дней")
 
 
-def test_a_failed_chart_check_leaves_the_pick_without_the_line(conn, capsys):
-    def boom(*a):
-        raise RuntimeError("no claude")
+def test_without_claude_the_rules_verdict_goes_out_marked_and_with_nothing_there_is_no_line(conn):
     picks = [{"ticker": "RXO", "score": 65.0}]
-    sc.refresh(conn, picks, TODAY, note_fn=boom)
-    sc.refresh(conn, picks, TODAY, note_fn=lambda *a: None)
-    assert "claude" not in picks[0] and "Claude" not in weekly.buy_text(picks[0])
-    assert "chart check failed" in capsys.readouterr().err
+    sc.refresh(conn, picks, TODAY, note_fn=lambda *a: None, closes_fn=lambda t, s: UP)
+    assert picks[0]["chart"] == "График за (по правилам, без Claude) — цена выше 50- и 200-дн. средних"
+    bare = [{"ticker": "NEW", "score": 65.0}]
+    sc.refresh(conn, bare, TODAY, note_fn=lambda *a: None, closes_fn=lambda t, s: [])
+    assert "chart" not in bare[0] and "График" not in weekly.buy_text(bare[0])
 
 
 # ------------------------------------------------------------------ /size
