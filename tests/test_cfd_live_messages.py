@@ -55,14 +55,14 @@ def test_a_plain_price_has_a_point_and_no_spaces(x, text):
 
 
 def test_entry_is_a_bare_block_with_the_size_when_there_is_a_balance():
-    assert tn.format_cfd_notice(entry()) == f"<pre>{ENTRY}\nSize  0.43</pre>"
+    assert tn.format_cfd_notice(entry()) == f"<pre>{ENTRY}\nSize  €46</pre>"
 
 
 def test_a_short_says_short_and_has_the_levels_below():
     short = sig(side="short", stop0=134.8, stop=134.8)
     assert tn.format_cfd_notice(entry(short), html=False) == (
         "SOLUSD Short\nEntry 121.50\nStop  134.80\nTP1   108.20\nTP2   94.9000\nTP3   81.6000\nTP4   68.3000\n"
-        "Size  0.43")
+        "Size  €46")
 
 
 def test_entry_without_a_balance_or_under_one_step_has_no_size_line():
@@ -73,13 +73,13 @@ def test_entry_without_a_balance_or_under_one_step_has_no_size_line():
 
 def test_entry_says_nothing_else():
     text = tn.format_cfd_notice(entry(over_limit=(4.0, 3.0)), html=False)
-    assert text == ENTRY + "\nSize  0.43" and "эксперимент" not in text and "риск" not in text
+    assert text == ENTRY + "\nSize  €46" and "эксперимент" not in text and "риск" not in text
 
 
 def test_a_cheap_coin_has_six_decimals_and_whole_coins():
     doge = sig(coin="DOGE", symbol="DOGE-USD", entry=0.152, stop0=0.1402, stop=0.1402, r=0.0118, qty=424.0)
     text = tn.format_cfd_notice(entry(doge), html=False)
-    assert text.startswith("DOGEUSD Long\nEntry 0.152000\nStop  0.140200\nTP1   0.163800") and text.endswith("Size  424")
+    assert text.startswith("DOGEUSD Long\nEntry 0.152000\nStop  0.140200\nTP1   0.163800") and text.endswith("Size  €64")
 
 
 # ------------------------------------------------------------------ the checkpoints

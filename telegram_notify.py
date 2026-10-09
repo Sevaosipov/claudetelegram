@@ -1142,13 +1142,15 @@ def _cfd_block(text: str, html: bool) -> str:
 
 def _cfd_entry(notice, html: bool) -> str:
     """A new signal, nothing but what is needed to place it: the pair and the side, the entry, the stop,
-    TP1..TP4 and -- with a balance set -- the quantity; one value a line, in a fixed-width font."""
+    TP1..TP4 and -- with a balance set -- the size of the position in euros; one value a line, in a
+    fixed-width font."""
     sig = notice.signal
     sign = 1 if sig.side == "long" else -1
     rows = [("Entry", cfd_plain(sig.entry)), ("Stop", cfd_plain(sig.stop0))]
     rows += [(f"TP{k}", cfd_plain(sig.entry + sign * k * sig.r)) for k in range(1, 5)]
-    if sig.qty:
-        rows.append(("Size", f"{sig.qty:.4f}".rstrip("0").rstrip(".")))
+    if sig.qty and sig.risk_eur and sig.r:
+        # the position's value in euros: the risk in euros over the stop's share of the entry price
+        rows.append(("Size", f"€{sig.risk_eur * sig.entry / sig.r:.0f}"))
     lines = [f"{_cfd_name(sig)} {'Long' if sig.side == 'long' else 'Short'}"]
     return _cfd_block("\n".join(lines + [f"{name:<6}{value}" for name, value in rows]), html)
 
