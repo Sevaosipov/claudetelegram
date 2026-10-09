@@ -49,8 +49,9 @@ def buy_text(pick: dict) -> str:
     (the last close, the stop that far below it, the euros to buy: signal_context) -- and under it why it was
     picked (its first two reasons and its score) and, for a company, what it is and how it is valued. A coin
     is named by its symbol. Without a price the stop is its percent. «Not on Trading 212» and, for an alt,
-    «High risk» are lines of the block: both decide whether the trade can or should be placed. What the pick
-    does not have is left out."""
+    «High risk» are lines of the block: both decide whether the trade can or should be placed. The last
+    line, «Claude: …», is the analyst's read of the chart (signal_context.refresh). What the pick does not
+    have is left out."""
     rows = []
     price, stop_pct = pick.get("price"), pick.get("stop_pct")
     if price:
@@ -72,6 +73,24 @@ def buy_text(pick: dict) -> str:
         lines.append(telegram_notify._esc(why))
     if pick.get("about"):
         lines.append(telegram_notify._esc(pick["about"]))
+    if pick.get("claude"):
+        lines.append(telegram_notify._esc(f"Claude: {pick['claude']}"))
+    return "\n".join(lines)
+
+
+def facts(pick: dict) -> str:
+    """What the bot knows of a pick, as plain lines for the analyst's chart check (analyst.signal_note)."""
+    lines = [f"Тикер: {pick['ticker']}" + (f" ({pick['company']})" if pick.get("company") else "")]
+    if pick.get("reasons"):
+        lines.append("Причины сигнала: " + "; ".join(r for r in pick["reasons"] if r))
+    if pick.get("score") is not None:
+        lines.append(f"Балл: {pick['score']:.0f} (покупка от 60)")
+    if pick.get("price"):
+        lines.append(f"Цена: {_plain(pick['price'])}")
+    if pick.get("stop_pct"):
+        lines.append(f"Стоп: −{pick['stop_pct'] * 100:.0f}% от максимума после покупки")
+    if pick.get("about"):
+        lines.append(f"Компания: {pick['about']}")
     return "\n".join(lines)
 
 

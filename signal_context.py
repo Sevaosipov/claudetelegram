@@ -7,7 +7,7 @@ put next to it.
   * about(): the company's industry, its size and a few ratios (P/E, P/S, revenue growth, margin) from
     Yahoo, as one line. A coin has none.
   * amount_eur(): the position's size from the user's own settings (/size). With a weekly budget -- the
-    money the user adds to the account each Friday -- the budget split evenly between the week's signals;
+    money the user adds to the account each Friday -- the budget split between the week's signals by score;
     without one, the share of the account risked on one signal over the signal's stop, and no more than a
     share of the account, from the value of the Trading 212 account the sync stored. The bot never places
     an order.
@@ -27,12 +27,13 @@ import t212_account
 KV_KEYS = {"risk": "size_risk_pct", "max": "size_max_pct", "budget": "size_budget_eur"}
 DEFAULTS = {"risk": 1.0, "max": 10.0, "budget": 0.0}    # percent of the account; euros a week (0: no budget)
 LIMITS = {"risk": (0.1, 5.0), "max": (1.0, 100.0), "budget": (0.0, 1e6)}
+SHARE_FLOOR = 50.0               # a pick's share of the budget counts its score's points above this
 _FOREVER = 100 * 365 * 24 * 3600
 USAGE = {
     "risk": "/size risk 1 — риск на одну покупку, % счёта: от 0,1 до 5",
     "max": "/size max 10 — не больше этой доли счёта в одной покупке, %: от 1 до 100",
-    "budget": "/size budget 30 — сколько евро вы вкладываете в неделю: делится поровну между сигналами "
-              "пятницы (0 — считать от риска и счёта)",
+    "budget": "/size budget 30 — сколько евро вы вкладываете в неделю: делится между сигналами пятницы "
+              "по баллу (0 — считать от риска и счёта)",
 }
 
 
@@ -44,14 +45,23 @@ def settings(conn) -> dict:
     return out
 
 
-def amount_eur(conn, stop_pct: float | None, today: dt.date, picks: int = 1) -> float | None:
+def shares(scores: list) -> list[float]:
+    """The share of the weekly budget each of the week's picks gets, by its score: in proportion to the
+    score's points above SHARE_FLOOR (a 90 gets four times a 60's share), so the strongest signal gets
+    the most. A pick with no score counts as one at the buy threshold; no picks, no shares."""
+    weights = [max((s if s is not None else SHARE_FLOOR + 10) - SHARE_FLOOR, 1.0) for s in scores]
+    total = sum(weights)
+    return [w / total for w in weights] if total else []
+
+
+def amount_eur(conn, stop_pct: float | None, today: dt.date, share: float = 1.0) -> float | None:
     """How many euros of a signal to buy. With a weekly budget set (the money the user adds each Friday):
-    the budget split evenly between the week's `picks`. Without one: the account's value times the risk
+    its `share` of the budget (shares: by score). Without one: the account's value times the risk
     percent, over the stop's distance (a stop hit then costs that share of the account), and no more than
     the maximum share -- None with no stop or no fresh account value in euros."""
     budget = settings(conn)["budget"]
     if budget:
-        return budget / max(1, picks)
+        return budget * share
     account = t212_account.account_value(conn, today, max_age_days=t212_account.STALE_DAYS)
     if not stop_pct or account is None or not account[0] or (account[1] or "EUR") != "EUR":
         return None
@@ -68,8 +78,8 @@ def settings_text(conn, today: dt.date | None = None) -> str:
     import telegram_notify
     s = settings(conn)
     if s["budget"]:
-        return (f"Бюджет {telegram_notify.money(s['budget'])} в неделю: делится поровну между сигналами "
-                "пятницы (один сигнал — весь бюджет, пять — по пятой части).")
+        return (f"Бюджет {telegram_notify.money(s['budget'])} в неделю: делится между сигналами пятницы "
+                "по баллу — сильному сигналу больше (один сигнал — весь бюджет).")
     text = f"Риск {_pct(s['risk'])}% счёта на покупку, не больше {_pct(s['max'])}% счёта в одной."
     today = today or dt.date.today()
     account = t212_account.account_value(conn, today, max_age_days=t212_account.STALE_DAYS)
@@ -176,7 +186,7 @@ def about(ticker: str, source: str | None = None, *, info_fn=None) -> str | None
         return None
 
 
-def enrich(conn, pick: dict, today: dt.date, *, info_fn=None, picks: int = 1) -> dict:
+def enrich(conn, pick: dict, today: dt.date, *, info_fn=None, share: float = 1.0) -> dict:
     """A pick (signals_weekly.pick_record) with what its message adds: `about` (the company line), `price`
     (the last close: the message's price and the level of its stop) and `amount_eur` (the size), each only
     when there is one."""
@@ -190,7 +200,35 @@ def enrich(conn, pick: dict, today: dt.date, *, info_fn=None, picks: int = 1) ->
         price = None
     if price:
         pick["price"] = price
-    amount = amount_eur(conn, pick.get("stop_pct"), today, picks)
+    amount = amount_eur(conn, pick.get("stop_pct"), today, share)
     if amount is not None:
         pick["amount_eur"] = round(amount, 2)
     return pick
+
+
+def refresh(conn, picks: list[dict], today: dt.date, *, note_fn=None) -> list[dict]:
+    """The week's picks made ready to send, just before they go out (the Friday evening run): each one's
+    price read again -- the message shows the price of the hour, not of the morning's pick -- and, once
+    per pick, Claude's one-line read of its chart (analyst.signal_note, TradingView), kept as `claude`.
+    A pick whose check gave nothing goes out without the line. The picks are changed in place."""
+    import analyst
+    import weekly
+    for pick in picks:
+        try:
+            price = positions.last_close(pick["ticker"], pick.get("source"))
+            if price:
+                pick["price"] = price
+        except Exception as e:
+            print(f"[signal_context] {pick['ticker']}: no fresh price: {type(e).__name__}", file=sys.stderr)
+        if pick.get("claude"):
+            continue
+        try:
+            note = (note_fn or analyst.signal_note)(crypto.symbol_of(pick["ticker"]), "покупка",
+                                                    weekly.facts(pick))
+        except Exception as e:
+            print(f"[signal_context] {pick['ticker']}: chart check failed: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            note = None
+        if note:
+            pick["claude"] = note
+    return picks

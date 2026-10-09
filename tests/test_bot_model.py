@@ -27,6 +27,7 @@ import weekly
 from conftest import add_sec_purchase, add_sec_sale
 
 REAL_T212_SYNC = t212_account.sync        # the main_run fixture stubs it
+REAL_PREPARE = bot._prepare_picks         # ... and this
 REAL_PICK_BUYS, REAL_WEEK_SIGNALS, REAL_FORMAT_SUMMARY = (       # ... and these three
     signals_weekly.pick_buys, weekly.week_signals, weekly.format_summary)
 
@@ -767,6 +768,8 @@ def main_run(monkeypatch, tmp_path):
         return run.send_ok and msg not in run.refuse
 
     monkeypatch.setattr(bot, "_today", lambda: run.today)
+    monkeypatch.setattr(bot, "_hour", lambda: run.hour)
+    monkeypatch.setattr(bot, "_prepare_picks", lambda conn, today: run.prepared.append(today))
     monkeypatch.setattr(bot, "collect_new_signals", collect)
     monkeypatch.setattr(bot, "_score_signals", score_signals)
     monkeypatch.setattr(signals_weekly, "pick_buys", pick_buys)
@@ -821,6 +824,8 @@ def main_run(monkeypatch, tmp_path):
     run.syncs, run.sync_silent, run.sync_crashes = [], [], False  # the Trading 212 sync (stubbed)
     run.cfd, run.cfd_crashes = [], False                          # the CFD pass (stubbed): `calls` as it was
     run.league, run.league_crashes = [], False                    # the paper league's pass (stubbed), the same
+    run.hour = 18                                                 # past the Friday hour: the week's messages may go
+    run.prepared = []                                             # the days the picks were made ready to send
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 
@@ -1362,4 +1367,42 @@ def test_a_crashing_league_pass_is_reported_and_the_run_goes_on(main_run, capsys
     main_run()
     out = capsys.readouterr()
     assert len(main_run.league) == 1 and "LEAGUE" in out.out + out.err
+
+
+# ---- the Friday hour: the week's messages go out from 17:00, with the evening's light run
+def test_a_friday_morning_run_picks_but_does_not_send_the_week(main_run, capsys):
+    main_run.hour = 8
+    calls = main_run()
+    assert not any(c[0] == "signals" for c in calls) and main_run.prepared == []
+    assert "weekly messages go out with the Friday 17:00 run" in capsys.readouterr().out
+
+
+def test_a_saturday_run_sends_at_any_hour_what_friday_did_not(main_run):
+    main_run.hour = 8
+    main_run.today = FRI + dt.timedelta(days=1)
+    calls = main_run()
+    assert main_run.prepared == [main_run.today] and any(c[0] == "signals" for c in calls)
+
+
+def test_the_evening_run_prepares_and_sends_and_polls_nothing(conn, monkeypatch, capsys):
+    done = []
+    monkeypatch.setattr(bot, "_today", lambda: FRI)
+    monkeypatch.setattr(bot, "_prepare_picks", lambda c, today: done.append("prepare"))
+    monkeypatch.setattr(bot, "_send_weekly", lambda c, today, **kw: done.append("send") or True)
+    assert bot.run_weekly_send(conn) == 0 and done == []            # no picks kept yet: the morning has not scored
+    assert "picks are not made yet" in capsys.readouterr().out
+    bot._mark_week(conn, FRI, bot.BUYS_KEY)
+    assert bot.run_weekly_send(conn) == 0 and done == ["prepare", "send"]
+    bot._mark_week(conn, FRI, bot.MESSAGE_KEY)
+    assert bot.run_weekly_send(conn) == 0 and done == ["prepare", "send"]      # the week is out: nothing again
+    monkeypatch.setattr(bot, "_today", lambda: FRI - dt.timedelta(days=1))
+    assert bot.run_weekly_send(conn) == 0 and "nothing due" in capsys.readouterr().out
+
+
+def test_preparing_the_picks_keeps_what_claude_said(conn, monkeypatch):
+    db.save_cached_json(conn, bot.PICKS_KEY.format(week=bot._week_id(FRI)), [{"ticker": "AAA", "score": 70.0}])
+    monkeypatch.setattr(bot.signal_context, "refresh",
+                        lambda c, picks, today: [p.update(claude="график за — тренд вверх") for p in picks])
+    REAL_PREPARE(conn, FRI)
+    assert bot._week_picks(conn, FRI) == [{"ticker": "AAA", "score": 70.0, "claude": "график за — тренд вверх"}]
 

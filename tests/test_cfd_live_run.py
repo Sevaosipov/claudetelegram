@@ -131,3 +131,19 @@ def test_a_send_that_raises_costs_that_coin_only(conn, monkeypatch, capsys):
     monkeypatch.setattr("telegram_notify.send_text", send_text)
     live.run(conn, fetch=fetch_for(sol_series(), D1, 110.5), today=D1)
     assert live.all_signals(conn) == [] and "RuntimeError" in capsys.readouterr().err
+
+
+def test_a_new_signal_carries_claudes_read_of_the_chart_when_there_is_one(monkeypatch):
+    import analyst
+    from tests.test_cfd_live_messages import entry, checkpoint
+    sent = []
+    monkeypatch.setattr("telegram_notify.send_text", lambda msg: sent.append(msg) or True)
+    monkeypatch.setattr(analyst, "signal_note", lambda name, side, facts="": f"график за — {name} {side}")
+    assert live.notify(entry()) and live.notify(checkpoint(1, 119.4, 134.8))
+    assert sent[0].endswith("</pre>\nClaude: график за — SOLUSD покупка") and "Claude" not in sent[1]
+
+    def boom(*a, **k):
+        raise RuntimeError("down")
+    monkeypatch.setattr(analyst, "signal_note", boom)
+    assert live.notify(entry()) and "Claude" not in sent[-1]
+

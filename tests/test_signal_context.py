@@ -68,16 +68,50 @@ def test_no_amount_without_a_stop_a_fresh_account_or_euros(conn):
     assert sc.amount_eur(conn, 0.10, TODAY) is None
 
 
-def test_a_weekly_budget_is_split_evenly_between_the_weeks_signals_whatever_the_account(conn):
+def test_a_weekly_budget_is_split_between_the_weeks_signals_by_score_whatever_the_account(conn):
     assert sc.handle_command(conn, "/size budget €30") == (
-        "Бюджет €30 в неделю: делится поровну между сигналами пятницы (один сигнал — весь бюджет, "
-        "пять — по пятой части).")
-    assert sc.amount_eur(conn, 0.10, TODAY) == 30.0 and sc.amount_eur(conn, None, TODAY, picks=4) == 7.5
+        "Бюджет €30 в неделю: делится между сигналами пятницы по баллу — сильному сигналу больше "
+        "(один сигнал — весь бюджет).")
+    assert sc.amount_eur(conn, 0.10, TODAY) == 30.0 and sc.amount_eur(conn, None, TODAY, share=0.25) == 7.5
     pick = {"ticker": "CRYPTO:SOL", "stop_pct": 0.2}
-    assert sc.enrich(conn, pick, TODAY, picks=3)["amount_eur"] == 10.0
+    assert sc.enrich(conn, pick, TODAY, share=1 / 3)["amount_eur"] == 10.0
     account(conn, 2000.0)
     sc.handle_command(conn, "/size budget 0")                       # back to the risk and the account
     assert sc.amount_eur(conn, 0.20, TODAY) == pytest.approx(100.0)
+
+
+def test_the_shares_follow_the_points_above_fifty():
+    assert sc.shares([90.0, 60.0]) == [0.8, 0.2]                    # 40 points against 10
+    assert sc.shares([70.0]) == [1.0] and sc.shares([]) == []
+    assert sc.shares([60.0, None, 60.0]) == [pytest.approx(1 / 3)] * 3
+    assert sum(sc.shares([95.0, 81.5, 64.0, 60.0, 60.0])) == pytest.approx(1.0)
+
+
+def test_refresh_reads_the_price_again_and_asks_claude_once(conn, monkeypatch):
+    asked = []
+
+    def note(name, side, facts):
+        asked.append((name, side, facts))
+        return "график за — восходящий тренд, цена над поддержкой 14,80"
+    picks = [{"ticker": "RXO", "source": "SEC13DG", "score": 65.0, "stop_pct": 0.1, "reasons": ["активист 13D"],
+              "price": 14.0}, {"ticker": "CRYPTO:SOL", "score": 61.0}]
+    sc.refresh(conn, picks, TODAY, note_fn=note)
+    assert picks[0]["price"] == 15.2 and picks[0]["claude"].startswith("график за")
+    assert [a[:2] for a in asked] == [("RXO", "покупка"), ("SOL", "покупка")]
+    assert "Причины сигнала: активист 13D" in asked[0][2] and "Балл: 65" in asked[0][2]
+    sc.refresh(conn, picks, TODAY, note_fn=note)
+    assert len(asked) == 2                                          # kept: not asked again
+    assert weekly.buy_text(picks[0]).endswith("\nClaude: график за — восходящий тренд, цена над поддержкой 14,80")
+
+
+def test_a_failed_chart_check_leaves_the_pick_without_the_line(conn, capsys):
+    def boom(*a):
+        raise RuntimeError("no claude")
+    picks = [{"ticker": "RXO", "score": 65.0}]
+    sc.refresh(conn, picks, TODAY, note_fn=boom)
+    sc.refresh(conn, picks, TODAY, note_fn=lambda *a: None)
+    assert "claude" not in picks[0] and "Claude" not in weekly.buy_text(picks[0])
+    assert "chart check failed" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------------ /size

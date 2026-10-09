@@ -16,6 +16,8 @@ import time
 import pytest
 
 import analyst
+
+SIGNAL_NOTE = analyst.signal_note       # the real one: conftest replaces it for every test
 import db
 import model
 import model_score
@@ -1995,3 +1997,41 @@ def test_claudes_own_login_token_is_the_one_credential_handed_on():
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
     assert not {"TELEGRAM_BOT_TOKEN", "TRADING212_API_KEY", "OTHER_TOKEN"} & set(env)
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in analyst.claude_env({"PATH": "/usr/bin"})
+
+
+# ------------------------------------------------------------------ the chart check of a signal
+def test_a_signal_note_is_claudes_one_line_under_the_signal_prompt():
+    run = _runner(_Proc(0, "<b>график за</b> — восходящий тренд,\nцена над поддержкой 27,80\n"))
+    note = SIGNAL_NOTE("RXO", "покупка", "Балл: 65", run=run)
+    assert note == "график за — восходящий тренд, цена над поддержкой 27,80"
+    [(argv, kwargs)] = run.calls
+    prompt = argv[argv.index("-p") + 1]
+    assert argv == analyst.claude_command(analyst.signal_prompt("RXO", "покупка", "Балл: 65"))
+    assert "СИГНАЛ: RXO покупка" in prompt and "Балл: 65" in prompt and analyst.METHOD_START in prompt
+    assert "{ANALYST_CMD}" not in prompt and kwargs["timeout"] == analyst.SIGNAL_TIMEOUT_SECONDS
+    assert _outside_the_project(kwargs["cwd"])
+
+
+@pytest.mark.parametrize("proc", [_Proc(1, "график за — x"), _Proc(0, ""), _Proc(0, "Вот мой анализ: всё хорошо"),
+                                  _Proc(0, "Claude AI usage limit reached|1759328400"),
+                                  subprocess.TimeoutExpired("claude", 300), FileNotFoundError(2, "no", "claude")])
+def test_no_usable_line_is_no_note(proc, capsys):
+    assert SIGNAL_NOTE("RXO", "покупка", run=_runner(proc)) is None
+    assert "проверка сигнала RXO" in capsys.readouterr().err
+
+
+def test_a_note_is_cut_and_carries_no_angle_brackets():
+    note = SIGNAL_NOTE("RXO", "покупка", run=_runner(_Proc(0, "график против — цена <ниже> 200-дн. средней " + "я" * 400)))
+    assert len(note) <= analyst.SIGNAL_NOTE_MAX and "<" not in note and ">" not in note
+    assert note.startswith("график против — цена ниже 200-дн.")
+
+
+def test_the_chart_check_gives_up_when_the_analyst_is_busy(monkeypatch, capsys):
+    monkeypatch.setattr(analyst, "LOCK_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(analyst, "LOCK_POLL_SECONDS", 0.01)
+    run = _runner()
+    with open(analyst.LOCK_FILE, "a+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert SIGNAL_NOTE("RXO", "покупка", run=run) is None
+    assert run.calls == []
+

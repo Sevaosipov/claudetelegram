@@ -418,7 +418,25 @@ class RunResult:
 def notify(notice: Notice) -> bool:
     """Send one event to Telegram (telegram_notify.send_text, looked up at the call). True when it went out."""
     import telegram_notify
-    return bool(telegram_notify.send_text(telegram_notify.format_cfd_notice(notice)))
+    text = telegram_notify.format_cfd_notice(notice)
+    if notice.kind == "entry":                  # a new signal carries Claude's read of its chart, when there is one
+        note = _chart_note(notice.signal)
+        if note:
+            text += "\n" + telegram_notify._esc(f"Claude: {note}")
+    return bool(telegram_notify.send_text(text))
+
+
+def _chart_note(sig: Signal) -> str | None:
+    """analyst.signal_note for a new signal (TradingView, the daily chart); None when it gives nothing or
+    fails -- the signal goes out either way."""
+    try:
+        import analyst
+        facts = (f"CFD-сигнал: пробой 55-дневного диапазона при цене выше SMA200\n"
+                 f"Вход: {sig.entry:g}\nСтоп: {sig.stop0:g} (трейлинг 3 ATR)")
+        return analyst.signal_note(f"{sig.coin}USD", "покупка" if sig.side == "long" else "продажа", facts)
+    except Exception as e:
+        print(f"[CFD] {sig.coin}: chart check failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
 
 
 def run(conn, *, fetch: data.Fetch | None = None, today: dt.date | None = None,

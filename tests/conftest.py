@@ -196,3 +196,12 @@ def add_house_txn(conn, ticker, member, amount_range, date="09/03/2026",
          f"https://example.test/house/{ticker}"),
     )
     conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def _no_headless_claude(monkeypatch):
+    """No test starts a real Claude: the chart check of a signal (analyst.signal_note) answers nothing
+    unless a test gives it a runner itself (tests/test_analyst.py keeps the real function)."""
+    import analyst
+    monkeypatch.setattr(analyst, "signal_note", lambda *a, **k: None)
+

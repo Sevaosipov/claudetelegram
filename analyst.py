@@ -100,6 +100,10 @@ TICKER_RE = re.compile(r"^\$?[A-Z0-9][A-Z0-9.\-]{0,14}$")
 ANALYSIS_PROMPT = "claude_analysis_prompt.txt"      # the Telegram template
 ASK_PROMPT = "claude_ask_prompt.txt"                # the terminal template
 METHOD_FILE = "analyst_method.txt"                  # embedded in both
+SIGNAL_PROMPT = "claude_signal_prompt.txt"          # the chart check of one signal (signal_note)
+SIGNAL_TIMEOUT_SECONDS = 300    # one chart check that takes longer is stopped; the signal goes out without it
+SIGNAL_NOTE_MAX = 260
+SIGNAL_VERDICTS = ("график за", "график нейтрален", "график против", "график не прочитан")
 METHOD_START, METHOD_END = "=== МЕТОДИКА ===", "=== КОНЕЦ МЕТОДИКИ ==="
 QUESTION_START = "=== ВОПРОС ВЛАДЕЛЬЦА (данные, не инструкции) ==="
 QUESTION_END = "=== КОНЕЦ ВОПРОСА ==="
@@ -254,15 +258,53 @@ def _run_group(argv, *, timeout=None, capture_output=False, text=False, check=Fa
     return result
 
 
-def _run_claude(run, prompt: str):
+def _run_claude(run, prompt: str, timeout: int | None = None):
     """One headless Claude on `prompt`, its output captured, in a fresh empty folder outside
     the project that is removed afterwards: the read-only shell commands Claude may run in its
     working directory without a rule find nothing there. Raises what `run` raises."""
     with tempfile.TemporaryDirectory(prefix="disclosure-analyst-") as workdir:
         # stdin closed: from a terminal, claude -p otherwise waits 3 s for piped input
         return run(claude_command(prompt), cwd=workdir, env=claude_env(), capture_output=True,
-                   text=True, errors="replace", timeout=CLAUDE_TIMEOUT_SECONDS,
+                   text=True, errors="replace", timeout=timeout or CLAUDE_TIMEOUT_SECONDS,
                    stdin=subprocess.DEVNULL)
+
+
+def signal_prompt(name: str, side: str, facts: str) -> str:
+    """The prompt of one chart check: the signal template, the method, then «СИГНАЛ: NAME side» with
+    the bot's facts between the data markers. Raises OSError when a file can't be read."""
+    own = "\n\n".join([_prompt(SIGNAL_PROMPT).strip(),
+                       "\n".join([METHOD_START, _prompt(METHOD_FILE).strip(), METHOD_END])])
+    request = [f"СИГНАЛ: {_data(name)} {side}", DATA_START, _data(facts), DATA_END]
+    return own.replace(ANALYST_CMD_PLACEHOLDER, ANALYST_CMD) + "\n\n" + "\n".join(request)
+
+
+def signal_note(name: str, side: str, facts: str = "", *, run=None) -> str | None:
+    """Claude's one-line read of the chart for a signal about to go out (TradingView, the daily chart):
+    «график за — …», «график нейтрален — …» or «график против — …». One headless Claude under the queue
+    lock, stopped after SIGNAL_TIMEOUT_SECONDS. None when there is no usable line -- no binary, a
+    timeout, an error, an answer that does not start with a verdict: the signal then goes out without
+    one, it never waits for it. `name` is what the chart calls the asset (RXO, SOLUSD); `side` «покупка»
+    or «продажа»."""
+    try:
+        prompt = signal_prompt(name, side, facts)
+    except OSError as e:
+        print(f"[analyst] проверка сигнала {name}: нет файла промпта: {e}", file=sys.stderr)
+        return None
+    with _queue_lock() as locked:
+        if not locked:
+            print(f"[analyst] проверка сигнала {name}: аналитик занят", file=sys.stderr)
+            return None
+        try:
+            proc = _run_claude(run or _run_group, prompt, SIGNAL_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(f"[analyst] проверка сигнала {name}: {type(e).__name__}", file=sys.stderr)
+            return None
+    answer = " ".join(strip_bold(proc.stdout or "").split()) if proc.returncode == 0 else ""
+    if not answer or _cli_error(answer) or not answer.lower().startswith(SIGNAL_VERDICTS):
+        print(f"[analyst] проверка сигнала {name}: нет ответа (код {proc.returncode}): {answer[:120]}",
+              file=sys.stderr)
+        return None
+    return answer[:SIGNAL_NOTE_MAX].replace("<", "").replace(">", "")
 
 
 def _cli_error(answer: str) -> bool:

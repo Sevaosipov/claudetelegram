@@ -100,6 +100,7 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 # scoring again. SENT_KEY (a JSON list, spec 2026-10-04) names the week's signals that went out already,
 # so a run that failed half-way sends only what is missing.
 WEEKLY_FROM_WEEKDAY = 4         # Friday; Monday is 0
+WEEKLY_HOUR = 17                # on Friday the week's messages go out from this hour (the --weekly-send job)
 LAST_WEEKLY_WEEKDAY = 6         # Sunday
 BUYS_KEY = "model_buys_{week}"
 PICKS_KEY = "weekly_buys_{week}"
@@ -335,14 +336,51 @@ def _pick_week(conn, today: dt.date, report) -> bool:
     between leaves the week open, and the next run picks again before anything was sent. A retry of a failed
     send reads these picks back (_week_picks) -- it never scores or picks again. True when done."""
     picks = [signals_weekly.pick_record(s) for s in signals_weekly.pick_buys(conn, today, report.scored)]
-    for pick in picks:                  # the company line and the size: facts beside the score, never a gate
+    shares = signal_context.shares([p.get("score") for p in picks])
+    for pick, share in zip(picks, shares):     # the company line and the size: facts beside the score, never a gate
         try:
-            signal_context.enrich(conn, pick, today, picks=len(picks))
+            signal_context.enrich(conn, pick, today, share=share)
         except Exception as e:
             print(f"[weekly] {pick['ticker']}: no context: {type(e).__name__}: {e}", file=sys.stderr)
     db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)
     _mark_week(conn, today, BUYS_KEY)
     return True
+
+
+def _hour() -> int:
+    return dt.datetime.now().hour
+
+
+def _before_the_friday_hour(today: dt.date) -> bool:
+    """True on a Friday before WEEKLY_HOUR: the week's messages wait for the Friday evening run
+    (`--weekly-send`, 17:00), which sends them with the price of the hour and Claude's read of each chart.
+    On Saturday and Sunday nothing waits: a full run sends what Friday did not."""
+    return today.weekday() == WEEKLY_FROM_WEEKDAY and _hour() < WEEKLY_HOUR
+
+
+def _prepare_picks(conn, today: dt.date) -> None:
+    """Just before the week's messages go out: the picks' prices read again and Claude's read of each
+    chart added (signal_context.refresh), kept back in kv so that a retry does not ask Claude again."""
+    picks = _week_picks(conn, today)
+    if picks:
+        signal_context.refresh(conn, picks, today)
+        db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)
+
+
+def run_weekly_send(conn) -> int:
+    """`--weekly-send`, the Friday 17:00 job: send the week's messages when they are due, the picks are
+    kept and nothing was sent yet -- no source is polled and nothing is scored. With no picks kept (the
+    morning's scoring did not get through) it sends nothing: the next full run picks and sends."""
+    today = _today()
+    if not _weekly_due(conn, today):
+        print("[weekly] nothing due: not Friday to Sunday, or the week's messages are out")
+        return 0
+    if not _week_marked(conn, today, BUYS_KEY):
+        print("[weekly] the week's picks are not made yet -- the next full run picks and sends")
+        return 0
+    _run_source("PREPARE", _prepare_picks, conn, today)
+    _run_source("WEEKLY", _send_weekly, conn, today)
+    return 0
 
 
 def _week_picks(conn, today: dt.date) -> list[dict]:
@@ -696,6 +734,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="don't compute exit signals (people who bought a ticker together later "
                           "selling it together -- see EXIT_* constants in cluster/common.py)")
     ap.add_argument("--no-telegram", action="store_true", help="skip sending Telegram messages")
+    ap.add_argument("--weekly-send", action="store_true",
+                    help="send the week's messages if they are due (the Friday 17:00 job): no source is "
+                         "polled, nothing is scored")
     return ap
 
 
@@ -713,6 +754,8 @@ def main():
 
     if args.healthcheck:
         sys.exit(run_healthcheck(conn, args))
+    if args.weekly_send:
+        sys.exit(run_weekly_send(conn))
 
     current_year = dt.date.today().year
     years = (
@@ -815,12 +858,16 @@ def main():
             print(telegram_notify.format_close_alert(a, html=False))
         if not args.no_telegram:
             _send_closes(conn, closes)
-            if not filtered and _weekly_due(conn, today):
+            if not filtered and _weekly_due(conn, today) and _before_the_friday_hour(today):
+                print(f"[telegram] weekly messages go out with the Friday {WEEKLY_HOUR}:00 run")
+            elif not filtered and _weekly_due(conn, today):
                 # The messages wait for the week's pick: with the scoring down they would show no buys,
                 # and the pass that picks next would not be in them. Sunday is the last day of the window,
                 # so they go out then whatever happened.
                 scored_ok = _week_marked(conn, today, BUYS_KEY)
                 if scored_ok or today.weekday() == LAST_WEEKLY_WEEKDAY:
+                    if scored_ok:
+                        _run_source("PREPARE", _prepare_picks, conn, today)
                     _run_source("WEEKLY", _send_weekly, conn, today, scoring_failed=not scored_ok)
                 else:
                     print("[telegram] weekly message waits for the week's scoring pass")
