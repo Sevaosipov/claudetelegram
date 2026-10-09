@@ -487,6 +487,7 @@ def run(conn, *, today: dt.date | None = None, fetch: data.Fetch | None = None, 
     over = today >= end_date(conn, today)
     loud = not quiet(conn)
     opened = closed = 0
+    new: list[Trade] = []
 
     def follow(t: Trade) -> None:
         nonlocal opened, closed
@@ -495,7 +496,9 @@ def run(conn, *, today: dt.date | None = None, fetch: data.Fetch | None = None, 
         for event in events:
             opened += event == "open"
             closed += event == "close"
-            if loud:
+            if event == "open":
+                new.append(t)                       # the day's openings go out together, as one message
+            elif loud:
                 send(telegram_notify.format_league_event(t, event))
 
     for t in live_trades(conn):
@@ -511,6 +514,8 @@ def run(conn, *, today: dt.date | None = None, fetch: data.Fetch | None = None, 
                     follow(t)
             except Exception as e:
                 print(f"[league] {sig.idea} {sig.pair}: {type(e).__name__}: {e}", file=sys.stderr)
+    if new and loud:
+        send(telegram_notify.format_league_opens(new))
     _boards(conn, today, send, over)
     return opened, closed
 

@@ -130,10 +130,9 @@ def test_take_profit_levels_are_marks_the_trade_goes_on(conn):
     assert (t.status, t.checkpoint) == ("open", 3)
     assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day) == []          # said once
     text = tn.format_league_event(t, "tp:2", html=False)
-    assert text == ("🟢 EURUSD!: достигнут TP2 1,08000 — бумажная сделка идёт дальше, выход через 10 торг. дн.; "
-                    "в варианте с целями закрыта четверть; идея «Ставки», сейчас +2,0R")
-    assert "стоп 0,96000; TP1 1,04000 · TP2 1,08000 · TP3 1,12000 · TP4 1,16000 (отметки); выход через 10 торг. дн." \
-        in tn.format_league_event(t, "open", html=False)
+    assert text == "EURUSD TP2 1.08000"
+    assert tn.format_league_event(t, "open", html=False) == (
+        "EURUSD Long\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\nTP3   1.12000\nTP4   1.16000")
 
 
 def test_in_the_bar_of_the_stop_a_mark_counts_only_by_the_open(conn):
@@ -193,7 +192,7 @@ def test_the_close_message_gives_both_results(conn):
     feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=up, upto=day, today_open=1.0)}))
     league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day)
     # the bar that reached TP1 also traded at the entry: the second version's rest stopped there, a day in
-    assert tn.format_league_event(t, "close", html=False).endswith("итог −0,02R (с целями +0,24R)")
+    assert tn.format_league_event(t, "close", html=False) == "EURUSD closed 1.00000 -0.02R (staged +0.24R)"
 
 
 def test_a_bar_is_read_once(conn):
@@ -301,11 +300,12 @@ def test_the_pass_opens_follows_and_closes_and_says_each(conn):
     sent = []
     table = {"EURUSD=X": eurusd()}
     assert _run(conn, MON, sent, table, yields=lambda today: _yields(+0.12)) == (1, 0)     # USDCAD has no bars
-    assert len(sent) == 1 and "бумажная покупка по 1,00000" in sent[0] and "идея «Ставки», тест" in sent[0]
+    assert sent == ["<pre>EURUSD Long\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\n"
+                    "TP3   1.12000\nTP4   1.16000</pre>"]
     assert _run(conn, MON, sent, table, yields=lambda today: _yields(+0.12)) == (0, 0)     # the same day again
     day = dt.date(2026, 10, 19)
     assert _run(conn, day, sent, {"EURUSD=X": eurusd(upto=day, today_open=1.02)}) == (0, 1)
-    assert "бумажная сделка закрыта — вышло время" in sent[-1] and "итог <b>+0,48R</b>" in sent[-1]
+    assert sent[-1] == "<pre>EURUSD closed 1.02000 +0.48R (staged +0.48R)</pre>"
     assert league.live_trades(conn) == [] and len(league.closed_trades(conn)) == 1
 
 
@@ -402,3 +402,16 @@ def test_league_in_telegram_shows_the_board_with_the_open_trades_and_the_euros(c
     assert league.quiet(conn) and "не присылаю" in sent[-1]
     tb._handle_message(conn, "/league on")
     assert not league.quiet(conn)
+
+
+def test_the_days_openings_are_one_message_a_block_each_and_the_yen_has_three_decimals(conn):
+    sent = []
+    jpy = [(d, 150.0, 151.0, 149.0, 150.0) for d, *_ in eurusd()[:-1]] + [(MON.isoformat(), 150.0, 150.0, 150.0, 150.0)]
+    table = {"EURUSD=X": eurusd(), "USDJPY=X": jpy}
+    y = _yields(+0.12)
+    y["JP"] = dict(y["EA"])
+    _run(conn, MON, sent, table, yields=lambda today: y)
+    assert sent == ["<pre>EURUSD Long\nEntry 1.00000\nStop  0.96000\nTP1   1.04000\nTP2   1.08000\nTP3   1.12000\n"
+                    "TP4   1.16000\n\nUSDJPY Short\nEntry 150.000\nStop  154.000\nTP1   146.000\nTP2   142.000\n"
+                    "TP3   138.000\nTP4   134.000</pre>"]
+

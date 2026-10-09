@@ -1370,27 +1370,42 @@ def _league_levels(t, first: int = 1) -> str:
                       for k in range(first, league.CHECKPOINTS + 1))
 
 
-def format_league_event(t, event: str, *, html: bool = True) -> str:
-    """One paper trade's message (cfd.league.Trade): opened, or closed with its result in R."""
+def _league_plain(t, x: float) -> str:
+    """A price as a trading terminal writes it: a point, no spaces; five decimals for an FX pair, three with
+    the yen."""
+    from cfd import instruments as ins
+    return f"{x:.{3 if ins.by_symbol(t.symbol).quote == 'JPY' else 5}f}"
+
+
+def format_league_opens(trades: list, *, html: bool = True) -> str:
+    """The paper trades opened in one pass as one message, nothing but what is needed to place them: a
+    block per trade -- the pair and the side, the entry, the stop and TP1..TP4 -- in a fixed-width font,
+    one value a line (a row of eight columns does not fit a phone's screen)."""
     from cfd import league
-    name = league.IDEAS.get(t.idea, t.idea)
-    long = t.side == "long"
+    blocks = []
+    for t in trades:
+        rows = [("Entry", t.entry), ("Stop", t.stop)]
+        rows += [(f"TP{k}", league.level(t, k)) for k in range(1, league.CHECKPOINTS + 1)]
+        blocks.append("\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'}"]
+                                + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]))
+    text = "\n\n".join(blocks)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_league_event(t, event: str, *, html: bool = True) -> str:
+    """One later event of a paper trade (cfd.league.Trade), as short as it can be said: «GBPUSD TP1 1.30863»,
+    «GBPUSD closed 1.31250 +0.48R (staged +0.31R)». An opening is format_league_opens'."""
+    from cfd import league
     if event == "open":
-        return signal_line(DOT_GREEN if long else DOT_RED, t.pair,
-                           f"бумажная {'покупка' if long else 'продажа'} по {_league_price(t, t.entry)}",
-                           f"стоп {_league_price(t, t.stop)}; {_league_levels(t)} (отметки); {_league_exit(t)}; "
-                           f"идея «{name}», тест", html=html)
+        return format_league_opens([t], html=html)
     if event.startswith("tp:"):
         k = int(event[3:])
-        return signal_line(DOT_GREEN, t.pair, f"достигнут TP{k} {_league_price(t, league.level(t, k))}",
-                           f"бумажная сделка идёт дальше, {_league_exit(t)}; в варианте с целями закрыта "
-                           f"четверть; идея «{name}»",
-                           result=_cfd_r(float(k)), label="сейчас", html=html)
-    how = "сработал стоп" if t.reason == "stop" else "вышло время"
-    staged = f" (с целями {_cfd_r(t.result2_r, 2)})" if t.result2_r is not None else None
-    return signal_line(DOT_GREEN if round(t.result_r, 2) >= 0 else DOT_RED, t.pair,
-                       f"бумажная сделка закрыта — {how}", f"по {_league_price(t, t.exit_price)}; идея «{name}»",
-                       result=_cfd_r(t.result_r, 2), extra=staged, html=html)
+        text = f"{t.pair} TP{k} {_league_plain(t, league.level(t, k))}"
+    else:
+        text = f"{t.pair} {'stop' if t.reason == 'stop' else 'closed'} {_league_plain(t, t.exit_price)} {t.result_r:+.2f}R"
+        if t.result2_r is not None:
+            text += f" (staged {t.result2_r:+.2f}R)"
+    return f"<pre>{_esc(text)}</pre>" if html else text
 
 
 def _league_money(board, r: float) -> str:
