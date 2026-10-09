@@ -201,3 +201,12 @@ def test_the_report_says_whether_each_passes_and_names_a_weak_pass():
                             dt.datetime(2026, 10, 9, tzinfo=UTC))
     assert "**Итог: проходит.**" in text and "**Итог: не проходит.**" in text
     assert r4.round4_block([g], dt.datetime(2026, 10, 9, tzinfo=UTC))["enabled"] == ["COT-EXT"]
+
+
+def test_fxcm_rows_are_bid_candles_in_utc_and_a_broken_row_is_dropped():
+    text = ("DateTime,BidOpen,BidHigh,BidLow,BidClose,AskOpen,AskHigh,AskLow,AskClose\n"
+            "03/08/2015 21:00:00.000,1.083,1.08344,1.08265,1.083,1.08329,1.08365,1.08274,1.08324\n"
+            "03/08/2015 22:00:00.000,1.083,1.08,1.08226,1.08383,1,1,1,1\n"          # the high under the close
+            "garbage\n")
+    assert r4.fxcm_rows(text) == [Bar(dt.datetime(2015, 3, 8, 21, tzinfo=UTC), 1.083, 1.08344, 1.08265, 1.083)]
+

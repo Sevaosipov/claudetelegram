@@ -106,3 +106,17 @@ and GBPJPY; no financing.
 
 A hypothesis that fails is not traded. A hypothesis that passes is reported to the user with its t statistic
 before anything goes live.
+
+## Amendment A1 (2026-10-09, before any H9 result)
+
+H8 was run as written. H9 has not been run: Dukascopy's server slowed to one monthly file per 20–30 seconds after
+about 70 files (of some 1 800), so its history could not be fetched. No H9 trade was computed on what did arrive.
+
+H9 is run instead on FXCM's public hourly candles (`https://candledata.fxcorporate.com/H1/<PAIR>/<year>/<week>
+.csv.gz`, bid prices, UTC), which cover 2012 to 2024. This changes the data and nothing else:
+
+- in-sample 2012-01-01…2016-12-31, out-of-sample 2017-01-01…2024-12-31 (shorter than the other hypotheses' periods:
+  the archive starts in 2012);
+- an hour is a bar when the archive has a row for it (the archive has no rows for closed hours);
+- the pairs, the range, the entry, the stop, the exit, the costs and the gate are as written above.
+

@@ -4,7 +4,7 @@ the earlier rounds did not use, judged by the user's monthly gate.
   H8  COT-EXT  against the speculators when their net futures position (CFTC, weekly) is at a three-year
                extreme; daily bars from Yahoo.
   H9  LDN-BO   the break of the Asian range in London's morning, flat by the evening; hourly bars from
-               Dukascopy.
+               FXCM's public archive, 2012-2024 (amendment A1: Dukascopy, the source first named, throttles).
 
 The pure parts (the index, the two simulators, the statistics, the gate) take plain rows and bars; the two
 loaders at the end are the only network code, each with a file cache under data/cfd_cache. `python -m
@@ -308,7 +308,8 @@ _RULE = "|---|---|---|---|---|---|---|---|---|---|"
 def _section(title: str, trades: Sequence[Trade], g: Gate) -> list[str]:
     ins_, oos = split(trades)
     lines = [f"## {title}", "", _HEAD, _RULE,
-             "| В выборке 2006–2016 | " + " | ".join(_cells(stats(ins_))) + " |",
+             f"| В выборке до 2016 (с {min((t.entry_date.year for t in ins_), default=2006)}) | "
+             + " | ".join(_cells(stats(ins_))) + " |",
              "| Вне выборки с 2017 | " + " | ".join(_cells(stats(oos))) + " |", "",
              "| Условие | Значение | Выполнено |", "|---|---|---|"]
     lines += [f"| {what} | {value} | {'да' if ok else 'нет'} |" for what, value, ok in g.checks]
@@ -361,7 +362,7 @@ def write_outputs(report: str, block: dict, out_dir: Path | str = OUT_DIR) -> No
 _AGENT = {"User-Agent": "Mozilla/5.0 (disclosure-bot research)"}
 
 
-def _get(url: str, tries: int = 5) -> bytes | None:
+def _get(url: str, tries: int = 8) -> bytes | None:
     """The body of a URL, or None for a 404; a server error is retried with a growing pause."""
     import requests
     for attempt in range(tries):
@@ -373,7 +374,7 @@ def _get(url: str, tries: int = 5) -> bytes | None:
             return resp.content
         if resp is not None and resp.status_code == 404:
             return None
-        time.sleep(1.5 * (attempt + 1))
+        time.sleep(3.0 * (attempt + 1))         # Dukascopy answers 503 when asked too fast
     raise RuntimeError(f"no answer from {url}")
 
 
@@ -419,7 +420,7 @@ def load_cot(first_year: int = 2002, today: dt.date | None = None,
 
 
 def load_duka_hourly(pair: str, first_year: int = 2005, today: dt.date | None = None,
-                     cache_dir: Path = CACHE_DIR, pause: float = 0.05) -> list[Bar]:
+                     cache_dir: Path = CACHE_DIR, pause: float = 0.3) -> list[Bar]:
     """Dukascopy's hourly bid candles of `pair` as bars in UTC, the hours with no volume left out."""
     today = today or dt.date.today()
     scale = 1e3 if pair.endswith("JPY") else 1e5
@@ -446,6 +447,41 @@ def load_duka_hourly(pair: str, first_year: int = 2005, today: dt.date | None = 
     return bars
 
 
+def load_fxcm_hourly(pair: str, first_year: int = 2012, last_year: int = 2024,
+                     cache_dir: Path = CACHE_DIR) -> list[Bar]:
+    """FXCM's public hourly bid candles of `pair` as bars in UTC (amendment A1): a file per week of the
+    year, 1 to 53; a week the archive does not have is skipped."""
+    import gzip
+    bars: dict[dt.datetime, Bar] = {}
+    for year in range(first_year, last_year + 1):
+        for week in range(1, 54):
+            body = _cached(cache_dir / "fxcm" / f"{pair}_{year}_{week:02d}.csv.gz",
+                           f"https://candledata.fxcorporate.com/H1/{pair}/{year}/{week}.csv.gz", final=True)
+            if not body:
+                continue
+            text = gzip.decompress(body).decode("utf-8", errors="replace")
+            for row in fxcm_rows(text):
+                bars[row.ts] = row
+    return [bars[ts] for ts in sorted(bars)]
+
+
+def fxcm_rows(text: str) -> list[Bar]:
+    """The bid candles of one FXCM file: «DateTime,BidOpen,BidHigh,BidLow,BidClose,...», the time as
+    month/day/year in UTC. A row that is not a whole candle is dropped."""
+    out = []
+    for row in csv.reader(io.StringIO(text.lstrip("\ufeff"))):
+        if len(row) < 5 or not row[0][:1].isdigit():
+            continue
+        try:
+            ts = dt.datetime.strptime(row[0].split(".")[0], "%m/%d/%Y %H:%M:%S").replace(tzinfo=UTC)
+            o, h, low, c = (float(x) for x in row[1:5])
+        except ValueError:
+            continue
+        if low > 0 and h >= max(o, c) and low <= min(o, c):
+            out.append(Bar(ts, o, h, low, c))
+    return out
+
+
 # ================================================================ the run
 def run(*, log: Callable[[str], None] = print, today: dt.date | None = None) -> tuple[list[Gate], str]:
     now = dt.datetime.now(UTC)
@@ -464,7 +500,7 @@ def run(*, log: Callable[[str], None] = print, today: dt.date | None = None) -> 
     london: list[Trade] = []
     for pair, cost in LDN_PAIRS.items():
         log(f"H9: {pair} hourly bars")
-        bars = load_duka_hourly(pair, today=today)
+        bars = load_fxcm_hourly(pair)
         trades = backtest_london(pair, bars, cost)
         notes.append(f"H9 {pair}: {len(bars)} hourly bars from {bars[0].ts.date() if bars else '—'}, "
                      f"{len(trades)} trades.")
