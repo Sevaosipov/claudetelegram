@@ -59,6 +59,7 @@ import insider_score
 import model
 import positions
 import sec_edgar
+import signal_context
 import signals_weekly
 import strategy
 import t212_account
@@ -333,6 +334,11 @@ def _pick_week(conn, today: dt.date, report) -> bool:
     between leaves the week open, and the next run picks again before anything was sent. A retry of a failed
     send reads these picks back (_week_picks) -- it never scores or picks again. True when done."""
     picks = [signals_weekly.pick_record(s) for s in signals_weekly.pick_buys(conn, today, report.scored)]
+    for pick in picks:                  # the company line and the size: facts beside the score, never a gate
+        try:
+            signal_context.enrich(conn, pick, today)
+        except Exception as e:
+            print(f"[weekly] {pick['ticker']}: no context: {type(e).__name__}: {e}", file=sys.stderr)
     db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)
     _mark_week(conn, today, BUYS_KEY)
     return True
