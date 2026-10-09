@@ -29,6 +29,7 @@ MAX_REASONS = 2             # a buy names this many of its reasons
 RISK_TAG = "High risk"      # a line of an alt's buy block
 MAX_SELLERS = 5             # a group exit names this many sellers, then «и ещё N»
 BEST_WORST = 3              # the summary names this many best and this many worst positions
+LEFT_OUT_KEY = "weekly_left_out_{week}"     # kv: [{"ticker", "why"}] the week's pick left out (bot._pick_week)
 SCORING_FAILED_WARNING = "⚠️ Оценка сигналов на этой неделе не отработала — покупок не было."
 
 
@@ -49,7 +50,8 @@ def buy_text(pick: dict) -> str:
     (the last close, the stop that far below it, the euros to buy: signal_context) -- and under it why it was
     picked (its first two reasons and its score) and, for a company, what it is and how it is valued. A coin
     is named by its symbol. Without a price the stop is its percent. «Not on Trading 212» and, for an alt,
-    «High risk» are lines of the block: both decide whether the trade can or should be placed. The last
+    «High risk» are lines of the block: both decide whether the trade can or should be placed; so is
+    «Merger pending», for a company that is a party to a merger without being its target. The last
     line, «Claude: …», is the analyst's read of the chart (signal_context.refresh). What the pick does not
     have is left out."""
     rows = []
@@ -65,6 +67,8 @@ def buy_text(pick: dict) -> str:
         block.append("Not on Trading 212")
     if pick.get("risk"):
         block.append(RISK_TAG)
+    if pick.get("deal"):
+        block.append("Merger pending")
     lines = [f"<pre>{telegram_notify._esc(chr(10).join(block))}</pre>"]
     reasons = [r for r in (pick.get("reasons") or []) if r][:MAX_REASONS]
     score = pick.get("score")
@@ -198,6 +202,16 @@ def _signals_line(conn, today: dt.date) -> str:
     return f"Сигналов за неделю: покупок {buys}, на продажу {sells}, групповых выходов {exits}"
 
 
+def _left_out_line(conn, today: dt.date) -> str | None:
+    """«Не вошли в сигналы: RXO, SSTI — идёт выкуп компании»: the buys the week's pick left out because the
+    company is being bought out (takeover.py); None when there are none."""
+    import db
+    iso = today.isocalendar()
+    kept = db.get_cached_json(conn, LEFT_OUT_KEY.format(week=f"{iso.year}-W{iso.week:02d}"))
+    names = [d["ticker"] for d in kept if isinstance(d, dict) and d.get("ticker")] if isinstance(kept, list) else []
+    return f"Не вошли в сигналы: {', '.join(names)} — идёт выкуп компании" if names else None
+
+
 def format_summary(conn, today: dt.date, *, html: bool = True, scoring_failed: bool = False) -> str:
     """The weekly summary, sent last: one short message about the user's own account, a line each
 
@@ -216,6 +230,9 @@ def format_summary(conn, today: dt.date, *, html: bool = True, scoring_failed: b
     lines = [f"📊 {title}" + (f": {telegram_notify._e(account, html)}" if account else ""),
              telegram_notify._e(_positions_line(conn, today), html),
              telegram_notify._e(_signals_line(conn, today), html)]
+    left_out = _left_out_line(conn, today)
+    if left_out:
+        lines.append(telegram_notify._e(left_out, html))
     if scoring_failed:
         lines.append(telegram_notify._e(SCORING_FAILED_WARNING, html))
     return "\n".join(lines)

@@ -61,6 +61,7 @@ import positions
 import sec_edgar
 import signal_context
 import signals_weekly
+import takeover
 import strategy
 import t212_account
 import universe
@@ -335,7 +336,28 @@ def _pick_week(conn, today: dt.date, report) -> bool:
     in kv as the records their messages need (PICKS_KEY) and only then set the week's buys key: a crash in
     between leaves the week open, and the next run picks again before anything was sent. A retry of a failed
     send reads these picks back (_week_picks) -- it never scores or picks again. True when done."""
-    picks = [signals_weekly.pick_record(s) for s in signals_weekly.pick_buys(conn, today, report.scored)]
+    # A company being bought out is left out (takeover.py: its 13D is the acquirer's and its jump the
+    # offer's premium); one that is a party to a merger without being the target is picked, and marked.
+    left_out: list[dict] = []
+    deals: dict[str, str] = {}
+
+    def bought_out(score) -> bool:
+        found = takeover.check(score.ticker, getattr(score, "source", None), today)
+        if found is None:
+            return False
+        if found.kind == takeover.TARGET:
+            left_out.append({"ticker": score.ticker, "why": found.text})
+            print(f"[weekly] {score.ticker} left out: {found.text}")
+            return True
+        deals[score.ticker] = found.text
+        return False
+
+    picks = [signals_weekly.pick_record(s)
+             for s in signals_weekly.pick_buys(conn, today, report.scored, skip=bought_out)]
+    for pick in picks:
+        if pick["ticker"] in deals:
+            pick["deal"] = deals[pick["ticker"]]
+    db.save_cached_json(conn, weekly.LEFT_OUT_KEY.format(week=_week_id(today)), left_out)
     shares = signal_context.shares([p.get("score") for p in picks])
     for pick, share in zip(picks, shares):     # the company line and the size: facts beside the score, never a gate
         try:

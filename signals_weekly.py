@@ -82,7 +82,7 @@ def coin_priority(s) -> tuple:
     return (1, 0, -s.total, -ret60 if known else math.inf)
 
 
-def pick_buys(conn, today: dt.date, scored: list) -> list:
+def pick_buys(conn, today: dt.date, scored: list, *, skip=None) -> list:
     """The scores to signal this week: only a BUY, not a name the user holds (held_names), not a ticker
     signalled in the last RESIGNAL_DAYS days (recently_signalled), at most WEEKLY_BUY_LIMIT.
 
@@ -96,7 +96,11 @@ def pick_buys(conn, today: dt.date, scored: list) -> list:
 
     One order for sending: the stocks, best score first, then the coins in coin_priority order. The
     scores themselves are returned -- StockScore, CoinScore or the kept-score objects
-    model.cached_scores gives. Reads the database, writes nothing."""
+    model.cached_scores gives. Reads the database, writes nothing.
+
+    `skip(score) -> bool` leaves a stock out for a reason of the caller's (a company being bought out:
+    bot._pick_week). It is asked in score order and only until the stock places are filled, so a check
+    that costs a request is made for a handful of names; the place of a stock left out goes to the next."""
     held, recent = held_names(conn), recently_signalled(conn, today)
     free: list = []
     seen: set[str] = set()
@@ -107,7 +111,12 @@ def pick_buys(conn, today: dt.date, scored: list) -> list:
         seen.add(s.ticker)
         free.append(s)
     coins = sorted((s for s in free if s.kind == "crypto"), key=coin_priority)[:WEEKLY_COIN_LIMIT]
-    stocks = [s for s in free if s.kind != "crypto"][:WEEKLY_BUY_LIMIT - len(coins)]
+    stocks: list = []
+    for s in (s for s in free if s.kind != "crypto"):
+        if len(stocks) >= WEEKLY_BUY_LIMIT - len(coins):
+            break
+        if skip is None or not skip(s):
+            stocks.append(s)
     return stocks + coins
 
 

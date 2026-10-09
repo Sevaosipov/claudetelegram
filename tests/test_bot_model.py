@@ -472,7 +472,7 @@ def test_a_quiet_real_week_is_one_summary_and_no_row(conn, monkeypatch):
 def test_the_week_is_picked_from_the_days_scores_and_the_picks_are_kept_as_records(conn, monkeypatch):
     seen = []
     chosen = [_score("AAA", 70.0), _score("BBB", 64.0, t212=False)]
-    monkeypatch.setattr(signals_weekly, "pick_buys", lambda c, today, scored: seen.append((today, scored)) or chosen)
+    monkeypatch.setattr(signals_weekly, "pick_buys", lambda c, today, scored, **kw: seen.append((today, scored)) or chosen)
     report = _report({"AAA": "buy"}, scored=chosen + [_score("ZZZ", 50.0, decision="watch")])
     assert bot._pick_week(conn, FRI, report) is True
     assert seen == [(FRI, report.scored)]
@@ -735,7 +735,7 @@ def main_run(monkeypatch, tmp_path):
             return None
         return report if run.complete else dataclasses.replace(report, complete=False)
 
-    def pick_buys(conn, today, scored):
+    def pick_buys(conn, today, scored, skip=None):
         calls.append(("pick", today))
         if run.pick_fails:
             raise RuntimeError("pick")
@@ -1405,4 +1405,38 @@ def test_preparing_the_picks_keeps_what_claude_said(conn, monkeypatch):
                         lambda c, picks, today: [p.update(claude="график за — тренд вверх") for p in picks])
     REAL_PREPARE(conn, FRI)
     assert bot._week_picks(conn, FRI) == [{"ticker": "AAA", "score": 70.0, "claude": "график за — тренд вверх"}]
+
+
+# ---- a company being bought out is left out of the week's pick
+def _scored(ticker, total, source="SEC"):
+    return types.SimpleNamespace(ticker=ticker, total=total, decision=model_score.BUY, kind="stock", source=source,
+                                 stop_pct=0.1, reasons=["активист 13D"], company=ticker, t212=True)
+
+
+def test_the_pick_leaves_out_a_takeover_target_marks_a_merger_party_and_fills_the_place(conn, monkeypatch, capsys):
+    import takeover
+    import weekly
+    found = {"TGT": takeover.Finding(takeover.TARGET, "идёт выкуп компании (формы SEC: SC14D9C)"),
+             "BUYER": takeover.Finding(takeover.DEAL, "компания участвует в слиянии (форма 425 ×14)")}
+    asked = []
+    monkeypatch.setattr(takeover, "check", lambda t, source, today: asked.append(t) or found.get(t))
+    monkeypatch.setattr(bot.signal_context, "enrich", lambda conn, pick, today, **kw: pick)
+    scored = [_scored("TGT", 90.0), _scored("BUYER", 80.0)] + [_scored(f"S{i}", 70.0 - i) for i in range(6)]
+    assert bot._pick_week(conn, FRI, types.SimpleNamespace(scored=scored)) is True
+    picks = bot._week_picks(conn, FRI)
+    assert [p["ticker"] for p in picks] == ["BUYER", "S0", "S1", "S2", "S3"]              # five, without TGT
+    assert picks[0]["deal"].startswith("компания участвует в слиянии") and "deal" not in picks[1]
+    assert asked == ["TGT", "BUYER", "S0", "S1", "S2", "S3"]                               # no more than needed
+    assert "TGT left out: идёт выкуп компании" in capsys.readouterr().out
+    assert "Not on Trading 212" not in weekly.buy_text(picks[0]) and "\nMerger pending</pre>" in weekly.buy_text(picks[0])
+    assert weekly.format_summary(conn, FRI).splitlines()[-1] == "Не вошли в сигналы: TGT — идёт выкуп компании"
+
+
+def test_a_week_with_nothing_left_out_has_no_such_line(conn, monkeypatch):
+    import takeover
+    import weekly
+    monkeypatch.setattr(takeover, "check", lambda t, source, today: None)
+    monkeypatch.setattr(bot.signal_context, "enrich", lambda conn, pick, today, **kw: pick)
+    bot._pick_week(conn, FRI, types.SimpleNamespace(scored=[_scored("AAA", 70.0)]))
+    assert "Не вошли" not in weekly.format_summary(conn, FRI)
 
