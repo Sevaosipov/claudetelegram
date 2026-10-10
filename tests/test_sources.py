@@ -542,7 +542,8 @@ def test_a_coin_is_not_asked_at_the_sec(monkeypatch):
     "SSTI Stock Alert: Halper Sadeh LLC is Investigating Whether SoundThinking, Inc. is Obtaining a Fair Deal",
     "$HAREHOLDER ALERT: The M&A Class Action Firm Announces An Investigation of SoundThinking, Inc.",
     "SoundThinking Investor Alert: Kahn Swick & Foti, LLC Investigates Adequacy of Price and Process",
-    "Rosen Law Firm Reminds Investors of the Lead Plaintiff Deadline"])
+    "Rosen Law Firm Reminds Investors of the Lead Plaintiff Deadline",
+    "Are RXO, PTC, LFCR, WAFD Obtaining Fair Deals for their Shareholders?"])
 def test_a_law_firms_alert_is_noise_even_on_a_press_release_wire(title):
     assert sources.tier({"title": title, "publisher": "Business Wire"}) == sources.TIER_NOISE
 
@@ -573,7 +574,7 @@ class _TvResp:
 
 def test_tradingviews_feed_is_asked_by_exchange_until_one_answers(monkeypatch):
     asked = []
-    feed = {"NYSE:RXO": [{"title": " RXO Is Maintained at Buy ", "provider": "dow-jones", "published": 1791331200,
+    feed = {"NYSE:RXO": [{"title": " C.H. Robinson to Buy RXO ", "provider": "dow-jones", "published": 1791331200,
                           "storyPath": "/news/DJN_x/"},
                          {"title": "C.H. Robinson to Benefit", "provider": "zacks", "published": None}]}
 
@@ -584,7 +585,7 @@ def test_tradingviews_feed_is_asked_by_exchange_until_one_answers(monkeypatch):
     monkeypatch.setattr(sources, "_get", get)
     items = sources._tradingview_news(assets.stock_asset("RXO"))
     assert asked == ["NASDAQ:RXO", "NYSE:RXO"]                              # stops at the one that answers
-    assert items[0] == {"title": "RXO Is Maintained at Buy", "publisher": "dow-jones", "published": "2026-10-07",
+    assert items[0] == {"title": "C.H. Robinson to Buy RXO", "publisher": "dow-jones", "published": "2026-10-07",
                         "url": "https://www.tradingview.com/news/DJN_x/"}
     assert sources.tier(items[0]) == sources.TIER_PRIMARY and sources.tier(items[1]) == sources.TIER_NOISE
     assert sources._tradingview_news(assets.stock_asset("EQNR.OL")) == []   # not a US listing: not asked

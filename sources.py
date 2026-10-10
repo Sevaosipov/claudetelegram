@@ -449,7 +449,7 @@ _NOISE = ("motley fool", "fool.com", "zacks", "benzinga", "investorplace", "simp
 # «shareholder alert», «investigates whether ... a fair deal». Noise, whoever the wire is.
 _NOISE_TITLE = re.compile(r"(shareholder|investor|stock) alert|\$hareholder|class action|law (firm|offices)|"
                           r"investigat\w+ (whether|adequacy|the fairness|claims)|reminds (investors|shareholders)|"
-                          r"lead plaintiff|halper sadeh|kahn swick|levi & korsinsky|rosen law|pomerantz", re.I)
+                          r"lead plaintiff|obtaining (a )?fair deals?|halper sadeh|kahn swick|levi & korsinsky|rosen law|pomerantz", re.I)
 # A wire's one-line note of a broker's rating or price target: true, but there are a dozen a day and each says
 # little. Kept, behind the news proper.
 _ROUTINE_TITLE = re.compile(r"price target|is maintained at|is (raised|cut|lowered) to (buy|sell|hold|neutral|"
