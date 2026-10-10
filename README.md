@@ -1618,7 +1618,7 @@ python politician_report.py "Gottheimer" --years 2025,2026
 это 3.9, который снят с поддержки; не используйте его.
 
 ```bash
-cd ~/Desktop/disclosure-bot
+cd ~/Projects/disclosure-bot
 
 # вариант с uv (рекомендуется — сам скачает нужный Python)
 uv venv --python 3.12 && uv pip install -r requirements.lock
