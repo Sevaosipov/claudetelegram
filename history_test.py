@@ -322,6 +322,9 @@ def _price_path(symbol: str) -> Path:
     return CACHE / "prices" / f"{symbol}.json"
 
 
+CANARY = "MSFT"             # listed through the whole period: its prices missing means Yahoo is refusing
+
+
 class Throttled(RuntimeError):
     """Yahoo stopped answering: nothing of the batch is kept, the run goes on later."""
 
@@ -329,28 +332,29 @@ class Throttled(RuntimeError):
 def load_prices(symbols: list[str], *, budget_seconds: float = 420, batch: int = 20, pause: float = 2.0,
                 log=print) -> int:
     """Yahoo adjusted closes for the symbols not yet on disk, in small batches with a pause, until
-    `budget_seconds` is spent. A symbol is kept as an empty file -- «Yahoo has nothing for it», not asked
-    again -- only from a batch in which another symbol did come back: a batch that returns nothing at all
-    is Yahoo refusing (a rate limit), so none of it is kept and the pass stops (Throttled). Returns how
-    many symbols are still missing."""
+    `budget_seconds` is spent. Every batch carries CANARY, a symbol that always has prices: when it comes
+    back empty Yahoo is refusing (a rate limit), so none of the batch is kept and the pass stops
+    (Throttled); when it comes back, a symbol with nothing is kept as an empty file -- «Yahoo has nothing
+    for it», not asked again. Returns how many symbols are still missing."""
     import yfinance as yf
     (CACHE / "prices").mkdir(parents=True, exist_ok=True)
     missing = [s for s in symbols if not _price_path(s).exists()]
     started = time.time()
     while missing and time.time() - started < budget_seconds:
         chunk = missing[:batch]
-        frame = yf.download(chunk, start=f"{FIRST_YEAR - 2}-01-01", auto_adjust=True, progress=False,
+        asked = chunk + [CANARY]
+        frame = yf.download(asked, start=f"{FIRST_YEAR - 2}-01-01", auto_adjust=True, progress=False,
                             group_by="ticker", threads=False)
         got = {}
-        for symbol in chunk:
+        for symbol in asked:
             try:
-                closes = (frame[symbol]["Close"] if len(chunk) > 1 else frame["Close"]).dropna()
+                closes = frame[symbol]["Close"].dropna()
                 got[symbol] = [[d.date().isoformat(), float(c)]
                                for d, c in zip(closes.index, closes.to_numpy().ravel()) if c == c and c > 0]
             except Exception:
                 got[symbol] = []
-        if not any(got.values()):
-            raise Throttled(f"a batch of {len(chunk)} came back empty; {len(missing)} symbols to go")
+        if not got.pop(CANARY, None):
+            raise Throttled(f"{CANARY} came back empty; {len(missing)} symbols to go")
         for symbol, rows in got.items():
             _price_path(symbol).write_text(json.dumps(rows), encoding="utf-8")
         missing = missing[batch:]
