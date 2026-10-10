@@ -380,8 +380,11 @@ def _row(label: str, s: dict, extra: str = "") -> str:
             f"{s['t']:+.2f} |{extra}")
 
 
-def build_report(cands: list[tuple[str, str, float]], prices_of=read_prices, now: dt.datetime | None = None) -> str:
-    """The whole test from the candidate days and a price reader; returns the report's text."""
+def build_report(cands: list[tuple[str, str, float]], prices_of=read_prices, now: dt.datetime | None = None,
+                 keep=None) -> str:
+    """The whole test from the candidate days and a price reader; returns the report's text. `keep(signal)`
+    leaves a signal out of the measurements (part 2: the liquidity floor) without changing which signals
+    are made."""
     spy = prices_of("SPY")
     by_symbol: dict[str, list[tuple[str, float]]] = defaultdict(list)
     for symbol, day, points in cands:
@@ -396,7 +399,7 @@ def build_report(cands: list[tuple[str, str, float]], prices_of=read_prices, now
             if closes and closes[0][0] <= day <= closes[-1][0]:
                 priced_days[day[:4]] += 1
         if closes:
-            signals += [(s, closes) for s in signals_of(symbol, days, closes)]
+            signals += [(s, closes) for s in signals_of(symbol, days, closes) if keep is None or keep(s)]
 
     def period(year: int) -> str:
         return "first" if year < SPLIT_YEAR else "second"
