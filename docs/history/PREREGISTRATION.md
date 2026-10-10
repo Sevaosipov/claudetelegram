@@ -62,3 +62,12 @@ Yahoo has no prices for most companies that were delisted — bankrupt, bought, 
 the failures among them drop out with them, so **the results are too good by an unknown amount** (survivorship
 bias). The report gives the share of signals with prices, by year, so the size of the hole is visible. A result
 that only just holds up should be read as not shown.
+
+## Note on the first run (2026-10-10)
+
+The first run of the report was made on prices for only 849 of the 3 614 tickers: Yahoo began refusing requests
+part-way through the download, and the loader recorded every refused ticker as "no prices". That report was
+discarded and is not a result. The loader now keeps "no prices" for a ticker only from a batch in which Yahoo
+answered for another one, and stops when a whole batch comes back empty. The test is to be run once the remaining
+prices are in (`python history_test.py prices`, repeated until nothing is missing, then `report`); the rules and
+the reading above are unchanged.

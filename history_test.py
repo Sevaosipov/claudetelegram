@@ -322,29 +322,40 @@ def _price_path(symbol: str) -> Path:
     return CACHE / "prices" / f"{symbol}.json"
 
 
-def load_prices(symbols: list[str], *, budget_seconds: float = 480, batch: int = 80, log=print) -> int:
-    """Yahoo adjusted closes for the symbols not yet on disk, in batches, until `budget_seconds` is spent.
-    A symbol Yahoo has nothing for is kept as an empty file, so it is not asked again. Returns how many
-    symbols are still missing."""
+class Throttled(RuntimeError):
+    """Yahoo stopped answering: nothing of the batch is kept, the run goes on later."""
+
+
+def load_prices(symbols: list[str], *, budget_seconds: float = 420, batch: int = 20, pause: float = 2.0,
+                log=print) -> int:
+    """Yahoo adjusted closes for the symbols not yet on disk, in small batches with a pause, until
+    `budget_seconds` is spent. A symbol is kept as an empty file -- «Yahoo has nothing for it», not asked
+    again -- only from a batch in which another symbol did come back: a batch that returns nothing at all
+    is Yahoo refusing (a rate limit), so none of it is kept and the pass stops (Throttled). Returns how
+    many symbols are still missing."""
     import yfinance as yf
     (CACHE / "prices").mkdir(parents=True, exist_ok=True)
     missing = [s for s in symbols if not _price_path(s).exists()]
     started = time.time()
     while missing and time.time() - started < budget_seconds:
-        chunk, missing = missing[:batch], missing[batch:]
+        chunk = missing[:batch]
         frame = yf.download(chunk, start=f"{FIRST_YEAR - 2}-01-01", auto_adjust=True, progress=False,
-                            group_by="ticker", threads=True)
+                            group_by="ticker", threads=False)
+        got = {}
         for symbol in chunk:
-            rows = []
             try:
-                closes = frame[symbol]["Close"] if len(chunk) > 1 else frame["Close"]
-                closes = closes.dropna()
-                rows = [[d.date().isoformat(), float(c)] for d, c in zip(closes.index, closes.to_numpy().ravel())
-                        if c == c and c > 0]
+                closes = (frame[symbol]["Close"] if len(chunk) > 1 else frame["Close"]).dropna()
+                got[symbol] = [[d.date().isoformat(), float(c)]
+                               for d, c in zip(closes.index, closes.to_numpy().ravel()) if c == c and c > 0]
             except Exception:
-                rows = []
+                got[symbol] = []
+        if not any(got.values()):
+            raise Throttled(f"a batch of {len(chunk)} came back empty; {len(missing)} symbols to go")
+        for symbol, rows in got.items():
             _price_path(symbol).write_text(json.dumps(rows), encoding="utf-8")
+        missing = missing[batch:]
         log(f"prices: {len(missing)} symbols to go")
+        time.sleep(pause)
     return len(missing)
 
 
@@ -474,7 +485,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"candidate days: {len(cands)} on {len(symbols)} tickers")
     if step == "purchases":
         return 0
-    left = load_prices(["SPY"] + symbols)
+    try:
+        left = load_prices(["SPY"] + symbols)
+    except Throttled as e:
+        print(f"Yahoo is refusing requests ({e}); run this step again later")
+        return 1
     if step == "prices" or left:
         print(f"prices still missing: {left}")
         return 0 if step == "prices" else 1
