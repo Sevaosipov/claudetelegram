@@ -158,7 +158,7 @@ _DECISION = {model_score.BUY: "покупка", model_score.WATCH: "наблюд
              model_score.BLOCK: "блок", model_score.SKIP: "пропуск"}
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_QUOTED = re.compile(r"""^(["'])(.*?)\1\s*(?:#.*)?$""")
-_BOLD = re.compile(r"</?b>", re.I)
+_BOLD = re.compile(r"</?(?:b|pre)>", re.I)       # the tags an answer may carry: stripped for plain text
 _TEXT_COMMANDS = ("ask", "news")     # free text, which may start with "-"
 
 

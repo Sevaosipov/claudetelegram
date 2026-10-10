@@ -1317,11 +1317,10 @@ def test_the_method_forbids_study_values_and_restores_the_chart():
     assert "indicators, drawings, alerts, Pine scripts, replay, layouts" in method
 
 
-def test_the_method_says_no_disclaimers_and_only_b_tags():
+def test_the_method_says_no_disclaimers_and_only_the_pre_tags():
     method = _text("analyst_method.txt")
-    assert "🎯 Итоговый вердикт:" in method
     assert "NO disclaimers" in method
-    assert "matched <b>...</b> pairs" in method and 'bare "<" or ">"' in method
+    assert "one matched <pre>...</pre> pair" in method and 'bare "<" or ">"' in method
     assert "`{ANALYST_CMD} context 'TICKER'`" in method
     assert "summary true" in method and "kill_existing false" in method
 
@@ -1338,13 +1337,27 @@ def test_both_templates_forbid_disclaimers_and_make_the_final_message_the_answer
 
 
 
-def test_the_telegram_template_keeps_the_ticker_rows_verbatim_rules():
+def test_the_telegram_template_treats_the_bots_data_as_input_not_text_to_repeat():
     flat = " ".join(_text("claude_analysis_prompt.txt").split())
-    for rule in ("opinion.py factor breakdown", "entry/target line", "📈 Прогноз на месяц",
-                 "historical frequency", "🪙 🏦 🟢 ⛓", "Нужна акция? Напишите …",
-                 "=== ДАННЫЕ БОТА ===", "АКТИВ:", "parse_mode HTML"):
+    for rule in ("FIXED SHAPE", "INPUT, not text to repeat", "Do not copy any of it into the answer",
+                 "=== ДАННЫЕ БОТА ===", "АКТИВ:", "parse_mode HTML", "no bullets, no emoji"):
         assert rule in flat, rule
     assert "ВОПРОС ВЛАДЕЛЬЦА" in flat
+
+
+def test_the_answer_has_a_fixed_short_shape():
+    """The owner found the long bulleted answers «too much info» and «messy»: one block and at most two
+    lines for an asset, at most five lines for anything else, and a list of what is not to be written."""
+    method = _text("analyst_method.txt")
+    flat = " ".join(method.split())
+    assert "<pre>XRP · Watch" in method and "Итог: ждать закрытия выше 1.43." in method
+    for row in ("Price", "Score", "Chart", "Trend", "Range", "Stop", "Held"):
+        assert f"- {row}:" in method, row
+    for rule in ("at most two lines", "at most five lines", "at most 110 characters", "NOTHING ELSE",
+                 "No bullets, no emoji, no header, no factor breakdown, no forecast block",
+                 "Buy (покупка), Watch (наблюдение), Skip (пропуск), Blocked (блок)"):
+        assert rule in flat, rule
+    assert "🎯" not in method and "Итоговый вердикт" not in method
 
 
 
@@ -1363,7 +1376,7 @@ def test_no_prompt_mentions_the_old_queue_commands_sending_or_files():
 def test_the_terminal_template_is_read_only_and_strips_the_tags():
     text = " ".join(_text("claude_ask_prompt.txt").split())          # line wraps do not count
     assert "send nothing to Telegram" in text and "read-only" in text
-    assert "<b> tags" in text and "stripped" in text
+    assert "<pre> tags" in text and "stripped" in text
     assert "ВОПРОС ВЛАДЕЛЬЦА" in text
 
 
@@ -2058,4 +2071,9 @@ def test_the_chart_check_gives_up_when_the_analyst_is_busy(monkeypatch, capsys):
         fcntl.flock(held, fcntl.LOCK_EX)
         assert SIGNAL_NOTE("RXO", "покупка", run=run) is None
     assert run.calls == []
+
+
+def test_the_plain_form_of_an_answer_has_neither_tag():
+    assert analyst.strip_bold("<pre>XRP · Watch\nPrice  1.41</pre>\nИтог: <b>ждать</b>") == (
+        "XRP · Watch\nPrice  1.41\nИтог: ждать")
 
