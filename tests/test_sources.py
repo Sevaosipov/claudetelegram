@@ -505,28 +505,36 @@ def test_the_companys_own_8k_filings_become_headlines(monkeypatch):
         assert model_score.news_part([{"title": "8-K: " + sources.SEC_8K_ITEMS[item]}])[1] is None
 
 
-def test_news_asks_every_trusted_source_and_the_general_search_only_when_they_gave_little(monkeypatch):
+def test_tradingview_is_the_main_source_and_the_others_are_asked_only_when_it_leaves_it_short(monkeypatch):
     asked = []
 
     def source(name, items):
         return lambda *a: asked.append(name) or items
-    reuters = [{"title": f"NVDA R{i}", "publisher": "Reuters", "published": f"2026-10-0{i + 1}"} for i in range(3)]
-    monkeypatch.setattr(sources, "_sec_8k_news", source("sec", [{"title": "8-K: other material event",
-                                                                 "publisher": "SEC (8-K)", "published": "2026-10-08"}]))
-    monkeypatch.setattr(sources, "_tradingview_news", source("tv", []))
-    monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", reuters))
-    monkeypatch.setattr(sources, "_yahoo_news", source("yahoo", [{"title": "Hot stock!", "publisher": "Zacks"}]))
-    monkeypatch.setattr(sources, "_google_news", source("general", [{"title": "NVDA G", "publisher": "Blog"}]))
+    tv = [{"title": f"NVDA T{i}", "publisher": "reuters", "published": f"2026-10-0{i + 1}"} for i in range(3)]
+    filing = [{"title": "8-K: other material event", "publisher": "SEC (8-K)", "published": "2026-10-08"}]
+    monkeypatch.setattr(sources, "_tradingview_news", source("tv", tv))
+    monkeypatch.setattr(sources, "_sec_8k_news", source("sec", filing))
+    monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", [{"title": "NVDA G", "publisher": "CNBC"}]))
+    monkeypatch.setattr(sources, "_yahoo_news", source("yahoo", [{"title": "NVDA Y", "publisher": "Yahoo Finance"}]))
+    monkeypatch.setattr(sources, "_google_news", source("general", [{"title": "NVDA B", "publisher": "Blog"}]))
     items, used = sources.news(NVDA)
-    assert asked == ["sec", "tv", "trusted", "yahoo"]                         # enough: no general search
-    assert [i["title"] for i in items] == ["8-K: other material event", "NVDA R2", "NVDA R1", "NVDA R0"]
-    assert used == f"{sources.SEC_LABEL}, {sources.TRUSTED_LABEL}, Yahoo"
+    assert asked == ["tv", "sec"]                                     # enough: nobody else is asked
+    assert [i["title"] for i in items] == ["8-K: other material event", "NVDA T2", "NVDA T1", "NVDA T0"]
+    assert used == f"{sources.TV_NEWS_LABEL}, {sources.SEC_LABEL}"
 
     asked.clear()
-    monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", []))
+    monkeypatch.setattr(sources, "_tradingview_news", source("tv", tv[:1]))
+    monkeypatch.setattr(sources, "_sec_8k_news", source("sec", []))
     items, used = sources.news(NVDA)
-    assert asked == ["sec", "tv", "trusted", "yahoo", "general"] and [i["title"] for i in items][-1] == "NVDA G"
-    assert "Google News" in used
+    assert asked == ["tv", "sec", "trusted", "yahoo"]                 # short: the others fill it; that is enough
+    assert {i["title"] for i in items} == {"NVDA T0", "NVDA G", "NVDA Y"} and "Google News" not in used
+
+    asked.clear()
+    monkeypatch.setattr(sources, "_tradingview_news", source("tv", []))
+    monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", []))
+    monkeypatch.setattr(sources, "_yahoo_news", source("yahoo", []))
+    items, used = sources.news(NVDA)
+    assert asked == ["tv", "sec", "trusted", "yahoo", "general"] and used == "Google News"
 
 
 def test_a_coin_is_not_asked_at_the_sec(monkeypatch):

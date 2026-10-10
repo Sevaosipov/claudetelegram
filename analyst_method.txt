@@ -100,7 +100,8 @@ project's files. The commands find the keys they need themselves.
    does not have: mcp-tv-get-ohlcv (interval 1D, count 250 and summary true, then count 60 -- the
    60-bar range, the 1-year high, a one-day jump; interval 1W count 104 for the weekly range),
    mcp-tv-get-financials and mcp-tv-get-forecasts for a company's business and value,
-   mcp-tv-get-news and mcp-tv-get-news-story for what moved the price,
+   mcp-tv-get-news and mcp-tv-get-news-story for what moved the price (TradingView's news is the
+   MAIN news source: ask it first, and use `{ANALYST_CMD} news 'QUERY'` only for what it lacks),
    mcp-tv-get-earnings-calendar for the date of the next report, mcp-tv-search-symbols to find
    an EXCHANGE:TICKER (its symbols are written NYSE:RXO, BINANCE:SOLUSDT), and
    mcp-tv-get-technicals-rating to check a number of the first server that looks wrong. Also

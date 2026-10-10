@@ -590,27 +590,32 @@ def _tradingview_news(asset) -> list[dict]:
 
 
 def news(asset, name: str | None = None):
-    """(the headlines on an asset, where they came from), the most trusted first (ranked): a US company's
-    own 8-K filings, TradingView's news feed, the trusted desks and press-release wires, Yahoo's feed, a
-    coin's trade press -- every
-    source is asked, a failing one is skipped -- and the general news search only when those gave fewer
-    than MIN_TRUSTED. (None, None) with nothing, or for an asset with no listing."""
+    """(the headlines on an asset, where they came from), the most trusted first (ranked).
+
+    TradingView's news feed is the main source: it is asked first, and with a US company's own 8-K filings
+    (the surest place for a bankruptcy, a delisting or a restatement) it is usually the whole answer. Only
+    when the two give fewer than MIN_TRUSTED headlines worth reading are the others asked -- the trusted
+    desks and press-release wires through the news search, Yahoo's feed, a coin's trade press -- and the
+    general news search last, when even those leave it short. A failing source is skipped.
+    (None, None) with nothing, or for an asset with no listing."""
     if asset.is_isin or not asset.yahoo:
         return None, None
     crypto_asset = asset.kind == "crypto"
     query = f"{name or asset.symbol} {'crypto' if crypto_asset else 'stock'}"
-    attempts = []
+    main = [(TV_NEWS_LABEL, lambda: _tradingview_news(asset))]
     if not crypto_asset and "." not in asset.symbol:
-        attempts.append((SEC_LABEL, lambda: _sec_8k_news(asset.symbol)))
-    attempts += [(TV_NEWS_LABEL, lambda: _tradingview_news(asset)),
-                 (TRUSTED_LABEL, lambda: about(_trusted_google_news(query), name, asset.symbol)),
-                 ("Yahoo", lambda: _yahoo_news(asset.yahoo))]
+        main.append((SEC_LABEL, lambda: _sec_8k_news(asset.symbol)))
+    more = [(TRUSTED_LABEL, lambda: about(_trusted_google_news(query), name, asset.symbol)),
+            ("Yahoo", lambda: _yahoo_news(asset.yahoo))]
     if crypto_asset:
-        attempts.append(("CoinDesk/Cointelegraph", lambda: _crypto_feed_news(asset.symbol, name)))
-    found, used = _gather(attempts)
-    if len(ranked(found)) < MIN_TRUSTED:
-        more, more_used = _gather([("Google News", lambda: about(_google_news(query), name, asset.symbol))])
-        found, used = found + more, used + more_used
+        more.append(("CoinDesk/Cointelegraph", lambda: _crypto_feed_news(asset.symbol, name)))
+    last = [("Google News", lambda: about(_google_news(query), name, asset.symbol))]
+    found, used = [], []
+    for step in (main, more, last):
+        if len(ranked(found)) >= MIN_TRUSTED:
+            break
+        items, names = _gather(step)
+        found, used = found + items, used + names
     best = ranked(found)
     return (best, ", ".join(used)) if best else (None, None)
 
