@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 
 import cik_map
+import chart_check
 import cluster
 import db
 import insider_score
@@ -345,11 +346,17 @@ def _pick_week(conn, today: dt.date, report) -> bool:
     deals: dict[str, str] = {}
 
     def bought_out(score) -> bool:
+        # A stake filing alone is not a buy: on 20 years of 13Ds such signals did not beat the index
+        # (docs/history/REPORT_2.md). A stake still counts as a trigger beside insiders' own buying.
+        if getattr(score, "source", None) == weekly.STAKE_SOURCE:
+            left_out.append({"ticker": score.ticker, "why": weekly.WHY_STAKE})
+            print(f"[weekly] {score.ticker} left out: a 13D stake alone")
+            return True
         found = takeover.check(score.ticker, getattr(score, "source", None), today)
         if found is None:
             return False
         if found.kind == takeover.TARGET:
-            left_out.append({"ticker": score.ticker, "why": found.text})
+            left_out.append({"ticker": score.ticker, "why": weekly.WHY_TAKEOVER})
             print(f"[weekly] {score.ticker} left out: {found.text}")
             return True
         deals[score.ticker] = found.text
@@ -388,9 +395,27 @@ def _prepare_picks(conn, today: dt.date) -> None:
     """Just before the week's messages go out: the picks' prices read again and Claude's read of each
     chart added (signal_context.refresh), kept back in kv so that a retry does not ask Claude again."""
     picks = _week_picks(conn, today)
-    if picks:
-        signal_context.refresh(conn, picks, today)
-        db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)
+    if not picks:
+        return
+    signal_context.refresh(conn, picks, today)
+    # The review is a gate, not a note: a pick whose chart verdict is «against» -- by the bot's rules or by
+    # Claude with TradingView and the news -- is not sent. The budget is split again between the rest.
+    against = [p for p in picks if chart_check.word(p.get("chart")) == chart_check.WORDS[chart_check.AGAINST]]
+    if against:
+        picks = [p for p in picks if p not in against]
+        key = weekly.LEFT_OUT_KEY.format(week=_week_id(today))
+        kept = db.get_cached_json(conn, key)
+        kept = kept if isinstance(kept, list) else []
+        named = {d.get("ticker") for d in kept if isinstance(d, dict)}
+        kept += [{"ticker": p["ticker"], "why": weekly.WHY_CHART} for p in against if p["ticker"] not in named]
+        db.save_cached_json(conn, key, kept)
+        for p in against:
+            print(f"[weekly] {p['ticker']} left out: {p.get('chart')}")
+        for pick, share in zip(picks, signal_context.shares([p.get("score") for p in picks])):
+            amount = signal_context.amount_eur(conn, pick.get("stop_pct"), today, share)
+            if amount is not None:
+                pick["amount_eur"] = round(amount, 2)
+    db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)
 
 
 def run_weekly_send(conn) -> int:

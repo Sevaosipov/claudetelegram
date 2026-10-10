@@ -1433,7 +1433,7 @@ def test_the_pick_leaves_out_a_takeover_target_marks_a_merger_party_and_fills_th
     assert asked == ["TGT", "BUYER", "S0", "S1", "S2", "S3"]                               # no more than needed
     assert "TGT left out: идёт выкуп компании" in capsys.readouterr().out
     assert "Not on Trading 212" not in weekly.buy_text(picks[0]) and "\nMerger pending</pre>" in weekly.buy_text(picks[0])
-    assert weekly.format_summary(conn, FRI).splitlines()[-1] == "Не вошли в сигналы: TGT — идёт выкуп компании"
+    assert weekly.format_summary(conn, FRI).splitlines()[-1] == "Не вошли в сигналы: TGT (выкуп)"
 
 
 def test_a_week_with_nothing_left_out_has_no_such_line(conn, monkeypatch):
@@ -1450,4 +1450,33 @@ def test_the_watch_pass_runs_on_a_full_run_only(main_run):
     main_run("--no-telegram")
     main_run("--sec-only")
     assert main_run.watched == [1]
+
+
+# ---- a stake filing alone is not a buy, and the chart review is a gate
+def test_a_13d_stake_alone_is_left_out_and_the_place_goes_to_the_next(conn, monkeypatch):
+    import takeover
+    import weekly
+    monkeypatch.setattr(takeover, "check", lambda t, source, today: None)
+    monkeypatch.setattr(bot.signal_context, "enrich", lambda conn, pick, today, **kw: pick)
+    scored = [_scored("STAKE", 90.0, source="SEC13DG"), _scored("INS", 70.0)]
+    bot._pick_week(conn, FRI, types.SimpleNamespace(scored=scored))
+    assert [p["ticker"] for p in bot._week_picks(conn, FRI)] == ["INS"]
+    assert weekly.format_summary(conn, FRI).splitlines()[-1] == "Не вошли в сигналы: STAKE (только 13D)"
+
+
+def test_a_pick_the_chart_review_is_against_is_not_sent_and_the_budget_is_split_again(conn, monkeypatch):
+    import weekly
+    bot.signal_context.handle_command(conn, "/size budget 30")
+    picks = [{"ticker": "GOOD", "score": 70.0, "stop_pct": 0.1, "amount_eur": 15.0},
+             {"ticker": "BAD", "score": 70.0, "stop_pct": 0.1, "amount_eur": 15.0}]
+    db.save_cached_json(conn, bot.PICKS_KEY.format(week=bot._week_id(FRI)), picks)
+
+    def refresh(c, ps, today):
+        ps[0]["chart"], ps[1]["chart"] = "График за — x", "График против (по правилам: за) — оферта"
+    monkeypatch.setattr(bot.signal_context, "refresh", refresh)
+    REAL_PREPARE(conn, FRI)
+    kept = bot._week_picks(conn, FRI)
+    assert [p["ticker"] for p in kept] == ["GOOD"] and kept[0]["amount_eur"] == 30.0
+    assert weekly.format_summary(conn, FRI).splitlines()[-1] == "Не вошли в сигналы: BAD (график против)"
+    assert [k for k, _t in weekly.week_signals(conn, FRI, kept)] == ["buy:GOOD"]
 

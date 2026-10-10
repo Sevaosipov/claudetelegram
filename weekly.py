@@ -32,6 +32,8 @@ KIND = "Invest"             # what a weekly buy is: the asset itself is bought (
 MAX_SELLERS = 5             # a group exit names this many sellers, then «и ещё N»
 BEST_WORST = 3              # the summary names this many best and this many worst positions
 LEFT_OUT_KEY = "weekly_left_out_{week}"     # kv: [{"ticker", "why"}] the week's pick left out (bot._pick_week)
+STAKE_SOURCE = "SEC13DG"
+WHY_TAKEOVER, WHY_STAKE, WHY_CHART = "выкуп", "только 13D", "график против"   # why a buy was left out
 SCORING_FAILED_WARNING = "⚠️ Оценка сигналов на этой неделе не отработала — покупок не было."
 
 
@@ -200,13 +202,15 @@ def _signals_line(conn, today: dt.date) -> str:
 
 
 def _left_out_line(conn, today: dt.date) -> str | None:
-    """«Не вошли в сигналы: RXO, SSTI — идёт выкуп компании»: the buys the week's pick left out because the
-    company is being bought out (takeover.py); None when there are none."""
+    """«Не вошли в сигналы: RXO (выкуп), ABC (только 13D), XYZ (график против)»: the buys left out of the
+    week and why -- the company is being bought out (takeover.py), the signal is a stake filing alone, or
+    the chart review said «against» (bot._pick_week, bot._prepare_picks); None when there are none."""
     import db
     iso = today.isocalendar()
     kept = db.get_cached_json(conn, LEFT_OUT_KEY.format(week=f"{iso.year}-W{iso.week:02d}"))
-    names = [d["ticker"] for d in kept if isinstance(d, dict) and d.get("ticker")] if isinstance(kept, list) else []
-    return f"Не вошли в сигналы: {', '.join(names)} — идёт выкуп компании" if names else None
+    names = [f"{crypto.symbol_of(d['ticker'])} ({d.get('why') or WHY_TAKEOVER})"
+             for d in kept if isinstance(d, dict) and d.get("ticker")] if isinstance(kept, list) else []
+    return f"Не вошли в сигналы: {', '.join(names)}" if names else None
 
 
 def format_summary(conn, today: dt.date, *, html: bool = True, scoring_failed: bool = False) -> str:
