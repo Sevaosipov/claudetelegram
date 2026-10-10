@@ -432,6 +432,17 @@ def _row_failed(conn, queue_id: int, what: str, send) -> bool:
     return False
 
 
+def _watch_level(conn, queue_id: int, ticker: str, answer: str) -> None:
+    """After a ticker row's analysis went out: keep the level it says to wait for (watch.record), so the
+    daily run looks again when the price closes beyond it. A question is not an asset: nothing is kept."""
+    try:
+        if db.queued_question(conn, queue_id) is None:
+            import watch
+            watch.record(conn, ticker, answer)
+    except Exception as e:
+        print(f"[analyst] строка {queue_id}: уровень не записан: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def process_queue(conn, *, run=None, send=None) -> int:
     """Answer the Telegram queue, one headless Claude per row (at most MAX_ROWS a pass, oldest
     first), under the queue lock. `run` is the runner (default _run_group), `send` the Telegram
@@ -483,6 +494,7 @@ def process_queue(conn, *, run=None, send=None) -> int:
             if answer and _deliver(answer, send):
                 db.mark_analysis_processed(conn, queue_id)
                 print(f"[analyst] строка {queue_id}: ответ отправлен")
+                _watch_level(conn, queue_id, ticker, answer)
                 continue
             if proc.returncode:
                 print(f"[analyst] строка {queue_id}: claude вышел с кодом {proc.returncode}: "

@@ -1387,6 +1387,34 @@ def format_league_event(t, event: str, *, html: bool = True) -> str:
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
+# ---- a level an analysis said to wait for (watch.py)
+def _watch_name(ticker: str) -> str:
+    return ticker.upper().removeprefix("$").removeprefix("CRYPTO:")
+
+
+def _watch_number(x: float) -> str:
+    return f"{x:.{2 if x >= 100 else 4 if x >= 1 else 6}f}".rstrip("0").rstrip(".")
+
+
+def format_watch_reached(level, close: float, *, html: bool = True) -> str:
+    """«🔔 XRP closed above 1.43 (1.45)»: the level of an earlier analysis was reached; a fresh analysis
+    follows as its own message."""
+    text = (f"🔔 {_watch_name(level.ticker)} closed {level.direction} {_watch_number(level.level)} "
+            f"({_watch_number(close)})")
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_watch_list(levels: list, *, html: bool = True) -> str:
+    """/watch: the levels waited for, a row each -- «XRP    close above 1.43»."""
+    if not levels:
+        text = "Watching: nothing"
+    else:
+        width = max(len(_watch_name(lv.ticker)) for lv in levels) + 2
+        text = "\n".join(["Watching"] + [f"{_watch_name(lv.ticker):<{width}}close {lv.direction} "
+                                         f"{_watch_number(lv.level)}" for lv in levels])
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
 LEAGUE_NAMES = {"COT-WITH": "Speculators", "RATE-MOM": "Rates", "CMD-LEAD": "Commodities",
                 "MONTH-END": "Month-end"}
 

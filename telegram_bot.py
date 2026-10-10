@@ -96,6 +96,7 @@ import research
 import sources
 import signal_context
 import t212_account
+import watch
 import telegram_notify
 from cfd import league as cfd_league
 from cfd import live as cfd_live
@@ -148,6 +149,8 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "/size — на сколько евро покупать по сигналу: недельный бюджет (/size budget 30) или риск "
              "и предел доли счёта.\n"
              "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
+             "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
+             "разбор сам.\n"
 
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
@@ -226,6 +229,21 @@ def _handle_league_command(conn, text: str) -> bool:
     except Exception as e:
         print(f"[telegram_bot] /league failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось выполнить /league ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_watch_command(conn, text: str) -> bool:
+    """/watch: the levels the bot waits for after its analyses, and /watch off TICKER (watch.py). Returns
+    False for any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/watch":
+        return False
+    try:
+        answer = watch.handle_command(conn, text)
+        telegram_notify.send_text(answer if answer.startswith("<pre>") else telegram_notify._esc(answer))
+    except Exception as e:
+        print(f"[telegram_bot] /watch failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /watch ({type(e).__name__}). Попробуйте позже.")
     return True
 
 
@@ -683,7 +701,8 @@ def _handle_message(conn, text: str) -> None:
     the ticker analysis; anything else -- a question for the analyst."""
     text = (text or "").strip()
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
-            or _handle_size_command(conn, text) or _handle_league_command(conn, text)):
+            or _handle_size_command(conn, text) or _handle_league_command(conn, text)
+            or _handle_watch_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
         _handle_backtest(conn, text)

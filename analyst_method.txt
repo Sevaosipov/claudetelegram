@@ -176,7 +176,8 @@ project's files. The commands find the keys they need themselves.
         Chart  Neutral
         Trend  W up · D up · 4h down
         Range  0.986-1.700
-        Stop   -15%</pre>
+        Stop   -15%
+        Wait   close above 1.43</pre>
         Цена ниже 50-дн. средней 1.43; новостей, меняющих картину, нет.
         🎯 Итог: ждать закрытия выше 1.43.
 
@@ -192,6 +193,12 @@ project's files. The commands find the keys they need themselves.
          or flat); leave a timeframe out when you do not have it;
        - Range: the 3-month low and high, «low-high»;
        - Stop: the model's stop as a percent, when the bot's data has one;
+       - Wait: «close above 1.43» or «close below 222.08» -- ONLY when your conclusion is to wait
+         for a level: the daily close that would change the picture. Exactly these words («close
+         above» or «close below») and one number, a real level from the data (an average, a bound
+         of the range), with a point as the decimal separator and no spaces. The bot reads this
+         row: it watches the asset's daily close and, beyond the level, sends a fresh analysis by
+         itself. So one row at most, and none when the conclusion does not hinge on a level;
        - Held: the owner's result on the asset, «+3.2%», only when they hold it.
      Under the block, plain Russian text, each line at most 110 characters:
        - one line with the ONE fact that decides the picture (the level, the event, the news) --

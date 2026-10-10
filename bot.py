@@ -62,6 +62,7 @@ import sec_edgar
 import signal_context
 import signals_weekly
 import takeover
+import watch
 import strategy
 import t212_account
 import universe
@@ -468,6 +469,17 @@ def _league_pass(conn, args) -> None:
     result = _run_source("LEAGUE", cfd_league.run, conn)
     if result is not None and any(result):
         print(f"[LEAGUE] opened {result[0]}, closed {result[1]}")
+
+
+def _watch_pass(conn, args) -> None:
+    """The levels earlier analyses said to wait for (watch.py): for each one the price closed beyond, a
+    note and a fresh analysis from the analyst. On a full run only, and not with --no-telegram. A crash is
+    reported like a failed source."""
+    if _filtered_run(args) or args.no_telegram:
+        return
+    fired = _run_source("WATCH", watch.run, conn)
+    if fired:
+        print(f"[WATCH] {fired} level(s) reached")
 
 
 def _cfd_pass(conn, args) -> None:
@@ -896,6 +908,7 @@ def main():
 
         _cfd_pass(conn, args)
         _league_pass(conn, args)
+        _watch_pass(conn, args)
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from

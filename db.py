@@ -631,6 +631,19 @@ CREATE TABLE IF NOT EXISTS cfd_signals (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS cfd_signals_coin_date ON cfd_signals(coin, signal_date);
 
+-- A level an analysis said to wait for (watch.py): «Wait   close above 1.43». The daily run reads the asset's
+-- last completed close and, beyond the level, has the analyst write a fresh analysis.
+CREATE TABLE IF NOT EXISTS watch_levels (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker      TEXT NOT NULL,             -- as the analysis queue names it: CRYPTO:XRP, $NVDA, EQNR.OL
+    direction   TEXT NOT NULL,             -- above | below
+    level       REAL NOT NULL,
+    created     TEXT NOT NULL,             -- ISO date the analysis was delivered
+    status      TEXT NOT NULL,             -- active | reached | replaced | cancelled | expired
+    fired_at    TEXT,
+    fired_close REAL
+);
+
 -- The forex paper league (cfd/league.py, docs/cfd/PAPER_LEAGUE.md): one row per paper trade of an idea run
 -- forward for 13 weeks. The bot never places an order.
 CREATE TABLE IF NOT EXISTS league_trades (

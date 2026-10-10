@@ -803,6 +803,7 @@ def main_run(monkeypatch, tmp_path):
             raise RuntimeError("cftc is down")
         return (1, 0)
     monkeypatch.setattr(bot.cfd_league, "run", league_pass)
+    monkeypatch.setattr(bot.watch, "run", lambda conn: run.watched.append(1) or 0)
 
     def run(*argv):
         monkeypatch.setattr(sys, "argv", ["bot.py", "--once", *argv])
@@ -824,6 +825,7 @@ def main_run(monkeypatch, tmp_path):
     run.league, run.league_crashes = [], False                    # the paper league's pass (stubbed), the same
     run.hour = 18                                                 # past the Friday hour: the week's messages may go
     run.prepared = []                                             # the days the picks were made ready to send
+    run.watched = []                                              # the watch pass (stubbed): once a full run
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 
@@ -1437,4 +1439,11 @@ def test_a_week_with_nothing_left_out_has_no_such_line(conn, monkeypatch):
     monkeypatch.setattr(bot.signal_context, "enrich", lambda conn, pick, today, **kw: pick)
     bot._pick_week(conn, FRI, types.SimpleNamespace(scored=[_scored("AAA", 70.0)]))
     assert "Не вошли" not in weekly.format_summary(conn, FRI)
+
+
+def test_the_watch_pass_runs_on_a_full_run_only(main_run):
+    main_run()
+    main_run("--no-telegram")
+    main_run("--sec-only")
+    assert main_run.watched == [1]
 
