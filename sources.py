@@ -437,13 +437,13 @@ def _crypto_feed_news(symbol: str, name: str | None) -> list[dict]:
 # ---- whom to believe. A headline is as good as who wrote it: the company's own filing or press release and
 # the wire and newspaper desks first; the sites that turn every price move into an article not at all.
 TIER_PRIMARY, TIER_OTHER, TIER_NOISE = 1, 2, 3
-_PRIMARY = ("sec.gov", "sec (8-k)", "business wire", "businesswire", "pr newswire", "prnewswire", "globenewswire",
+_PRIMARY = ("sec.gov", "sec (8-k)", "dow-jones", "business wire", "businesswire", "pr newswire", "prnewswire", "globenewswire",
             "globe newswire", "reuters", "bloomberg", "wall street journal", "wsj", "financial times", "ft.com",
             "associated press", "apnews", "ap news", "cnbc", "barron", "marketwatch", "dow jones", "the economist",
             "new york times", "nytimes", "nikkei", "coindesk", "the block", "theblock")
 _NOISE = ("motley fool", "fool.com", "zacks", "benzinga", "investorplace", "simply wall st", "simplywall",
           "24/7 wall st", "247wallst", "tipranks", "insider monkey", "insidermonkey", "gurufocus", "stockstory",
-          "marketbeat", "stocktwits", "investing.com", "thestreet", "invezz", "fxstreet", "stock traders daily",
+          "marketbeat", "stocktwits", "investing.com", "cryptobriefing", "binance_news", "coinpedia", "thestreet", "invezz", "fxstreet", "stock traders daily",
           "defense world", "etf daily news", "ticker report", "american banking news")
 # A press-release wire also carries what law firms pay to post about every falling stock and every merger:
 # «shareholder alert», «investigates whether ... a fair deal». Noise, whoever the wire is.
@@ -554,9 +554,41 @@ def _sec_8k_news(symbol: str, today: dt.date | None = None, session=None) -> lis
     return out[:NEWS_LIMIT]
 
 
+TV_NEWS_URL = "https://news-headlines.tradingview.com/v2/headlines"
+TV_NEWS_LABEL = "TradingView"
+TV_STOCK_EXCHANGES = ("NASDAQ", "NYSE", "AMEX")     # tried in turn: the feed wants EXCHANGE:TICKER
+
+
+def _tradingview_news(asset) -> list[dict]:
+    """TradingView's own news feed for the asset (its public headlines endpoint, no sign-in): Reuters and
+    Dow Jones items among others, each with its provider, so the tiers sort them like any other headline.
+    A US stock is asked as NASDAQ:, NYSE: and AMEX: until one answers; a coin as BINANCE:<SYMBOL>USDT.
+    [] for a listing elsewhere."""
+    if asset.kind == "crypto":
+        symbols = [f"BINANCE:{asset.symbol}USDT"]
+    elif "." in asset.symbol:
+        return []
+    else:
+        symbols = [f"{exchange}:{asset.symbol}" for exchange in TV_STOCK_EXCHANGES]
+    for symbol in symbols:
+        items = _get(TV_NEWS_URL, client="web", lang="en", symbol=symbol).json().get("items") or []
+        if items:
+            out = []
+            for item in items[:3 * NEWS_LIMIT]:
+                stamp = item.get("published")
+                day = (dt.datetime.fromtimestamp(stamp, dt.timezone.utc).date().isoformat()
+                       if isinstance(stamp, (int, float)) else "")
+                path = item.get("storyPath") or ""
+                out.append({"title": (item.get("title") or "").strip(), "publisher": item.get("provider") or "TradingView",
+                            "published": day, "url": f"https://www.tradingview.com{path}" if path else ""})
+            return out
+    return []
+
+
 def news(asset, name: str | None = None):
     """(the headlines on an asset, where they came from), the most trusted first (ranked): a US company's
-    own 8-K filings, the trusted desks and press-release wires, Yahoo's feed, a coin's trade press -- every
+    own 8-K filings, TradingView's news feed, the trusted desks and press-release wires, Yahoo's feed, a
+    coin's trade press -- every
     source is asked, a failing one is skipped -- and the general news search only when those gave fewer
     than MIN_TRUSTED. (None, None) with nothing, or for an asset with no listing."""
     if asset.is_isin or not asset.yahoo:
@@ -566,7 +598,8 @@ def news(asset, name: str | None = None):
     attempts = []
     if not crypto_asset and "." not in asset.symbol:
         attempts.append((SEC_LABEL, lambda: _sec_8k_news(asset.symbol)))
-    attempts += [(TRUSTED_LABEL, lambda: about(_trusted_google_news(query), name, asset.symbol)),
+    attempts += [(TV_NEWS_LABEL, lambda: _tradingview_news(asset)),
+                 (TRUSTED_LABEL, lambda: about(_trusted_google_news(query), name, asset.symbol)),
                  ("Yahoo", lambda: _yahoo_news(asset.yahoo))]
     if crypto_asset:
         attempts.append(("CoinDesk/Cointelegraph", lambda: _crypto_feed_news(asset.symbol, name)))

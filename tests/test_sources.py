@@ -513,25 +513,26 @@ def test_news_asks_every_trusted_source_and_the_general_search_only_when_they_ga
     reuters = [{"title": f"NVDA R{i}", "publisher": "Reuters", "published": f"2026-10-0{i + 1}"} for i in range(3)]
     monkeypatch.setattr(sources, "_sec_8k_news", source("sec", [{"title": "8-K: other material event",
                                                                  "publisher": "SEC (8-K)", "published": "2026-10-08"}]))
+    monkeypatch.setattr(sources, "_tradingview_news", source("tv", []))
     monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", reuters))
     monkeypatch.setattr(sources, "_yahoo_news", source("yahoo", [{"title": "Hot stock!", "publisher": "Zacks"}]))
     monkeypatch.setattr(sources, "_google_news", source("general", [{"title": "NVDA G", "publisher": "Blog"}]))
     items, used = sources.news(NVDA)
-    assert asked == ["sec", "trusted", "yahoo"]                               # enough: no general search
+    assert asked == ["sec", "tv", "trusted", "yahoo"]                         # enough: no general search
     assert [i["title"] for i in items] == ["8-K: other material event", "NVDA R2", "NVDA R1", "NVDA R0"]
     assert used == f"{sources.SEC_LABEL}, {sources.TRUSTED_LABEL}, Yahoo"
 
     asked.clear()
     monkeypatch.setattr(sources, "_trusted_google_news", source("trusted", []))
     items, used = sources.news(NVDA)
-    assert asked == ["sec", "trusted", "yahoo", "general"] and [i["title"] for i in items][-1] == "NVDA G"
+    assert asked == ["sec", "tv", "trusted", "yahoo", "general"] and [i["title"] for i in items][-1] == "NVDA G"
     assert "Google News" in used
 
 
 def test_a_coin_is_not_asked_at_the_sec(monkeypatch):
     asked = []
     monkeypatch.setattr(sources, "_sec_8k_news", lambda *a: asked.append("sec") or [])
-    for name in ("_trusted_google_news", "_yahoo_news", "_google_news"):
+    for name in ("_tradingview_news", "_trusted_google_news", "_yahoo_news", "_google_news"):
         monkeypatch.setattr(sources, name, lambda *a: [])
     monkeypatch.setattr(sources, "_crypto_feed_news", lambda s, n: [])
     assert sources.news(BTC, "Bitcoin") == (None, None) and asked == []
@@ -559,4 +560,38 @@ def test_about_keeps_the_headlines_that_name_the_asset():
     assert len(sources.about(items, "SoundThinking, Inc.", "SSTI")) == 1
     assert sources.about(items, None, "") == items                      # nothing to go by: all kept
     assert sources.about(items, "The Company Inc") == items
+
+
+# ------------------------------------------------------------------ TradingView's own news feed
+class _TvResp:
+    def __init__(self, items):
+        self._items = items
+
+    def json(self):
+        return {"items": self._items}
+
+
+def test_tradingviews_feed_is_asked_by_exchange_until_one_answers(monkeypatch):
+    asked = []
+    feed = {"NYSE:RXO": [{"title": " RXO Is Maintained at Buy ", "provider": "dow-jones", "published": 1791331200,
+                          "storyPath": "/news/DJN_x/"},
+                         {"title": "C.H. Robinson to Benefit", "provider": "zacks", "published": None}]}
+
+    def get(url, **params):
+        asked.append(params["symbol"])
+        assert url == sources.TV_NEWS_URL and params["client"] == "web"
+        return _TvResp(feed.get(params["symbol"], []))
+    monkeypatch.setattr(sources, "_get", get)
+    items = sources._tradingview_news(assets.stock_asset("RXO"))
+    assert asked == ["NASDAQ:RXO", "NYSE:RXO"]                              # stops at the one that answers
+    assert items[0] == {"title": "RXO Is Maintained at Buy", "publisher": "dow-jones", "published": "2026-10-07",
+                        "url": "https://www.tradingview.com/news/DJN_x/"}
+    assert sources.tier(items[0]) == sources.TIER_PRIMARY and sources.tier(items[1]) == sources.TIER_NOISE
+    assert sources._tradingview_news(assets.stock_asset("EQNR.OL")) == []   # not a US listing: not asked
+
+
+def test_a_coin_is_asked_as_its_binance_pair_and_a_foreign_listing_not_at_all(monkeypatch):
+    asked = []
+    monkeypatch.setattr(sources, "_get", lambda url, **p: asked.append(p["symbol"]) or _TvResp([]))
+    assert sources._tradingview_news(BTC) == [] and asked == ["BINANCE:BTCUSDT"]
 

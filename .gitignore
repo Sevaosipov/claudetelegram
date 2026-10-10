@@ -23,3 +23,7 @@ data/cfd_cache/
 
 # Git worktrees for isolated feature work
 .worktrees/
+
+# Research caches and the daily copies of the database (regenerated)
+data/history_cache/
+data/backups/
