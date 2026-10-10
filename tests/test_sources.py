@@ -595,3 +595,13 @@ def test_a_coin_is_asked_as_its_binance_pair_and_a_foreign_listing_not_at_all(mo
     monkeypatch.setattr(sources, "_get", lambda url, **p: asked.append(p["symbol"]) or _TvResp([]))
     assert sources._tradingview_news(BTC) == [] and asked == ["BINANCE:BTCUSDT"]
 
+
+@pytest.mark.parametrize("title", ["RXO Price Target Raised to $30.00/Share From $23.00 by Citigroup",
+                                   "RXO Is Maintained at Buy by Truist Securities",
+                                   "Cryptocurrencies Extend Slide as U.S. Dollar Stays Steady — Market Talk"])
+def test_a_wires_rating_note_stays_but_behind_the_news_proper(title):
+    assert sources.tier({"title": title, "publisher": "dow-jones"}) == sources.TIER_OTHER
+    news = {"title": "C.H. Robinson to Buy RXO for About $5.8 Billion", "publisher": "dow-jones", "published": "2026-10-05"}
+    note = {"title": title, "publisher": "dow-jones", "published": "2026-10-07"}
+    assert sources.ranked([note, news])[0] is news
+

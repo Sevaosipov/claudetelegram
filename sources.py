@@ -450,6 +450,10 @@ _NOISE = ("motley fool", "fool.com", "zacks", "benzinga", "investorplace", "simp
 _NOISE_TITLE = re.compile(r"(shareholder|investor|stock) alert|\$hareholder|class action|law (firm|offices)|"
                           r"investigat\w+ (whether|adequacy|the fairness|claims)|reminds (investors|shareholders)|"
                           r"lead plaintiff|halper sadeh|kahn swick|levi & korsinsky|rosen law|pomerantz", re.I)
+# A wire's one-line note of a broker's rating or price target: true, but there are a dozen a day and each says
+# little. Kept, behind the news proper.
+_ROUTINE_TITLE = re.compile(r"price target|is maintained at|is (raised|cut|lowered) to (buy|sell|hold|neutral|"
+                            r"outperform|underperform|overweight|underweight)|market talk", re.I)
 _NAME_FILLER = {"inc", "corp", "corporation", "co", "company", "ltd", "plc", "group", "holdings", "the", "and",
                 "sa", "ag", "nv", "stock", "crypto", "class"}
 TRUSTED_SITES = ("reuters.com", "bloomberg.com", "wsj.com", "ft.com", "cnbc.com", "apnews.com",
@@ -483,7 +487,7 @@ def tier(item: dict) -> int:
     if any(n in who or n in tail for n in _NOISE) or _NOISE_TITLE.search(title):
         return TIER_NOISE
     if any(p in who or p in tail for p in _PRIMARY):
-        return TIER_PRIMARY
+        return TIER_OTHER if _ROUTINE_TITLE.search(title) else TIER_PRIMARY
     return TIER_OTHER
 
 
