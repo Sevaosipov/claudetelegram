@@ -12,7 +12,9 @@ Values are measured on adjusted closes (dividends and splits included).
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sys
+from pathlib import Path
 
 import assets
 import crypto
@@ -50,8 +52,54 @@ def _closes(symbol: str, days: int) -> list[tuple[str, float]]:
     asset = assets.crypto_asset(symbol[:-len("-USD")]) if coin else assets.stock_asset(symbol)
     bars, src = sources.price_history(asset, days)
     if not coin and src != "Yahoo":
+        bars = None
+    if bars:
+        _remember(symbol, bars)
+        return bars
+    return _remembered(symbol, asset)
+
+
+# When Yahoo refuses (a rate limit takes it away for hours) the bot is not left blind: the series it last
+# got is kept on disk, and served -- with the price of the hour from TradingView on top -- until Yahoo answers.
+PRICE_CACHE_DIR = Path(__file__).resolve().parent / "data" / "price_cache"
+PRICE_CACHE_DAYS = 10           # a kept series older than this is not a price any more
+
+
+def _cache_file(symbol: str) -> Path:
+    return PRICE_CACHE_DIR / f"{symbol.replace('/', '_')}.json"
+
+
+def _remember(symbol: str, bars: list[tuple[str, float]]) -> None:
+    try:
+        PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _cache_file(symbol).with_suffix(".tmp")
+        tmp.write_text(json.dumps({"saved": dt.date.today().isoformat(), "bars": bars}), encoding="utf-8")
+        tmp.replace(_cache_file(symbol))
+    except OSError as e:
+        print(f"[prices] {symbol}: the series was not kept: {type(e).__name__}", file=sys.stderr)
+
+
+def _remembered(symbol: str, asset) -> list[tuple[str, float]]:
+    """The series last kept for `symbol`, when it is no older than PRICE_CACHE_DAYS, with today's price
+    from another source (TradingView for a stock: sources.current_price) as today's bar; [] otherwise."""
+    try:
+        kept = json.loads(_cache_file(symbol).read_text(encoding="utf-8"))
+        saved = dt.date.fromisoformat(kept["saved"])
+        bars = [(d, float(c)) for d, c in kept["bars"]]
+    except (OSError, ValueError, KeyError, TypeError):
         return []
-    return bars or []
+    today = dt.date.today()
+    if not bars or (today - saved).days > PRICE_CACHE_DAYS:
+        return []
+    try:
+        price, source = sources.current_price(asset)
+    except Exception:
+        price, source = None, None
+    if price and bars[-1][0] < today.isoformat():
+        bars.append((today.isoformat(), float(price)))
+    print(f"[prices] {symbol}: Yahoo не ответил — ряд от {saved:%d.%m}"
+          + (f", сегодняшняя цена: {source}" if price else ""), file=sys.stderr)
+    return bars
 
 
 class Prices:

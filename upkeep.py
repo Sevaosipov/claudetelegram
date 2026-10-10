@@ -20,6 +20,10 @@ from pathlib import Path
 import db
 
 KEEP = 14                       # dated copies kept
+MIRROR_KEEP = 7                 # ... and compressed copies kept away from this disk
+MIRROR_ENV = "BACKUP_MIRROR_DIR"            # where the second copies go; default: a folder of iCloud Drive
+ICLOUD_DRIVE = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+MIRROR_FOLDER = "disclosure-bot-backups"
 BACKUP_DIR = "backups"          # under the database's folder
 ALERT_EVERY_DAYS = 3            # a standing problem is said again this often, not every day
 TAKEOVER_RECHECK_DAYS = 7       # a holding is looked up at the SEC this often
@@ -52,6 +56,41 @@ def backup(db_path: Path | str, today: dt.date | None = None, *, keep: int = KEE
             dst.close()
         tmp.replace(target)                         # a copy cut short never looks like a whole one
     for old in sorted(folder.glob(f"{db_path.stem}-*.db"))[:-keep]:
+        old.unlink()
+    try:
+        mirror(target)
+    except Exception as e:                          # the copy on this disk stands whatever happens to the second
+        print(f"[upkeep] the backup was not copied off this disk: {type(e).__name__}: {e}", file=sys.stderr)
+    return target
+
+
+def mirror_dir() -> Path | None:
+    """Where the second copies go: BACKUP_MIRROR_DIR when set (an external drive, another cloud folder),
+    else a folder of iCloud Drive when this Mac has one; None when there is nowhere."""
+    import os
+    named = os.environ.get(MIRROR_ENV)
+    if named:
+        return Path(named).expanduser()
+    return ICLOUD_DRIVE / MIRROR_FOLDER if ICLOUD_DRIVE.is_dir() else None
+
+
+def mirror(copy: Path, *, folder: Path | None = None, keep: int = MIRROR_KEEP) -> Path | None:
+    """A gzip of the day's copy in the second place (mirror_dir), unless it is there; the oldest beyond
+    `keep` removed. A copy on the same disk does not survive the disk: this one is off it. Returns the
+    file, or None when there is no second place."""
+    import gzip
+    import shutil
+    folder = folder or mirror_dir()
+    if folder is None:
+        return None
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{copy.name}.gz"
+    if not target.exists():
+        tmp = target.with_suffix(".tmp")
+        with open(copy, "rb") as src, gzip.open(tmp, "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
+        tmp.replace(target)
+    for old in sorted(folder.glob(f"{copy.stem.rsplit('-', 3)[0]}-*.db.gz"))[:-keep]:
         old.unlink()
     return target
 

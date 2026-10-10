@@ -205,3 +205,14 @@ def _no_headless_claude(monkeypatch):
     import analyst
     monkeypatch.setattr(analyst, "signal_note", lambda *a, **k: None)
 
+
+@pytest.fixture(autouse=True)
+def _no_real_caches_or_mirror(monkeypatch, tmp_path):
+    """No test writes into the project's data folder or the user's cloud drive: the price cache and the
+    backup's second place are pointed into the test's own folder."""
+    import prices
+    import upkeep
+    monkeypatch.setattr(prices, "PRICE_CACHE_DIR", tmp_path / "price_cache")
+    monkeypatch.setattr(upkeep, "ICLOUD_DRIVE", tmp_path / "no-cloud")
+    monkeypatch.delenv(upkeep.MIRROR_ENV, raising=False)
+

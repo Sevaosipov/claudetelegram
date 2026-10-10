@@ -195,3 +195,38 @@ def test_the_housekeeping_runs_last_and_the_backup_even_without_telegram(conn, m
     bot._upkeep_pass(conn, types.SimpleNamespace(no_telegram=True))
     assert done == ["backup"]
     assert tn.format_takeover_alert("RXO", "идёт выкуп", html=False).startswith("⚠️ RXO · takeover pending\n")
+
+
+# ------------------------------------------------------------------ the backup's second place
+def test_the_days_copy_is_gzipped_into_the_second_place_and_only_the_newest_kept(tmp_path, monkeypatch):
+    import gzip
+    path = _database(tmp_path)
+    away = tmp_path / "away"
+    monkeypatch.setenv(upkeep.MIRROR_ENV, str(away))
+    for d in range(4):
+        upkeep.backup(path, TODAY + dt.timedelta(days=d))
+    assert len(list(away.iterdir())) == 4
+    newest = away / "disclosures-2026-10-15.db.gz"
+    restored = tmp_path / "restored.db"
+    restored.write_bytes(gzip.open(newest).read())
+    assert sqlite3.connect(restored).execute("SELECT x FROM t").fetchone() == (42,)
+    copy = tmp_path / "backups" / "disclosures-2026-10-15.db"
+    assert upkeep.mirror(copy, folder=away, keep=2).name == "disclosures-2026-10-15.db.gz"
+    assert sorted(p.name for p in away.iterdir()) == ["disclosures-2026-10-14.db.gz", "disclosures-2026-10-15.db.gz"]
+
+
+def test_the_second_place_is_the_named_folder_else_icloud_drive_else_nowhere(tmp_path, monkeypatch):
+    assert upkeep.mirror_dir() is None                                      # no cloud drive on this "Mac"
+    cloud = tmp_path / "cloud"
+    cloud.mkdir()
+    monkeypatch.setattr(upkeep, "ICLOUD_DRIVE", cloud)
+    assert upkeep.mirror_dir() == cloud / "disclosure-bot-backups"
+    monkeypatch.setenv(upkeep.MIRROR_ENV, str(tmp_path / "usb"))
+    assert upkeep.mirror_dir() == tmp_path / "usb"
+
+
+def test_a_failing_second_copy_leaves_the_first(tmp_path, monkeypatch, capsys):
+    path = _database(tmp_path)
+    monkeypatch.setattr(upkeep, "mirror", lambda copy: 1 / 0)
+    assert upkeep.backup(path, TODAY).exists() and "not copied off this disk" in capsys.readouterr().err
+

@@ -27,3 +27,4 @@ data/cfd_cache/
 # Research caches and the daily copies of the database (regenerated)
 data/history_cache/
 data/backups/
+data/price_cache/
