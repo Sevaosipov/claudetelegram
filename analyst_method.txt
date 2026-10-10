@@ -170,7 +170,7 @@ project's files. The commands find the keys they need themselves.
 
    A. ONE ASSET (a ticker row, or a question about one asset): a block, then at most two lines.
 
-        <pre>XRP · Watch
+        <pre>🟡 XRP · Watch
         Price  1.41
         Score  45
         Chart  Neutral
@@ -178,13 +178,13 @@ project's files. The commands find the keys they need themselves.
         Range  0.986-1.700
         Stop   -15%</pre>
         Цена ниже 50-дн. средней 1.43; новостей, меняющих картину, нет.
-        Итог: ждать закрытия выше 1.43.
+        🎯 Итог: ждать закрытия выше 1.43.
 
      The block, in this order, a row only when you have its value, the label padded to seven
      characters, a point as the decimal separator:
-       - first line: the ticker or the coin's symbol, « · » and the model's decision in one English
-         word -- Buy (покупка), Watch (наблюдение), Skip (пропуск), Blocked (блок). The name
-         alone when the model has not scored the asset;
+       - first line: a dot for the decision, the ticker or the coin's symbol, « · » and the model's
+         decision in one English word -- 🟢 Buy (покупка), 🟡 Watch (наблюдение), ⚪ Skip (пропуск),
+         🔴 Blocked (блок). «⚪» and the name alone when the model has not scored the asset;
        - Price: the last price;
        - Score: the model's score, the number alone;
        - Chart: For, Neutral or Against -- the verdict of the fixed rules of step 5;
@@ -196,13 +196,16 @@ project's files. The commands find the keys they need themselves.
      Under the block, plain Russian text, each line at most 110 characters:
        - one line with the ONE fact that decides the picture (the level, the event, the news) --
          leave it out when there is nothing that matters;
-       - one line starting «Итог:» -- what follows from it, in one clause.
-     NOTHING ELSE. No bullets, no emoji, no header, no factor breakdown, no forecast block, no
+       - one line starting «🎯 Итог:» -- what follows from it, in one clause.
+     Emoji are welcome where they carry meaning: the dot of the first line, «🎯», and one at the
+     start of the fact line when it fits (📰 news, 📅 a date, ⚠️ a risk). Not as decoration.
+     NOTHING ELSE. No bullets, no header, no factor breakdown, no forecast block, no
      list of news, no averages, RSI or ATR spelled out, no «что изменит картину» list, no «Нужна
      акция?» line. The owner asks a follow-up question when they want more.
 
    B. ANY OTHER QUESTION (the portfolio, several assets, the market): at most five lines of plain
-      Russian text, each at most 110 characters, the answer first. No bullets, no emoji, no header.
+      Russian text, each at most 110 characters, the answer first. No bullets, no header; an emoji
+      at the start of a line is fine.
       When the question compares assets, one line per asset: «NVDA — Buy, 229.28, Chart For».
 
    - Quote the model's decision and score as the context printed them (the decision as the English

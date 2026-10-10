@@ -1340,7 +1340,7 @@ def test_both_templates_forbid_disclaimers_and_make_the_final_message_the_answer
 def test_the_telegram_template_treats_the_bots_data_as_input_not_text_to_repeat():
     flat = " ".join(_text("claude_analysis_prompt.txt").split())
     for rule in ("FIXED SHAPE", "INPUT, not text to repeat", "Do not copy any of it into the answer",
-                 "=== ДАННЫЕ БОТА ===", "АКТИВ:", "parse_mode HTML", "no bullets, no emoji"):
+                 "=== ДАННЫЕ БОТА ===", "АКТИВ:", "parse_mode HTML", "no bullets, no header"):
         assert rule in flat, rule
     assert "ВОПРОС ВЛАДЕЛЬЦА" in flat
 
@@ -1350,14 +1350,15 @@ def test_the_answer_has_a_fixed_short_shape():
     lines for an asset, at most five lines for anything else, and a list of what is not to be written."""
     method = _text("analyst_method.txt")
     flat = " ".join(method.split())
-    assert "<pre>XRP · Watch" in method and "Итог: ждать закрытия выше 1.43." in method
+    assert "<pre>🟡 XRP · Watch" in method and "🎯 Итог: ждать закрытия выше 1.43." in method
     for row in ("Price", "Score", "Chart", "Trend", "Range", "Stop", "Held"):
         assert f"- {row}:" in method, row
     for rule in ("at most two lines", "at most five lines", "at most 110 characters", "NOTHING ELSE",
-                 "No bullets, no emoji, no header, no factor breakdown, no forecast block",
-                 "Buy (покупка), Watch (наблюдение), Skip (пропуск), Blocked (блок)"):
+                 "No bullets, no header, no factor breakdown, no forecast block",
+                 "🟢 Buy (покупка), 🟡 Watch (наблюдение), ⚪ Skip (пропуск), 🔴 Blocked (блок)",
+                 "Emoji are welcome where they carry meaning"):
         assert rule in flat, rule
-    assert "🎯" not in method and "Итоговый вердикт" not in method
+    assert "Итоговый вердикт" not in method
 
 
 
