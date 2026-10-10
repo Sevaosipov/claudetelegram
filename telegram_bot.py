@@ -95,6 +95,7 @@ import positions
 import research
 import sources
 import signal_context
+import signal_record
 import t212_account
 import watch
 import telegram_notify
@@ -151,6 +152,7 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
              "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
              "разбор сам.\n"
+             "/signals — как сработали пятничные сигналы бота: через 1, 4 и 12 недель, в сравнении с рынком.\n"
 
              "/backtest TICKER — как этот тикер торговался после своих же "
              "прошлых инсайдерских покупок (почти всегда n слишком мал, чтобы "
@@ -244,6 +246,20 @@ def _handle_watch_command(conn, text: str) -> bool:
     except Exception as e:
         print(f"[telegram_bot] /watch failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось выполнить /watch ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_signals_command(conn, text: str) -> bool:
+    """/signals: how the bot's own buy signals did (signal_record.py). Returns False for any other
+    message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/signals":
+        return False
+    try:
+        telegram_notify.send_text(signal_record.report(conn))
+    except Exception as e:
+        print(f"[telegram_bot] /signals failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /signals ({type(e).__name__}). Попробуйте позже.")
     return True
 
 
@@ -702,7 +718,7 @@ def _handle_message(conn, text: str) -> None:
     text = (text or "").strip()
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
             or _handle_size_command(conn, text) or _handle_league_command(conn, text)
-            or _handle_watch_command(conn, text)):
+            or _handle_watch_command(conn, text) or _handle_signals_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
         _handle_backtest(conn, text)
@@ -744,6 +760,15 @@ def _sync_t212(conn) -> int:
     return T212_KEY_RETRY_SECONDS if kind in ("unauthorized", "forbidden") else T212_SYNC_SECONDS
 
 
+def _watch_intraday(conn) -> None:
+    """The watched levels against the price of the hour (watch.intraday), with each account sync. Whatever
+    it raises is logged and the polling goes on."""
+    try:
+        watch.intraday(conn)
+    except Exception as e:
+        print(f"[telegram_bot] watch failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _track_cfd_plans(conn) -> None:
     """One pass over the user's open CFD trades (cfd/plan.py: a message at each stage and at the close).
     Whatever it raises is logged and the polling goes on."""
@@ -775,6 +800,7 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
         if now >= next_sync or next_sync - now > wait:
             wait = _sync_t212(conn)
             next_sync = now + wait
+            _watch_intraday(conn)
         if now >= next_plans or next_plans - now > cfd_plan.TRACK_SECONDS:
             _track_cfd_plans(conn)
             next_plans = now + cfd_plan.TRACK_SECONDS

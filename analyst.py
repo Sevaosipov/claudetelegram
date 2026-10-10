@@ -432,6 +432,16 @@ def _row_failed(conn, queue_id: int, what: str, send) -> bool:
     return False
 
 
+def _login_alert(conn, text: str) -> None:
+    """A run that gave no answer: when it was Claude's sign-in that failed, say so (upkeep, once in a few
+    days) -- otherwise the analyst just stops answering and nobody knows why."""
+    try:
+        import upkeep
+        upkeep.claude_login_failed(conn, text)
+    except Exception as e:
+        print(f"[analyst] проверка входа не удалась: {type(e).__name__}", file=sys.stderr)
+
+
 def _watch_level(conn, queue_id: int, ticker: str, answer: str) -> None:
     """After a ticker row's analysis went out: keep the level it says to wait for (watch.record), so the
     daily run looks again when the price closes beyond it. A question is not an asset: nothing is kept."""
@@ -496,6 +506,7 @@ def process_queue(conn, *, run=None, send=None) -> int:
                 print(f"[analyst] строка {queue_id}: ответ отправлен")
                 _watch_level(conn, queue_id, ticker, answer)
                 continue
+            _login_alert(conn, f"{proc.stdout or ''} {proc.stderr or ''}")
             if proc.returncode:
                 print(f"[analyst] строка {queue_id}: claude вышел с кодом {proc.returncode}: "
                       f"{(proc.stderr or '').strip()[-500:]}", file=sys.stderr)

@@ -1387,6 +1387,62 @@ def format_league_event(t, event: str, *, html: bool = True) -> str:
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
+def format_signal_record(outcomes: list, *, html: bool = True) -> str:
+    """How the bot's own buy signals did (signal_record.Outcome), bare:
+
+        Signals 12 since 02.10
+                  1w     4w    12w
+        Avg    +1.2%  +3.4%      -
+        Win      58%    60%      -
+        vs mkt +0.4%  +1.1%      -
+        N         12      5      0
+        Best  ENA +22.0%
+        Worst RXO -3.1%
+
+    -- per horizon the mean return, the share of signals in profit, the mean return over the market's (the
+    S&P 500 for a stock, bitcoin for a coin) and how many signals have reached it; then the best and the
+    worst to the last close."""
+    from signal_record import HORIZONS
+    if not outcomes:
+        text = "Signals: none yet"
+        return f"<pre>{_esc(text)}</pre>" if html else text
+    first = min(o.sent for o in outcomes)
+    lines = [f"Signals {len(outcomes)} since {dt.date.fromisoformat(first):%d.%m}",
+             f"{'':<7}" + "".join(f"{label:>7}" for label, _ in HORIZONS)]
+
+    def row(name, cell):
+        return f"{name:<7}" + "".join(f"{cell(label):>7}" for label, _ in HORIZONS)
+
+    def values(label, field):
+        return [getattr(o, field)[label] for o in outcomes if label in getattr(o, field)]
+
+    def mean(label, field):
+        v = values(label, field)
+        return f"{sum(v) / len(v) * 100:+.1f}%" if v else "-"
+
+    def wins(label):
+        v = values(label, "returns")
+        return f"{100 * sum(1 for x in v if x > 0) / len(v):.0f}%" if v else "-"
+
+    lines += [row("Avg", lambda l: mean(l, "returns")), row("Win", wins),
+              row("vs mkt", lambda l: mean(l, "excess")),
+              row("N", lambda l: str(len(values(l, "returns"))))]
+    scored = [o for o in outcomes if o.now is not None]
+    if scored:
+        best, worst = max(scored, key=lambda o: o.now), min(scored, key=lambda o: o.now)
+        lines += [f"Best  {crypto.symbol_of(best.ticker)} {best.now * 100:+.1f}%",
+                  f"Worst {crypto.symbol_of(worst.ticker)} {worst.now * 100:+.1f}%"]
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_takeover_alert(name: str, why: str, *, html: bool = True) -> str:
+    """A holding found to be a takeover target (upkeep.takeover_alerts): a block and one line."""
+    block = f"⚠️ {name} · takeover pending"
+    line = f"{why[0].upper()}{why[1:]}: цена привязана к оферте, риск — срыв сделки."
+    return f"<pre>{_esc(block)}</pre>\n{_esc(line)}" if html else f"{block}\n{line}"
+
+
 # ---- a level an analysis said to wait for (watch.py)
 def _watch_name(ticker: str) -> str:
     return ticker.upper().removeprefix("$").removeprefix("CRYPTO:")
@@ -1401,6 +1457,13 @@ def format_watch_reached(level, close: float, *, html: bool = True) -> str:
     follows as its own message."""
     text = (f"🔔 {_watch_name(level.ticker)} closed {level.direction} {_watch_number(level.level)} "
             f"({_watch_number(close)})")
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_watch_intraday(level, price: float, *, html: bool = True) -> str:
+    """«🔔 XRP above 1.43 now (1.45)»: the price is beyond a watched level during the day. The verdict
+    comes with the daily close."""
+    text = f"🔔 {_watch_name(level.ticker)} {level.direction} {_watch_number(level.level)} now ({_watch_number(price)})"
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 

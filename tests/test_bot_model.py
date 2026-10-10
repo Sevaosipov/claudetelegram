@@ -804,6 +804,9 @@ def main_run(monkeypatch, tmp_path):
         return (1, 0)
     monkeypatch.setattr(bot.cfd_league, "run", league_pass)
     monkeypatch.setattr(bot.watch, "run", lambda conn: run.watched.append(1) or 0)
+    for step in ("backup", "takeover_alerts", "tradingview_login"):
+        monkeypatch.setattr(bot.upkeep, step, lambda *a, _s=step, **k: run.upkeep.append(_s))
+    monkeypatch.setattr(bot.signal_record, "monthly", lambda conn: run.upkeep.append("record"))
 
     def run(*argv):
         monkeypatch.setattr(sys, "argv", ["bot.py", "--once", *argv])
@@ -826,6 +829,7 @@ def main_run(monkeypatch, tmp_path):
     run.hour = 18                                                 # past the Friday hour: the week's messages may go
     run.prepared = []                                             # the days the picks were made ready to send
     run.watched = []                                              # the watch pass (stubbed): once a full run
+    run.upkeep = []                                               # the housekeeping steps (stubbed), in order
     run.db = lambda: db.connect(tmp_path / "data" / "d.db")
     return run
 

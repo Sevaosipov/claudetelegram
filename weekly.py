@@ -67,6 +67,8 @@ def buy_text(pick: dict) -> str:
     verdict = chart_check.word(pick.get("chart"))
     if verdict:
         rows.append(("Chart", verdict))
+    if pick.get("report"):                          # the next earnings report, when it is near
+        rows.append(("Earn", f"{dt.date.fromisoformat(pick['report']):%d.%m}"))
     block = [f"{crypto.symbol_of(pick['ticker'])} Buy · {KIND}"] + [f"{name:<6}{value}" for name, value in rows]
     if pick.get("t212") is False:
         block.append("Not on Trading 212")

@@ -25,6 +25,8 @@ import t212_account
 
 # ------------------------------------------------------------------ the size of a position
 KV_KEYS = {"risk": "size_risk_pct", "max": "size_max_pct", "budget": "size_budget_eur"}
+CARRY_KEY = "size_budget_carry"         # the budget of the weeks that had no signal, added to the next
+REPORT_DAYS = 30                        # an earnings report this near is named on the signal
 DEFAULTS = {"risk": 1.0, "max": 10.0, "budget": 0.0}    # percent of the account; euros a week (0: no budget)
 LIMITS = {"risk": (0.1, 5.0), "max": (1.0, 100.0), "budget": (0.0, 1e6)}
 SHARE_FLOOR = 50.0               # a pick's share of the budget counts its score's points above this
@@ -61,12 +63,53 @@ def amount_eur(conn, stop_pct: float | None, today: dt.date, share: float = 1.0)
     the maximum share -- None with no stop or no fresh account value in euros."""
     budget = settings(conn)["budget"]
     if budget:
-        return budget * share
+        return (budget + carry(conn)) * share
     account = t212_account.account_value(conn, today, max_age_days=t212_account.STALE_DAYS)
     if not stop_pct or account is None or not account[0] or (account[1] or "EUR") != "EUR":
         return None
     s = settings(conn)
     return min(account[0] * s["risk"] / 100.0 / stop_pct, account[0] * s["max"] / 100.0)
+
+
+def carry(conn) -> float:
+    """The budget left over from the weeks that had no signal."""
+    return float(db.get_cached_value(conn, CARRY_KEY, _FOREVER) or 0.0)
+
+
+def settle_week(conn, picks: int) -> float:
+    """Close the week's budget once its signals are picked: with signals the whole of it (the week's
+    and what was carried) was shared out, so nothing is carried; with none the week's budget is added to
+    what is carried. Returns the carry now. Nothing to do without a budget."""
+    budget = settings(conn)["budget"]
+    if not budget:
+        return 0.0
+    left = 0.0 if picks else carry(conn) + budget
+    db.save_cached_value(conn, CARRY_KEY, left)
+    return left
+
+
+def report_date(ticker: str, source: str | None, today: dt.date, *, calendar_fn=None) -> str | None:
+    """The ISO date of the company's next earnings report when it is within REPORT_DAYS days, from
+    Yahoo's calendar; None for a coin, a later or unknown date, or a failed lookup."""
+    if crypto.is_crypto(ticker):
+        return None
+    symbol = positions.yahoo_symbol(ticker, source)
+    if not symbol:
+        return None
+    try:
+        cal = (calendar_fn or _yahoo_calendar)(symbol) or {}
+        days = [d for d in (cal.get("Earnings Date") or []) if isinstance(d, dt.date)]
+    except Exception as e:
+        print(f"[signal_context] {ticker}: no earnings date: {type(e).__name__}", file=sys.stderr)
+        return None
+    near = sorted(d for d in days if today <= d <= today + dt.timedelta(days=REPORT_DAYS))
+    return near[0].isoformat() if near else None
+
+
+def _yahoo_calendar(symbol: str) -> dict:
+    import yfinance as yf
+    cal = yf.Ticker(symbol).calendar
+    return cal if isinstance(cal, dict) else {}
 
 
 def _pct(x: float) -> str:
@@ -78,8 +121,10 @@ def settings_text(conn, today: dt.date | None = None) -> str:
     import telegram_notify
     s = settings(conn)
     if s["budget"]:
-        return (f"Бюджет {telegram_notify.money(s['budget'])} в неделю: делится между сигналами пятницы "
+        text = (f"Бюджет {telegram_notify.money(s['budget'])} в неделю: делится между сигналами пятницы "
                 "по баллу — сильному сигналу больше (один сигнал — весь бюджет).")
+        left = carry(conn)
+        return text + (f" Перенесено с недель без сигналов: {telegram_notify.money(left)}." if left else "")
     text = f"Риск {_pct(s['risk'])}% счёта на покупку, не больше {_pct(s['max'])}% счёта в одной."
     today = today or dt.date.today()
     account = t212_account.account_value(conn, today, max_age_days=t212_account.STALE_DAYS)
@@ -200,6 +245,9 @@ def enrich(conn, pick: dict, today: dt.date, *, info_fn=None, share: float = 1.0
         price = None
     if price:
         pick["price"] = price
+    report = report_date(pick["ticker"], pick.get("source"), today)
+    if report:
+        pick["report"] = report
     amount = amount_eur(conn, pick.get("stop_pct"), today, share)
     if amount is not None:
         pick["amount_eur"] = round(amount, 2)

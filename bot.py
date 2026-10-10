@@ -61,7 +61,9 @@ import positions
 import sec_edgar
 import signal_context
 import signals_weekly
+import signal_record
 import takeover
+import upkeep
 import watch
 import strategy
 import t212_account
@@ -366,6 +368,7 @@ def _pick_week(conn, today: dt.date, report) -> bool:
         except Exception as e:
             print(f"[weekly] {pick['ticker']}: no context: {type(e).__name__}: {e}", file=sys.stderr)
     db.save_cached_json(conn, PICKS_KEY.format(week=_week_id(today)), picks)
+    signal_context.settle_week(conn, len(picks))    # a week with no signal carries its budget to the next
     _mark_week(conn, today, BUYS_KEY)
     return True
 
@@ -469,6 +472,21 @@ def _league_pass(conn, args) -> None:
     result = _run_source("LEAGUE", cfd_league.run, conn)
     if result is not None and any(result):
         print(f"[LEAGUE] opened {result[0]}, closed {result[1]}")
+
+
+def _upkeep_pass(conn, args) -> None:
+    """The day's housekeeping (upkeep.py), after everything else on a full run: a dated copy of the
+    database; the holdings checked for a pending buyout; the analyst's TradingView sign-in; and, at the
+    first run of a month, the record of the bot's own buy signals (signal_record.py). The copy is made
+    with --no-telegram too; the rest needs Telegram. Each step fails alone."""
+    if _filtered_run(args):
+        return
+    _run_source("BACKUP", upkeep.backup, DB_PATH)
+    if args.no_telegram:
+        return
+    _run_source("TAKEOVER", upkeep.takeover_alerts, conn)
+    _run_source("LOGIN", upkeep.tradingview_login, conn)
+    _run_source("RECORD", signal_record.monthly, conn)
 
 
 def _watch_pass(conn, args) -> None:
@@ -909,6 +927,7 @@ def main():
         _cfd_pass(conn, args)
         _league_pass(conn, args)
         _watch_pass(conn, args)
+        _upkeep_pass(conn, args)
 
         # The pass got all the way through: record it. run_healthcheck reads this,
         # and it's the only evidence that distinguishes "nothing to report" from

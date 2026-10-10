@@ -703,6 +703,7 @@ CREATE TABLE IF NOT EXISTS cfd_plans (
 # already exists, so a new column on an existing table needs an entry here to reach
 # databases created before it. (table, column, type declaration)
 _ADDED_COLUMNS = [
+    ("watch_levels", "intraday_at", "TEXT"),                    # when the intraday break was told (watch.intraday)
     ("league_trades", "checkpoint", "INTEGER DEFAULT 0"),      # the highest of TP1..TP4 reached (marks, not exits)
     # the second version of a league trade, which closes a quarter at each of TP1..TP4 (amendment A2)
     ("league_trades", "stage2", "INTEGER DEFAULT 0"),          # take-profits filled

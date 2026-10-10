@@ -143,6 +143,41 @@ def run(conn, *, today: dt.date | None = None, closes_fn=None, send=None, analys
     return fired
 
 
+INTRADAY_MARGIN = 0.01          # during the day a level counts as broken when the price is this far beyond it
+
+
+def intraday(conn, *, price_fn=None, send=None) -> int:
+    """Between the daily runs (the Telegram agent, every quarter of an hour): a level the price is now
+    clearly beyond -- by INTRADAY_MARGIN or more -- is told once, «🔔 XRP above 1.43 now (1.45)». It is a
+    note, not a verdict: the fresh analysis still comes with the daily close (run), since a price that
+    goes through a level during the day often comes back. Returns the number of notes sent."""
+    import positions
+    import telegram_notify
+    send = send or telegram_notify.send_text
+    told = {r[0] for r in conn.execute("SELECT id FROM watch_levels WHERE intraday_at IS NOT NULL")}
+    sent = 0
+    for level in active(conn):
+        if level.id in told:
+            continue
+        try:
+            key = level.ticker.removeprefix("$")
+            listed = positions.split_venue(key)
+            name, source = listed if listed else (key, positions.position_source(conn, key))
+            price = (price_fn or positions.last_close)(name, source)
+            if not price:
+                continue
+            beyond = (price >= level.level * (1 + INTRADAY_MARGIN) if level.direction == ABOVE
+                      else price <= level.level * (1 - INTRADAY_MARGIN))
+            if beyond and send(telegram_notify.format_watch_intraday(level, price)):
+                conn.execute("UPDATE watch_levels SET intraday_at = ? WHERE id = ?",
+                             (dt.datetime.now().isoformat(timespec="minutes"), level.id))
+                conn.commit()
+                sent += 1
+        except Exception as e:
+            print(f"[watch] {level.ticker}: intraday: {type(e).__name__}: {e}", file=sys.stderr)
+    return sent
+
+
 USAGE = ("/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий разбор\n"
          "/watch off XRP — перестать ждать по этому активу")
 
