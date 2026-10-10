@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import crypto
 import db
@@ -30,6 +30,7 @@ class Outcome:
     returns: dict           # horizon label -> the signal's return, for the horizons reached
     excess: dict            # horizon label -> that return less the benchmark's over the same days
     now: float | None       # the return to the last close
+    index_now: float | None = None      # the S&P 500's return over the same days (to its last close)
 
 
 def _at(closes: list[tuple[str, float]], day: str) -> float | None:
@@ -64,6 +65,27 @@ def outcome(ticker: str, sent: str, closes: list, bench: list) -> Outcome | None
     return Outcome(ticker, sent, returns, excess, closes[-1][1] / _at(closes, sent) - 1)
 
 
+def against_the_index(outcomes: list[Outcome], weekly_budget: float) -> tuple[float, float, float] | None:
+    """(euros put in, what they are worth in the signals, what they would be worth in the S&P 500): each
+    week's budget split evenly between that week's signals, against the same euros put into the index on
+    the same day. A week counts only when every one of its signals has both figures. None with no budget
+    or no such week."""
+    if not weekly_budget:
+        return None
+    weeks: dict[str, list[Outcome]] = {}
+    for o in outcomes:
+        weeks.setdefault(o.sent, []).append(o)
+    put = signals = index = 0.0
+    for group in weeks.values():
+        if any(o.now is None or o.index_now is None for o in group):
+            continue
+        each = weekly_budget / len(group)
+        put += weekly_budget
+        signals += sum(each * (1 + o.now) for o in group)
+        index += sum(each * (1 + o.index_now) for o in group)
+    return (put, signals, index) if put else None
+
+
 def outcomes(conn, *, closes_fn=None) -> list[Outcome]:
     """The outcome of every buy signal sent, oldest first; a signal whose prices fail is left out (logged)."""
     import positions
@@ -82,15 +104,23 @@ def outcomes(conn, *, closes_fn=None) -> list[Outcome]:
             bench = series(BENCHMARK_COIN if coin else BENCHMARK_STOCK, None)
             got = outcome(ticker, sent, series(ticker, None if coin else source), bench)
             if got is not None:
-                out.append(got)
+                spy = series(BENCHMARK_STOCK, None)
+                a = _at(spy, sent) if spy else None
+                out.append(replace(got, index_now=spy[-1][1] / a - 1 if a else None))
         except Exception as e:
             print(f"[signal_record] {ticker}: {type(e).__name__}: {e}", file=sys.stderr)
     return out
 
 
+def _budget(conn) -> float:
+    import signal_context
+    return signal_context.settings(conn)["budget"]
+
+
 def report(conn, *, closes_fn=None, html: bool = True) -> str:
     import telegram_notify
-    return telegram_notify.format_signal_record(outcomes(conn, closes_fn=closes_fn), html=html)
+    got = outcomes(conn, closes_fn=closes_fn)
+    return telegram_notify.format_signal_record(got, html=html, money=against_the_index(got, _budget(conn)))
 
 
 def monthly(conn, *, today: dt.date | None = None, send=None, closes_fn=None) -> bool:
@@ -104,7 +134,8 @@ def monthly(conn, *, today: dt.date | None = None, send=None, closes_fn=None) ->
     got = outcomes(conn, closes_fn=closes_fn)
     if not got:
         return False
-    if not (send or telegram_notify.send_text)(telegram_notify.format_signal_record(got)):
+    text = telegram_notify.format_signal_record(got, money=against_the_index(got, _budget(conn)))
+    if not (send or telegram_notify.send_text)(text):
         return False
     db.save_cached_value(conn, key, 1.0)
     return True

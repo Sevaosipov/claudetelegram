@@ -90,3 +90,24 @@ def test_signals_in_telegram(conn, monkeypatch):
     monkeypatch.setattr(tb.signal_record, "report", lambda c: "<pre>Signals: none yet</pre>")
     tb._handle_message(conn, "/signals")
     assert sent == ["<pre>Signals: none yet</pre>"]
+
+
+def test_the_weekly_budget_in_the_signals_against_the_same_euros_in_the_index():
+    outs = [sr.Outcome("AAA", "2026-09-04", {}, {}, 0.10, 0.02), sr.Outcome("BBB", "2026-09-04", {}, {}, -0.20, 0.02),
+            sr.Outcome("CCC", "2026-09-11", {}, {}, 0.05, -0.01),
+            sr.Outcome("DDD", "2026-09-18", {}, {}, 0.50, None)]              # no index figure: the week is left out
+    put, signals, index = sr.against_the_index(outs, 30.0)
+    assert put == 60.0
+    assert signals == pytest.approx(15 * 1.10 + 15 * 0.80 + 30 * 1.05)
+    assert index == pytest.approx(30 * 1.02 + 30 * 0.99)
+    assert sr.against_the_index(outs, 0.0) is None and sr.against_the_index([], 30.0) is None
+    text = tn.format_signal_record(outs, html=False, money=(put, signals, index))
+    assert text.splitlines()[-3:] == ["Put in   €60", "Signals  €60", "S&P 500  €60"]
+
+
+def test_every_outcome_carries_the_index_over_its_own_days(conn):
+    _signal(conn, "AAA", "2026-09-01")
+    table = {"AAA": series("2026-09-01", [100.0, 110.0]), "SPY": series("2026-09-01", [50.0, 51.0])}
+    [o] = sr.outcomes(conn, closes_fn=lambda t, s: table.get(t, []))
+    assert o.index_now == pytest.approx(0.02) and o.now == pytest.approx(0.10)
+

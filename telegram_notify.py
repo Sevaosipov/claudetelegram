@@ -1387,7 +1387,7 @@ def format_league_event(t, event: str, *, html: bool = True) -> str:
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
-def format_signal_record(outcomes: list, *, html: bool = True) -> str:
+def format_signal_record(outcomes: list, *, html: bool = True, money: tuple | None = None) -> str:
     """How the bot's own buy signals did (signal_record.Outcome), bare:
 
         Signals 12 since 02.10
@@ -1401,7 +1401,12 @@ def format_signal_record(outcomes: list, *, html: bool = True) -> str:
 
     -- per horizon the mean return, the share of signals in profit, the mean return over the market's (the
     S&P 500 for a stock, bitcoin for a coin) and how many signals have reached it; then the best and the
-    worst to the last close."""
+    worst to the last close. With `money` (signal_record.against_the_index) two more rows: what the
+    weekly budget put into the signals is worth now, and what it would be worth in the S&P 500 --
+
+        Put in   €120
+        Signals  €118
+        S&P 500  €123"""
     from signal_record import HORIZONS
     if not outcomes:
         text = "Signals: none yet"
@@ -1432,6 +1437,9 @@ def format_signal_record(outcomes: list, *, html: bool = True) -> str:
         best, worst = max(scored, key=lambda o: o.now), min(scored, key=lambda o: o.now)
         lines += [f"Best  {crypto.symbol_of(best.ticker)} {best.now * 100:+.1f}%",
                   f"Worst {crypto.symbol_of(worst.ticker)} {worst.now * 100:+.1f}%"]
+    if money:
+        put, signals, index = money
+        lines += [f"Put in   €{put:.0f}", f"Signals  €{signals:.0f}", f"S&P 500  €{index:.0f}"]
     text = "\n".join(lines)
     return f"<pre>{_esc(text)}</pre>" if html else text
 
