@@ -670,6 +670,33 @@ CREATE TABLE IF NOT EXISTS league_trades (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS league_trades_ref ON league_trades(idea, pair, ref);
 
+-- The day league (cfd/intraday.py, docs/cfd/DAY_LEAGUE.md): one row per intraday paper trade of an idea run
+-- forward for four weeks on 15-minute bars. The bot never places an order.
+CREATE TABLE IF NOT EXISTS day_trades (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea         TEXT NOT NULL,            -- OPEN-RANGE | BRK-15 | ASIA-SWEEP
+    pair         TEXT NOT NULL,
+    symbol       TEXT NOT NULL,            -- the Yahoo symbol
+    side         TEXT NOT NULL,            -- long | short
+    ref          TEXT NOT NULL,            -- the local day (and the side, for ASIA-SWEEP)
+    signal_ts    TEXT NOT NULL,            -- UTC start of the signal bar
+    atr          REAL NOT NULL,            -- ATR(14) of the signal bar
+    stop_price   REAL NOT NULL,
+    target_r     REAL,                     -- the target that many R from the entry ...
+    target_price REAL,                     -- ... or at this price
+    status       TEXT NOT NULL,            -- pending | open | closed
+    entry_ts     TEXT,
+    entry        REAL,
+    target       REAL,
+    last_ts      TEXT,                     -- UTC start of the last completed bar processed
+    exit_ts      TEXT,
+    exit_price   REAL,
+    result_r     REAL,                     -- after the round-trip cost
+    reason       TEXT,                     -- stop | target | time | void
+    created      TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS day_trades_ref ON day_trades(idea, pair, ref);
+
 -- The user's own CFD trades (cfd/plan.py, /cfd plan): one row per trade the user told the bot about, followed
 -- through its four take-profit stages to its close. The bot never places an order.
 CREATE TABLE IF NOT EXISTS cfd_plans (
