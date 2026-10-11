@@ -34,3 +34,18 @@ chosen on the first part, and the chosen one is run **once** on the second.
   the hold-out, and the share of all 168 that made money on the design period.
 - A pass goes live in the day league as the EURUSD rule with TP1-TP3 shown. A fail is reported as a fail; no second
   search on the same hold-out.
+
+## Round 2 (2026-10-11, written before it was run): fewer trades, further targets
+
+The user's proposal after the first result: take fewer trades and put the targets further away, so that less is paid
+in spread and a hit pays more. In terms that can be tested: trade only when the stop is wide enough that the cost is
+a small part of the risk, optionally only with the trend, and let the winners run further. Same data, same design
+period, same frame; the hold-out is still unseen.
+
+- **Candidates (120):** the 4 ideas x the cost at most 0.25R, 0.10R or 0.07R x F-TREND on or off x 5 exits: X3, X4,
+  X5 (everything at 3R, 4R, 5R), XT (no target: out at the stop or at 18:00), X234 (a third at each of 2R, 3R, 4R,
+  the stop to the entry after the first and to 2R after the second).
+- **Choice:** among those with at least 100 design trades and a profit in at least 3 of the 4 design years, the
+  highest mean result per trade. None qualifying: «no rule found».
+- **Verdict:** as in round 1 -- the chosen one, once, on the hold-out: its sum above zero and each of 2025 and 2026
+  above zero.
