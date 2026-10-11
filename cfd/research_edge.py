@@ -15,6 +15,8 @@ DESIGN = (dt.date(2012, 1, 1), dt.date(2019, 12, 31))
 HOLDOUT_FROM = dt.date(2020, 1, 1)
 MIN_TRADES, MIN_YEARS, MIN_T = 80, 6, 2.5
 THIRDS = [(2.0, 1 / 3), (3.0, 1 / 3), (4.0, 1 / 3)]
+COST_ABS: float | None = None        # the round trip in price units (gold: dollars an ounce); None: rd.COST_PCT
+NIGHT_PCT: float | None = None       # financing a night, % of the price; None: rd.NIGHT_PCT
 
 
 def trade(bars: list[Bar], j: int, side: str, r: float, *, levels=(), trail=False,
@@ -48,7 +50,9 @@ def trade(bars: list[Bar], j: int, side: str, r: float, *, levels=(), trail=Fals
     else:
         return None
     nights = (bars[j].ts.date() - bars[first].ts.date()).days
-    return got - (rd.COST_PCT + nights * rd.NIGHT_PCT) / 100.0 * entry / r, j
+    night = rd.NIGHT_PCT if NIGHT_PCT is None else NIGHT_PCT
+    trip = rd.COST_PCT / 100.0 * entry if COST_ABS is None else COST_ABS
+    return got - (trip + nights * night / 100.0 * entry) / r, j
 
 
 @dataclass(frozen=True)
@@ -78,9 +82,10 @@ def result(name: str, rows: list[tuple[int, float]]) -> Result:
                   sum(1 for v in values if v > 0) / n if n else 0.0, by_year)
 
 
-def run(period: str, only: list[str] | None = None, log=print) -> list[Result]:
-    bars = rd.hourly()
-    first, last = DESIGN if period == "design" else (HOLDOUT_FROM, bars[-1].ts.date())
+def run(period: str, only: list[str] | None = None, log=print, *, bars: list[Bar] | None = None,
+        design=DESIGN, holdout_from=HOLDOUT_FROM, sides: tuple = ("long", "short")) -> list[Result]:
+    bars = bars or rd.hourly()
+    first, last = design if period == "design" else (holdout_from, bars[-1].ts.date())
     log(f"{period}: {first} .. {last}")
     closes = [b.close for b in bars]
     mean20, sd20 = ind.sma(closes, 20), ind.stdev(closes, 20)
@@ -101,7 +106,7 @@ def run(period: str, only: list[str] | None = None, log=print) -> list[Result]:
             return
         rows, free = [], 0
         for i, side in signals:
-            if i < free:
+            if i < free or side not in sides:
                 continue
             kw = make(i, side)
             if not kw or not kw["r"] or kw["r"] <= 0:
