@@ -75,26 +75,56 @@ def test_the_retest_idea_is_the_leagues_on_these_bars():
 # ------------------------------------------------------------------ the pass
 def _pass(conn, n, special, sent, symbol="EURUSD=X"):
     return day.run(conn, now=after(n - 1), fetch=fetch_of({symbol: rows(n, special)}),
-                   send=lambda text: sent.append(text) or True)
+                   send=lambda text: sent.append(text) or True, calendar=lambda d: [])
 
 
 QUIET_34 = {**BREAK, 34: (1.0015, 1.0025, 1.0012, 1.0018)}
 
 
-def test_a_signal_is_filled_at_the_next_open_and_leaves_at_its_target(conn):
+def test_a_signal_is_filled_at_the_next_open_and_leaves_in_thirds_at_its_three_targets(conn):
     sent = []
     assert _pass(conn, 35, {**BREAK, 34: (1.0015, 1.0015, 1.0015, 1.0015)}, sent) == (1, 0)
     [t] = day.trades(conn)
-    assert (t.status, t.entry, t.stop_price, t.target) == ("open", 1.0015, 1.0, pytest.approx(1.0045))
-    assert sent == ["<pre>EURUSD Long · CFD day\nEntry 1.00150\nStop  1.00000\nTP    1.00450</pre>"]
+    assert (t.status, t.entry, t.stop) == ("open", 1.0015, 1.0)                # R is 0.0015
+    assert sent == ["<pre>EURUSD Long · CFD day\nEntry 1.00150\nStop  1.00000\n"
+                    "TP1   1.00300\nTP2   1.00450\nTP3   1.00600</pre>"]
     assert _pass(conn, 35, {**BREAK, 34: (1.0015, 1.0015, 1.0015, 1.0015)}, sent) == (0, 0)     # the same bar again
-    assert _pass(conn, 36, {**BREAK, 34: (1.0015, 1.005, 1.0012, 1.004)}, sent) == (0, 1)
+    one = {**BREAK, 34: (1.0015, 1.0032, 1.0012, 1.003), 35: (1.003, 1.003, 1.003, 1.003)}
+    assert _pass(conn, 36, one, sent) == (0, 0)
     [t] = day.trades(conn)
-    assert (t.reason, t.exit_price) == ("target", pytest.approx(1.0045))
-    assert t.result_r == pytest.approx(2.0 - 0.015 / 100 * 1.0015 / 0.0015)
-    assert sent[-1] == "<pre>EURUSD target 1.00450 +1.9R</pre>"
-    assert _pass(conn, 37, {**QUIET_34}, sent) == (0, 0)
+    assert (t.stage, t.stop, t.remaining) == (1, 1.0015, pytest.approx(2 / 3))
+    assert sent[-1] == "<pre>EURUSD TP1 1.00300 stop 1.00150</pre>"
+    board = tn.format_day_board(day.scoreboard(conn, dt.date(2026, 10, 12)), html=False)
+    assert board.endswith("\n\nEURUSD Long\n1.00150  SL 1.00150  TP2 1.00450")
+    rest = {**one, 35: (1.003, 1.0065, 1.0025, 1.006), 36: (1.006, 1.006, 1.006, 1.006)}    # TP2 and TP3 in one bar
+    assert _pass(conn, 37, rest, sent) == (0, 1)
+    [t] = day.trades(conn)
+    assert (t.reason, t.stage, t.exit_price) == ("target", 3, pytest.approx(1.006))
+    assert t.result_r == pytest.approx((1 + 2 + 3) / 3 - 0.015 / 100 * 1.0015 / 0.0015)
+    assert sent[-2:] == ["<pre>EURUSD TP2 1.00450 stop 1.00300</pre>", "<pre>EURUSD TP3 1.00600 +1.9R</pre>"]
+    assert _pass(conn, 38, {**rest, 36: (1.006, 1.0065, 1.0055, 1.006)}, sent) == (0, 0)
     assert len(day.trades(conn, "WHERE idea = 'OPEN-RANGE'")) == 1                        # one a day
+
+
+def test_after_the_first_target_the_rest_leaves_at_the_entry(conn):
+    sent = []
+    _pass(conn, 35, QUIET_34, sent)
+    one = {**BREAK, 34: (1.0015, 1.0032, 1.0012, 1.003), 35: (1.003, 1.003, 1.003, 1.003)}
+    _pass(conn, 36, one, sent)
+    back = {**one, 35: (1.003, 1.0031, 1.001, 1.0012)}
+    assert _pass(conn, 37, back, sent) == (0, 1)
+    [t] = day.trades(conn, "WHERE idea = 'OPEN-RANGE'")
+    assert (t.reason, t.exit_price) == ("stop", 1.0015)
+    assert t.result_r == pytest.approx(1 / 3 - 0.015 / 100 * 1.0015 / 0.0015)
+    assert sent[-1] == "<pre>EURUSD closed 1.00150 +0.2R</pre>"
+
+
+def test_no_entry_beside_a_high_importance_event(conn):
+    news = [ts(34) + dt.timedelta(minutes=20)]                                 # 20 minutes after the signal bar closes
+    assert day.run(conn, now=after(34), fetch=fetch_of({"EURUSD=X": rows(35, QUIET_34)}),
+                   send=lambda t: True, calendar=lambda d: news) == (0, 0)
+    assert day.trades(conn) == []
+    assert day.near_news(ts(34), [ts(36)]) and not day.near_news(ts(34), [ts(37)])
 
 
 def test_inside_one_bar_the_stop_comes_first_and_a_gap_leaves_at_the_open(conn):
@@ -122,9 +152,11 @@ def test_no_signal_after_five_and_nothing_on_a_weekend_or_from_old_bars(conn):
     late_break = {**{i: FLAT for i in range(32, 57)}, **late}
     assert _pass(conn, 59, late_break, []) == (0, 0) and day.trades(conn) == []
     saturday = after(34) + dt.timedelta(days=5)
-    assert day.run(conn, now=saturday, fetch=fetch_of({"EURUSD=X": rows(35, BREAK)}), send=lambda t: True) == (0, 0)
+    assert day.run(conn, now=saturday, fetch=fetch_of({"EURUSD=X": rows(35, BREAK)}), send=lambda t: True,
+                   calendar=lambda d: []) == (0, 0)
     stale = after(34) + dt.timedelta(hours=1)                                  # the feed is an hour behind
-    assert day.run(conn, now=stale, fetch=fetch_of({"EURUSD=X": rows(34, BREAK)}), send=lambda t: True) == (0, 0)
+    assert day.run(conn, now=stale, fetch=fetch_of({"EURUSD=X": rows(34, BREAK)}), send=lambda t: True,
+                   calendar=lambda d: []) == (0, 0)
     assert day.trades(conn) == []
 
 
@@ -141,11 +173,10 @@ def test_a_trade_that_costs_too_much_or_has_no_room_is_not_made(conn):
     assert events == [] and wrong.reason == "void"
     far, events = _made(conn, "GBPUSD", 0.98, 1.0)                             # 10 ATR away
     assert events == [] and far.reason == "void"
-    near, events = _made(conn, "USDJPY", 149.8, 150.0, target_price=150.1)     # the target nearer than the stop
-    assert events == [] and near.reason == "void"
-    fine, events = _made(conn, "XAUUSD", 3990.0, 4000.0, target_price=4015.0)
-    assert events == ["open"] and fine.target == 4015.0
-    assert tn.format_day_opens([fine], html=False) == "XAUUSD Long · CFD day\nEntry 4000.00\nStop  3990.00\nTP    4015.00"
+    fine, events = _made(conn, "XAUUSD", 3990.0, 4000.0)
+    assert events == ["open"] and fine.stop == 3990.0
+    assert tn.format_day_opens([fine], html=False) == (
+        "XAUUSD Long · CFD day\nEntry 4000.00\nStop  3990.00\nTP1   4010.00\nTP2   4020.00\nTP3   4030.00")
 
 
 # ------------------------------------------------------------------ the scoreboard and /day
@@ -153,7 +184,7 @@ def test_the_board_and_the_command(conn):
     assert day.handle_command(conn, "/day").startswith("Дневная лига начнётся")
     sent = []
     _pass(conn, 35, QUIET_34, sent)
-    _pass(conn, 36, {**BREAK, 34: (1.0015, 1.005, 1.0012, 1.004)}, sent)
+    _pass(conn, 36, {**BREAK, 34: (1.0015, 1.0065, 1.0012, 1.006)}, sent)
     board = day.scoreboard(conn, dt.date(2026, 10, 12))
     assert tn.format_day_board(board, html=False).splitlines() == [
         "Day league 12.10-08.11",

@@ -1501,17 +1501,28 @@ def _day_price(t, x: float) -> str:
 def format_day_opens(trades: list, *, html: bool = True) -> str:
     """The intraday paper trades opened in one pass, a bare block each: the market and the side, the entry,
     the stop and the target."""
+    from cfd import intraday
     blocks = ["\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD day",
-                         f"Entry {_day_price(t, t.entry)}", f"Stop  {_day_price(t, t.stop_price)}",
-                         f"TP    {_day_price(t, t.target)}"]) for t in trades]
+                         f"Entry {_day_price(t, t.entry)}", f"Stop  {_day_price(t, t.stop_price)}"]
+                        + [f"TP{k}   {_day_price(t, intraday.level(t, k))}" for k in range(1, intraday.LEVELS + 1)])
+              for t in trades]
     text = "\n\n".join(blocks)
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
-def format_day_event(t, *, html: bool = True) -> str:
-    """The end of an intraday paper trade in a line: «EURUSD target 1.12250 +1.8R»."""
-    how = {"stop": "stop", "target": "target"}.get(t.reason, "closed")
-    text = f"{t.pair} {how} {_day_price(t, t.exit_price)} {t.result_r:+.1f}R"
+def format_day_event(t, event: str = "close", *, html: bool = True) -> str:
+    """A later event of an intraday paper trade in a line: «EURUSD TP1 1.12150 stop 1.12050» (a third is
+    closed, the stop is moved), «EURUSD TP3 1.12350 +1.9R», «EURUSD stop 1.11950 -1.1R», «EURUSD closed
+    1.12100 +0.4R» (the rest left at the moved stop or at 18:00)."""
+    from cfd import intraday
+    if event.startswith("tp:"):
+        k = int(event[3:])
+        stop = t.entry if k == 1 else intraday.level(t, k - 1)
+        text = f"{t.pair} TP{k} {_day_price(t, intraday.level(t, k))} stop {_day_price(t, stop)}"
+    else:
+        how = f"TP{intraday.LEVELS}" if t.reason == "target" else "stop" if t.reason == "stop" and not t.stage \
+            else "closed"
+        text = f"{t.pair} {how} {_day_price(t, t.exit_price)} {t.result_r:+.1f}R"
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
@@ -1533,7 +1544,8 @@ def format_day_board(board, *, day=None, final: bool = False, html: bool = True)
                    f"{sum(s.wins for s in scores):>3} {sum(s.open for s in scores):>2}")
     for t in board.open:
         lines += ["", f"{t.pair} {'Long' if t.side == 'long' else 'Short'}",
-                  f"{_day_price(t, t.entry)}  SL {_day_price(t, t.stop_price)}  TP {_day_price(t, t.target)}"]
+                  f"{_day_price(t, t.entry)}  SL {_day_price(t, t.stop)}  "
+                  f"TP{t.stage + 1} {_day_price(t, intraday.level(t, t.stage + 1))}"]
     text = "\n".join(lines)
     return f"<pre>{_esc(text)}</pre>" if html else text
 

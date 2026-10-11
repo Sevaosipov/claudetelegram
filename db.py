@@ -693,7 +693,11 @@ CREATE TABLE IF NOT EXISTS day_trades (
     exit_price   REAL,
     result_r     REAL,                     -- after the round-trip cost
     reason       TEXT,                     -- stop | target | time | void
-    created      TEXT NOT NULL
+    created      TEXT NOT NULL,
+    stop         REAL,                     -- the stop in force (the entry after TP1, TP1 after TP2)
+    stage        INTEGER DEFAULT 0,        -- take-profits filled (0-3), a third of the position each
+    remaining    REAL DEFAULT 1.0,         -- the share still open
+    realized     REAL DEFAULT 0.0          -- the result of the parts closed so far, in R
 );
 CREATE UNIQUE INDEX IF NOT EXISTS day_trades_ref ON day_trades(idea, pair, ref);
 
@@ -731,6 +735,10 @@ CREATE TABLE IF NOT EXISTS cfd_plans (
 # databases created before it. (table, column, type declaration)
 _ADDED_COLUMNS = [
     ("watch_levels", "intraday_at", "TEXT"),                    # when the intraday break was told (watch.intraday)
+    ("day_trades", "stop", "REAL"),                            # the day league's three take-profits (A1)
+    ("day_trades", "stage", "INTEGER DEFAULT 0"),
+    ("day_trades", "remaining", "REAL DEFAULT 1.0"),
+    ("day_trades", "realized", "REAL DEFAULT 0.0"),
     ("league_trades", "stop_price", "REAL"),                   # a stop the signal names itself (BRK-RETEST)
     ("league_trades", "target_r", "REAL"),                     # ... and a target that many R away: a real exit
     ("league_trades", "target_price", "REAL"),                 # ... or a target at a price (RNG-DEV)

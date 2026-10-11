@@ -36,3 +36,18 @@ weeks. The bot places no order.
 Four weeks from the first weekday run. An idea **passes** when its closed trades number at least 20 and their sum,
 after costs, is above zero. A pass is a reason to go on watching it, not proof: twenty trades cannot show an edge.
 Gold is a future on Yahoo and its bars can come some minutes late; a trade is made on what the bars show.
+
+## Amendment A1 (2026-10-11, before the first run; no trade made)
+
+The user asked for EURUSD first, at least three take-profit levels, and TradingView as the source of news.
+
+- **Market:** EURUSD only.
+- **Exits:** every trade has TP1, TP2, TP3 at 1R, 2R and 3R. A third of the position closes at each; the stop moves
+  to the entry after TP1 and to TP1 after TP2 (it acts from the next bar); what is left closes at the stop or at
+  18:00. The 2R target and ASIA-SWEEP's own target are dropped.
+- **News:** no entry when the signal bar closes within 30 minutes of a US or euro-area event that TradingView's
+  economic calendar marks as of high importance. If the calendar cannot be read, the day has no gate.
+
+These rules were backtested first (PREREGISTRATION_DAY_EURUSD.md, REPORT_DAY_EURUSD.md): on 2021-2024 none of the
+168 variants qualified, this one included. The league runs it forward as the user asked; the report is the honest
+expectation.
