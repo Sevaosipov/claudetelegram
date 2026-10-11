@@ -24,11 +24,14 @@ LONDON = ZoneInfo("Europe/London")
 M15 = "15m"
 BAR = dt.timedelta(minutes=15)
 ENTRY_FROM, ENTRY_UNTIL, FLAT_AT = dt.time(9), dt.time(17), dt.time(18)
-MARKETS = ("EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD", "ETHUSD")
-OPEN_RANGE_MARKETS = MARKETS[:4]
+MARKETS = ("EURUSD",)                        # amendment A1: EURUSD first
+OPEN_RANGE_MARKETS = MARKETS
 IDEAS = {"OPEN-RANGE": "Open range", "BRK-15": "Retest", "ASIA-SWEEP": "Asia sweep"}
-MAX_R_ATR, MAX_COST_R, MIN_TARGET_R = 4.0, 0.25, 1.0
-TARGET_R = 2.0
+MAX_R_ATR, MAX_COST_R = 4.0, 0.25
+TARGET_R = 2.0                               # the rule before A1; a signal still names it
+LEVELS = 3                                   # TP1..TP3 = +1R..+3R, a third of the position at each (A1)
+NEWS_GAP = dt.timedelta(minutes=30)          # no entry this near a high-importance US or euro-area event (A1)
+CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
 ASIA_HOURS, SWEEP_WINDOW = 6, 3
 WEEKS, MIN_TRADES = 4, 20
 STALE = dt.timedelta(minutes=30)             # a last bar older than this: the market is shut or the feed late
@@ -62,6 +65,10 @@ class Trade:
     exit_price: float | None = None
     result_r: float | None = None
     reason: str | None = None    # stop | target | time | void
+    stop: float | None = None    # the stop in force: the entry after TP1, TP1 after TP2
+    stage: int = 0               # take-profits filled
+    remaining: float = 1.0
+    realized: float = 0.0
 
 
 _COLUMNS = [f.name for f in fields(Trade)]
@@ -126,10 +133,22 @@ def cost_r(t: Trade) -> float:
     return ins.by_symbol(t.symbol).costs.round_trip_pct / 100.0 * t.entry / abs(t.entry - t.stop_price)
 
 
-def _close(t: Trade, ts: dt.datetime, price: float, reason: str) -> None:
+def level(t: Trade, k: int) -> float:
+    """The price of TPk: k times the first stop's distance in the trade's favour of the entry."""
     sign = 1 if t.side == "long" else -1
+    return t.entry + sign * k * abs(t.entry - t.stop_price)
+
+
+def _r(t: Trade, price: float) -> float:
+    return (1 if t.side == "long" else -1) * (price - t.entry) / abs(t.entry - t.stop_price)
+
+
+def _close(t: Trade, ts: dt.datetime, price: float, reason: str) -> None:
+    """What is left of the position leaves at `price`."""
+    t.realized += t.remaining * _r(t, price)
+    t.remaining = 0.0
     t.status, t.exit_ts, t.exit_price, t.reason = "closed", ts.isoformat(), price, reason
-    t.result_r = sign * (price - t.entry) / abs(t.entry - t.stop_price) - cost_r(t)
+    t.result_r = t.realized - cost_r(t)
 
 
 def _void(t: Trade, ts: dt.datetime, price: float) -> None:
@@ -144,22 +163,17 @@ def _enter(t: Trade, ts: dt.datetime, open_: float, flat: dt.datetime) -> bool:
     if ts >= flat or distance <= 0 or distance > MAX_R_ATR * t.atr or cost_r(t) > MAX_COST_R:
         _void(t, ts, open_)
         return False
-    if t.target_price is not None:
-        if sign * (t.target_price - open_) < MIN_TARGET_R * distance:
-            _void(t, ts, open_)
-            return False
-        t.target = t.target_price
-    else:
-        t.target = open_ + sign * t.target_r * distance
-    t.status = "open"
+    t.status, t.stop, t.stage, t.remaining, t.realized = "open", t.stop_price, 0, 1.0, 0.0
     return True
 
 
 def advance(t: Trade, bars: Sequence[Bar], forming: Bar | None, now: dt.datetime) -> list[str]:
     """Move a trade through the bars it has not seen: fill a pending one at the open of the bar after its
-    signal bar, then, bar by bar, the 18:00 exit at the open, a gap through the stop or the target at the
-    open, the stop inside the bar, the target inside the bar. Of the forming bar only the open is known:
-    it can fill, and it can end the day. Returns the events in order: "open", "close"."""
+    signal bar, then, bar by bar, the 18:00 exit at the open, a gap through the stop at the open, the
+    stop inside the bar, then the take-profits the bar reached: a third of the position at each of
+    TP1..TP3, the stop to the entry after TP1 and to TP1 after TP2 (it acts from the next bar). Of the
+    forming bar only the open is known: it can fill, and it can end the day. Returns the events in order:
+    "open", "tp:K", "close"."""
     events = []
     sign = 1 if t.side == "long" else -1
     signal_ts = dt.datetime.fromisoformat(t.signal_ts)
@@ -174,15 +188,23 @@ def advance(t: Trade, bars: Sequence[Bar], forming: Bar | None, now: dt.datetime
         elif bar.ts > dt.datetime.fromisoformat(t.entry_ts):
             if bar.ts >= flat:
                 _close(t, bar.ts, bar.open, "time")
-            elif sign * (bar.open - t.stop_price) <= 0:
+            elif sign * (bar.open - t.stop) <= 0:
                 _close(t, bar.ts, bar.open, "stop")
-            elif sign * (bar.open - t.target) >= 0:
-                _close(t, bar.ts, bar.open, "target")
         if done and t.status == "open":
-            if sign * ((bar.low if sign > 0 else bar.high) - t.stop_price) <= 0:
-                _close(t, bar.ts, t.stop_price, "stop")
-            elif sign * ((bar.high if sign > 0 else bar.low) - t.target) >= 0:
-                _close(t, bar.ts, t.target, "target")
+            if sign * ((bar.low if sign > 0 else bar.high) - t.stop) <= 0:
+                _close(t, bar.ts, t.stop, "stop")
+            else:
+                best = bar.high if sign > 0 else bar.low
+                while t.stage < LEVELS and sign * (best - level(t, t.stage + 1)) >= 0:
+                    t.stage += 1
+                    price = sign * max(sign * level(t, t.stage), sign * bar.open)      # a gap beyond it: the open
+                    events.append(f"tp:{t.stage}")
+                    if t.stage == LEVELS:
+                        _close(t, bar.ts, price, "target")
+                    else:
+                        t.realized += _r(t, price) / LEVELS
+                        t.remaining -= 1.0 / LEVELS
+                        t.stop = t.entry if t.stage == 1 else level(t, t.stage - 1)
         if done:
             t.last_ts = bar.ts.isoformat()
     if t.status == "pending" and now >= flat:
@@ -199,20 +221,30 @@ def _of_day(bars: Sequence[Bar], start: dt.datetime, end: dt.datetime) -> list[B
     return [b for b in bars if start <= b.ts < end]
 
 
-def open_range(pair: str, bars: Sequence[Bar]) -> list[Signal]:
-    """Idea 1: the last bar is the first to close outside the range of London's first hour."""
+def london_break(bars: Sequence[Bar]) -> tuple[str, float, float] | None:
+    """(side, high, low) of the range of London's first hour when the last bar is the first to close
+    outside it; else None."""
     last = bars[-1]
     day = last.ts.astimezone(LONDON).date()
     start = _at(day, dt.time(8), LONDON)
     first = _of_day(bars, start, start + 4 * BAR)
     later = [b for b in bars if b.ts >= start + 4 * BAR]
     if len(first) < 4 or not later:
-        return []
+        return None
     high, low = max(b.high for b in first), min(b.low for b in first)
     if any(b.close > high or b.close < low for b in later[:-1]) or low <= last.close <= high:
+        return None
+    return ("long" if last.close > high else "short"), high, low
+
+
+def open_range(pair: str, bars: Sequence[Bar]) -> list[Signal]:
+    """Idea 1: the last bar is the first to close outside the range of London's first hour."""
+    found = london_break(bars)
+    if not found:
         return []
-    side = "long" if last.close > high else "short"
-    return [Signal("OPEN-RANGE", pair, side, local(last.ts).date().isoformat(), (high + low) / 2, target_r=TARGET_R)]
+    side, high, low = found
+    return [Signal("OPEN-RANGE", pair, side, local(bars[-1].ts).date().isoformat(), (high + low) / 2,
+                   target_r=TARGET_R)]
 
 
 def brk_15(pair: str, bars: Sequence[Bar]) -> list[Signal]:
@@ -279,8 +311,38 @@ def _send(text: str) -> bool:
     return bool(telegram_notify.send_text(text))
 
 
+_EVENTS: dict[dt.date, list[dt.datetime]] = {}
+
+
+def load_events(day_: dt.date) -> list[dt.datetime]:
+    """The times of the day's US and euro-area events that TradingView's economic calendar marks as of
+    high importance; asked once a day. A failure is logged and the day has no gate."""
+    if day_ not in _EVENTS:
+        import requests
+        try:
+            resp = requests.get(CALENDAR_URL, timeout=20,
+                                headers={"User-Agent": "Mozilla/5.0 (disclosure-bot)", "Origin": "https://www.tradingview.com"},
+                                params={"from": f"{day_.isoformat()}T00:00:00.000Z",
+                                        "to": f"{(day_ + dt.timedelta(days=1)).isoformat()}T00:00:00.000Z",
+                                        "countries": "US,EU"})
+            resp.raise_for_status()
+            body = resp.json()
+            rows = body.get("result", []) if isinstance(body, dict) else body
+            _EVENTS.clear()
+            _EVENTS[day_] = sorted(dt.datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
+                                   for e in rows if e.get("importance") == 1)
+        except Exception as e:
+            print(f"[day] calendar failed: {type(e).__name__}: {e}", file=sys.stderr)
+            return []
+    return _EVENTS[day_]
+
+
+def near_news(at: dt.datetime, events: Sequence[dt.datetime]) -> bool:
+    return any(abs(at - e) <= NEWS_GAP for e in events)
+
+
 def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None,
-        send: Send | None = None) -> tuple[int, int]:
+        send: Send | None = None, calendar=None) -> tuple[int, int]:
     """One pass, after a 15-minute bar: on a weekday from 09:00 (Europe/Riga) until the day's trades are all
     closed. Returns (trades opened, trades closed)."""
     import telegram_notify
@@ -298,6 +360,7 @@ def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None
     loud = not quiet(conn)
     opened = closed = 0
     new: list[Trade] = []
+    news = (calendar or load_events)(now.date()) if entering else []
     for pair in MARKETS:
         try:
             symbol = ins.by_name(pair).symbol
@@ -311,7 +374,7 @@ def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None
             last = bars[-1]
             fresh = now - (last.ts + BAR) < STALE
             if entering and fresh and ENTRY_FROM <= local(last.ts + BAR).time() <= ENTRY_UNTIL \
-                    and local(last.ts).date() == here.date():
+                    and local(last.ts).date() == here.date() and not near_news(last.ts + BAR, news):
                 atr = ind.atr(bars, 14)[-1]
                 for sig in signals(pair, bars) if atr else []:
                     t = make(conn, sig, last, atr)
@@ -324,8 +387,9 @@ def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None
                 closed += "close" in events
                 if "open" in events:
                     new.append(t)
-                if "close" in events and loud:
-                    send(telegram_notify.format_day_event(t))
+                for event in events if loud else []:
+                    if event not in ("open", f"tp:{LEVELS}"):       # the last take-profit is the close's line
+                        send(telegram_notify.format_day_event(t, event))
         except Exception as e:
             print(f"[day] {pair}: {type(e).__name__}: {e}", file=sys.stderr)
     if new and loud:
