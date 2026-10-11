@@ -49,3 +49,9 @@ period, same frame; the hold-out is still unseen.
   highest mean result per trade. None qualifying: «no rule found».
 - **Verdict:** as in round 1 -- the chosen one, once, on the hold-out: its sum above zero and each of 2025 and 2026
   above zero.
+
+### Round 2, the choice (2026-10-11, before the hold-out was opened)
+
+Design period: 18 of the 120 made money, 5 qualified. The highest mean among them: **ASIA-SWEEP C0.10 X5** -- the
+Asia sweep, taken only when the cost is at most 0.10R, everything out at 5R or at 18:00: 149 trades in four years,
++12.3R, +0.083R a trade, 2021 down and 2022-2024 up. It is the one candidate run on the hold-out.
