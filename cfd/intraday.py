@@ -199,20 +199,30 @@ def _of_day(bars: Sequence[Bar], start: dt.datetime, end: dt.datetime) -> list[B
     return [b for b in bars if start <= b.ts < end]
 
 
-def open_range(pair: str, bars: Sequence[Bar]) -> list[Signal]:
-    """Idea 1: the last bar is the first to close outside the range of London's first hour."""
+def london_break(bars: Sequence[Bar]) -> tuple[str, float, float] | None:
+    """(side, high, low) of the range of London's first hour when the last bar is the first to close
+    outside it; else None."""
     last = bars[-1]
     day = last.ts.astimezone(LONDON).date()
     start = _at(day, dt.time(8), LONDON)
     first = _of_day(bars, start, start + 4 * BAR)
     later = [b for b in bars if b.ts >= start + 4 * BAR]
     if len(first) < 4 or not later:
-        return []
+        return None
     high, low = max(b.high for b in first), min(b.low for b in first)
     if any(b.close > high or b.close < low for b in later[:-1]) or low <= last.close <= high:
+        return None
+    return ("long" if last.close > high else "short"), high, low
+
+
+def open_range(pair: str, bars: Sequence[Bar]) -> list[Signal]:
+    """Idea 1: the last bar is the first to close outside the range of London's first hour."""
+    found = london_break(bars)
+    if not found:
         return []
-    side = "long" if last.close > high else "short"
-    return [Signal("OPEN-RANGE", pair, side, local(last.ts).date().isoformat(), (high + low) / 2, target_r=TARGET_R)]
+    side, high, low = found
+    return [Signal("OPEN-RANGE", pair, side, local(bars[-1].ts).date().isoformat(), (high + low) / 2,
+                   target_r=TARGET_R)]
 
 
 def brk_15(pair: str, bars: Sequence[Bar]) -> list[Signal]:
