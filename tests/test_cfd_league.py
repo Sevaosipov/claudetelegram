@@ -376,10 +376,11 @@ def test_the_scoreboard_adds_up_each_idea_by_month_and_gives_the_verdict(conn):
         "Commodities  -1.00  -1.00   1  0 fail",
         "Month-end    +0.00  +0.00   0  0 fail",
         "Retest       +0.00  +0.00   0  0 fail",
+        "Deviation    +0.00  +0.00   0  0 fail",
         "Total        +3.00  +3.00   9  0"]
     month = tn.format_league_board(board, month=(2026, 10), html=False).splitlines()
     assert month[0] == "League 10.2026 12.10-11.01" and month[3] == "Rates        +1.50  +4.00   8  0"
-    assert month[7:] == ["Total        +0.50  +3.00   9  0", "Since start +3.00R"]
+    assert month[8:] == ["Total        +0.50  +3.00   9  0", "Since start +3.00R"]
     conn.execute("UPDATE league_trades SET result2_r = 0.1 WHERE idea = 'RATE-MOM'")
     conn.commit()
     assert league.scoreboard(conn, dt.date(2027, 1, 12)).scores[1].net2 == pytest.approx(0.8)
@@ -517,3 +518,50 @@ def test_a_target_trade_shows_its_levels_up_to_the_target(conn):
     t, _ = _retest_trade(conn)
     assert tn.format_league_opens([t], html=False) == (
         "EURUSD Long · CFD test\nEntry 1.03000\nStop  1.00000\nTP1   1.06000\nTP2   1.09000")
+
+
+# ------------------------------------------------------------------ idea 6: a false break of the range, back inside
+def test_a_pierce_of_the_range_and_a_close_back_inside_make_a_long_to_the_other_side():
+    bars = _range() + [_bar(40, 1.0, 1.0, 0.975, 0.985),         # under the range's low 0.99, closes under it
+                       _bar(41, 0.985, 0.999, 0.98, 0.995)]      # the first close back above 0.99
+    [s] = league.rng_dev({"EURUSD": bars}, atr_of=lambda b, n: [0.005] * len(b))
+    assert (s.idea, s.side, s.ref, s.exit_after) == ("RNG-DEV", "long", "2026-02-10-long", "bars:20")
+    assert (s.stop_price, s.target_price, s.target_r) == (0.975, 1.01, None)
+    assert league.rng_dev({"EURUSD": bars[:-1]}, atr_of=lambda b, n: [0.005] * len(b)) == []    # still outside
+    later = bars + [_bar(42, 0.995, 1.0, 0.992, 0.998)]
+    assert league.rng_dev({"EURUSD": later}, atr_of=lambda b, n: [0.005] * len(b)) == []        # said once
+
+
+def test_a_short_mirrors_it_and_a_narrow_range_or_a_late_return_is_nothing():
+    up = _range() + [_bar(40, 1.0, 1.02, 1.0, 1.005)]            # over the high 1.01 and back inside in one bar
+    [s] = league.rng_dev({"GBPUSD": up}, atr_of=lambda b, n: [0.005] * len(b))
+    assert (s.side, s.stop_price, s.target_price) == ("short", 1.02, 0.99)
+    assert league.rng_dev({"GBPUSD": up}, atr_of=_flat_atr) == []                # the range is 1 ATR wide
+    late = _range() + [_bar(40 + i, 0.985, 0.988, 0.975, 0.985) for i in range(3)] + [_bar(43, 0.985, 1.0, 0.98, 0.995)]
+    assert league.rng_dev({"EURUSD": late}, atr_of=lambda b, n: [0.005] * len(b)) == []
+    assert league.rng_dev({"EURUSD": _range(30)}, atr_of=_flat_atr) == []
+
+
+def _deviation_trade(conn, target, ref="d"):
+    feed = league.Feed(MON, fetch_of({"EURUSD=X": eurusd(today_open=1.03)}))
+    sig6 = league.Signal("RNG-DEV", "EURUSD", "long", ref, 0.0, "bars:20", stop_price=1.0, target_price=target)
+    t = league.make(conn, sig6, feed)
+    return t, league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), MON)
+
+
+def test_a_target_at_a_price_is_a_real_exit_and_is_shown_as_the_last_level(conn):
+    t, events = _deviation_trade(conn, 1.081)                    # entry 1.03, stop 1.00: the target is 1.7R away
+    assert events == ["open"] and t.target_r == pytest.approx(1.7) and league.target_of(t) == pytest.approx(1.081)
+    assert tn.format_league_opens([t], html=False) == (
+        "EURUSD Long · CFD test\nEntry 1.03000\nStop  1.00000\nTP1   1.06000\nTP2   1.08100")
+    day = dt.date(2026, 10, 14)
+    up = {MON: (1.03, 1.04, 1.02, 1.03), dt.date(2026, 10, 13): (1.03, 1.10, 1.02, 1.08)}
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=up, upto=day)}))
+    assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day)[-1] == "close"
+    assert (t.reason, t.exit_price) == ("target", pytest.approx(1.081))
+
+
+def test_a_target_nearer_than_the_stop_is_no_trade(conn):
+    t, events = _deviation_trade(conn, 1.05)                     # 0.02 to the target, 0.03 to the stop
+    assert events == [] and t.reason == "void" and league.closed_trades(conn) == []
+

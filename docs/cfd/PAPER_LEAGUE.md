@@ -100,3 +100,21 @@ patterns are drawn by eye, so its one mechanical rule is written down here and r
 - **Otherwise** out at the open of the 20th bar after the entry bar.
 - ref: the breakout bar's date and the side. The idea joins on the league's third day and ends with it.
 
+## Amendment A4 (2026-10-11): a sixth idea, RNG-DEV («Ложный пробой»)
+
+The user sent ten recorded trading sessions (STONKS, 2022-23). They hold no statistics; the one rule in them that can
+be written down is «one deviation forms the other»: a false break of one side of a range is followed by a move to the
+other side. It is run forward here like the others, on daily bars.
+
+- **Pairs:** the ten of BRK-RETEST.
+- **The range:** the highest high and the lowest low of the 20 bars before the piercing bar; it is at least 2 ATR(14)
+  wide.
+- **Long** (a short mirrors it): a bar's low goes under the range's low (the piercing bar); it or one of the next two
+  bars closes back above that low, every bar before it having closed under it -- the signal is made when that bar is
+  the last completed one.
+- **Entry** at the next open. **Stop:** the lowest low from the piercing bar on. No trade when the entry is on the
+  wrong side of the stop, or the stop is 0.25 ATR or nearer, or more than 3 ATR away.
+- **Target:** the other side of the range (its high) -- a real exit. No trade when it is nearer the entry than the
+  stop is. Inside one bar the stop comes before the target.
+- **Otherwise** out at the open of the 20th bar after the entry bar.
+- ref: the piercing bar's date and the side. The idea joins on the league's third day and ends with it.

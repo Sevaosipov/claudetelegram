@@ -28,7 +28,7 @@ START_KEY, QUIET_KEY, BOARD_KEY, FINAL_KEY = "league_start", "league_quiet", "le
 _FOREVER = 100 * 365 * 24 * 3600
 FINANCING_PCT = 0.010            # of the entry per night, every pair
 IDEAS = {"COT-WITH": "За спекулянтами", "RATE-MOM": "Ставки", "CMD-LEAD": "Сырьё", "MONTH-END": "Конец месяца",
-         "BRK-RETEST": "Пробой и ретест"}
+         "BRK-RETEST": "Пробой и ретест", "RNG-DEV": "Ложный пробой"}
 MIN_TRADES = 8                   # the verdict: at least this many closed trades
 
 
@@ -70,6 +70,8 @@ class Trade:
     # and the trade also leaves at the target, `target_r` times the stop's distance from the entry.
     stop_price: float | None = None
     target_r: float | None = None
+    # ... or a target at a price (amendment A4, RNG-DEV): `target_r` is then worked out at the entry.
+    target_price: float | None = None
 
 
 _COLUMNS = [f.name for f in fields(Trade)]
@@ -145,9 +147,11 @@ class Signal:
     exit_after: str
     stop_price: float | None = None
     target_r: float | None = None
+    target_price: float | None = None
 
 
 MIN_R_ATR, MAX_R_ATR = 0.25, 3.0        # a named stop nearer or further than this from the entry: no trade
+MIN_TARGET_R = 1.0                      # a target at a price nearer the entry than the stop is: no trade
 
 
 def make(conn, sig: Signal, feed: Feed) -> Trade | None:
@@ -163,9 +167,10 @@ def make(conn, sig: Signal, feed: Feed) -> Trade | None:
         return None
     cur = conn.execute(
         "INSERT INTO league_trades (idea, pair, symbol, side, ref, signal_date, atr, stop_atr, exit_after, "
-        "status, created, stop_price, target_r) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)",
+        "status, created, stop_price, target_r, target_price) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
         (sig.idea, sig.pair, inst.symbol, sig.side, sig.ref, bars[-1].ts.date().isoformat(), atr, sig.stop_atr,
-         sig.exit_after, dt.datetime.now().isoformat(timespec="seconds"), sig.stop_price, sig.target_r))
+         sig.exit_after, dt.datetime.now().isoformat(timespec="seconds"), sig.stop_price, sig.target_r,
+         sig.target_price))
     conn.commit()
     return trades(conn, "WHERE id = ?", (cur.lastrowid,))[0]
 
@@ -230,8 +235,13 @@ def advance(t: Trade, bars: Sequence[Bar], forming: float | None, today: dt.date
             t.status, t.entry_date, t.entry = "open", day.isoformat(), open_
             t.stop = t.stop_price if t.stop_price is not None else open_ - sign * t.stop_atr * t.atr
             distance = sign * (open_ - t.stop)
-            if t.stop_price is not None and not MIN_R_ATR * t.atr < distance <= MAX_R_ATR * t.atr:
-                # the open is on the wrong side of the named stop, or too near or too far: no trade
+            void = t.stop_price is not None and not MIN_R_ATR * t.atr < distance <= MAX_R_ATR * t.atr
+            if not void and t.target_price is not None:
+                t.target_r = sign * (t.target_price - open_) / distance
+                void = t.target_r < MIN_TARGET_R
+            if void:
+                # the open is on the wrong side of the named stop, or too near or too far, or the target at
+                # a price is nearer than the stop: no trade
                 t.status, t.exit_date, t.exit_price, t.reason = "closed", day.isoformat(), open_, "void"
                 t.result_r = t.result2_r = 0.0
                 t.last_bar = day.isoformat() if bar is not None else t.last_bar
@@ -384,6 +394,39 @@ def brk_retest(bars_by_pair: dict[str, list[Bar]], atr_of=None) -> list[Signal]:
     return out
 
 
+DEV_RANGE, DEV_WINDOW, DEV_MIN_WIDTH_ATR, DEV_MAX_BARS = 20, 3, 2.0, 20
+
+
+def rng_dev(bars_by_pair: dict[str, list[Bar]], atr_of=None) -> list[Signal]:
+    """Idea 6: «one deviation forms the other» -- the one mechanical rule of the recorded sessions the user
+    sent. Long (a short mirrors it): a bar's low goes under the lowest low of the DEV_RANGE bars before it;
+    the last completed bar, that one or one of the DEV_WINDOW - 1 after it, is the first to close back
+    above that low. The range is at least DEV_MIN_WIDTH_ATR wide. The stop is the lowest low from the
+    piercing bar on; the target the range's other side."""
+    out = []
+    for pair, bars in bars_by_pair.items():
+        n = len(bars)
+        if n < DEV_RANGE + DEV_WINDOW + 15:
+            continue
+        atr = (atr_of or ind.atr)(bars, 14)
+        c = n - 1
+        for side, sign in (("long", 1), ("short", -1)):
+            hi = (lambda b: b.high) if sign > 0 else (lambda b: -b.low)        # the side's «high», mirrored
+            lo = (lambda b: b.low) if sign > 0 else (lambda b: -b.high)
+            cl = (lambda b: sign * b.close)
+            for b in range(c, c - DEV_WINDOW, -1):                              # the piercing bar, newest first
+                before = bars[b - DEV_RANGE:b]
+                floor, roof = min(lo(x) for x in before), max(hi(x) for x in before)
+                if not atr[b] or lo(bars[b]) >= floor or roof - floor < DEV_MIN_WIDTH_ATR * atr[b]:
+                    continue
+                if cl(bars[c]) > floor and all(cl(x) <= floor for x in bars[b:c]):
+                    out.append(Signal("RNG-DEV", pair, side, f"{bars[b].ts.date().isoformat()}-{side}", 0.0,
+                                      f"bars:{DEV_MAX_BARS}", stop_price=sign * min(lo(x) for x in bars[b:c + 1]),
+                                      target_price=sign * roof))
+                    break
+    return out
+
+
 MONTH_PAIRS = {"EURUSD": True, "GBPUSD": True, "AUDUSD": True, "USDJPY": False}    # short USD = long the pair
 MONTH_MOVE = 0.01
 
@@ -531,7 +574,7 @@ def quiet(conn) -> bool:
 
 
 def signals_of_the_day(today: dt.date, feed: Feed, *, cot=None, yields=None) -> list[Signal]:
-    """The signals of the four ideas for `today`; an idea whose data fails is logged and makes none."""
+    """The signals of the ideas for `today`; an idea whose data fails is logged and makes none."""
     def closes(symbol):
         return [(b.ts.date(), b.close) for b in feed.bars(symbol)]
 
@@ -541,6 +584,7 @@ def signals_of_the_day(today: dt.date, feed: Feed, *, cot=None, yields=None) -> 
         ("CMD-LEAD", lambda: cmd_lead({s: closes(s) for s in CMD_PAIRS}, today)),
         ("MONTH-END", lambda: month_end(closes("^GSPC"), today)),
         ("BRK-RETEST", lambda: brk_retest({p: feed.bars(ins.by_name(p).symbol) for p in BRK_PAIRS})),
+        ("RNG-DEV", lambda: rng_dev({p: feed.bars(ins.by_name(p).symbol) for p in BRK_PAIRS})),
     )
     out = []
     for name, run_ in ideas:
