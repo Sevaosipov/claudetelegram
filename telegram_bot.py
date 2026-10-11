@@ -99,6 +99,7 @@ import signal_record
 import t212_account
 import watch
 import telegram_notify
+from cfd import intraday as cfd_intraday
 from cfd import league as cfd_league
 from cfd import live as cfd_live
 from cfd import plan as cfd_plan
@@ -150,6 +151,8 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "/size — на сколько евро покупать по сигналу: недельный бюджет (/size budget 30) или риск "
              "и предел доли счёта.\n"
              "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
+             "/day — дневная бумажная лига: внутридневные CFD-сделки 09:00–18:00, тест на 4 недели "
+             "(/day off — без сообщений о сделках).\n"
              "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
              "разбор сам.\n"
              "/signals — как сработали пятничные сигналы бота: через 1, 4 и 12 недель, в сравнении с рынком.\n"
@@ -218,6 +221,20 @@ def _position_listing(arg: str) -> tuple[str, str | None] | None:
     if ticker is None:
         return None
     return positions.split_venue(ticker) or (ticker, None)
+
+
+def _handle_day_command(conn, text: str) -> bool:
+    """/day: the day league's scoreboard and its mute switch (cfd/intraday.py). Returns False for any
+    other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/day":
+        return False
+    try:
+        telegram_notify.send_text(cfd_intraday.handle_command(conn, text))
+    except Exception as e:
+        print(f"[telegram_bot] /day failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /day ({type(e).__name__}). Попробуйте позже.")
+    return True
 
 
 def _handle_league_command(conn, text: str) -> bool:
@@ -718,6 +735,7 @@ def _handle_message(conn, text: str) -> None:
     text = (text or "").strip()
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
             or _handle_size_command(conn, text) or _handle_league_command(conn, text)
+            or _handle_day_command(conn, text)
             or _handle_watch_command(conn, text) or _handle_signals_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
@@ -778,6 +796,17 @@ def _track_cfd_plans(conn) -> None:
         print(f"[telegram_bot] CFD plans failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+DAY_BAR_SECONDS, DAY_BAR_LAG = 900, 20       # the day league runs once per 15-minute bar, this long after it
+
+
+def _day_league(conn) -> None:
+    """One pass of the day league (cfd/intraday.py). Whatever it raises is logged and the polling goes on."""
+    try:
+        cfd_intraday.run(conn)
+    except Exception as e:
+        print(f"[telegram_bot] day league failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=time.time,
            sleep=time.sleep, rounds: int | None = None) -> None:
     """The always-on loop: long-poll Telegram, and sync the Trading 212 account at start and then
@@ -792,6 +821,7 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
     away, not 15 minutes: the key will not heal by itself."""
     next_sync, wait = clock(), T212_SYNC_SECONDS
     next_plans = clock()
+    day_slot = None
     backoff = 5
     done = 0
     while rounds is None or done < rounds:
@@ -804,6 +834,9 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
         if now >= next_plans or next_plans - now > cfd_plan.TRACK_SECONDS:
             _track_cfd_plans(conn)
             next_plans = now + cfd_plan.TRACK_SECONDS
+        if now % DAY_BAR_SECONDS >= DAY_BAR_LAG and int(now // DAY_BAR_SECONDS) != day_slot:
+            day_slot = int(now // DAY_BAR_SECONDS)
+            _day_league(conn)
         try:
             _poll_once(conn, token, chat_id, session)
             backoff = 5

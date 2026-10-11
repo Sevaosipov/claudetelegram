@@ -262,8 +262,10 @@ def yahoo_fetch(symbol: str, interval: str) -> list[tuple]:
         span = {"start": DAILY_START}
     elif interval == HOURLY:
         span = {"period": HOURLY_PERIOD}
+    elif interval == "15m":          # the day league (cfd/intraday.py): the week is enough
+        span = {"period": "5d"}
     else:
-        raise ValueError(f"interval must be '1d' or '1h', not {interval!r}")
+        raise ValueError(f"interval must be '1d', '1h' or '15m', not {interval!r}")
     frame = yf.Ticker(symbol).history(interval=interval, auto_adjust=False, **span)
     return rows_from_frame(frame, interval)
 

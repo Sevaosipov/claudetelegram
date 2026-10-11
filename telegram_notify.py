@@ -1491,6 +1491,53 @@ def format_watch_list(levels: list, *, html: bool = True) -> str:
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
+# ------------------------------------------------------------------ the day league (cfd/intraday.py)
+def _day_price(t, x: float) -> str:
+    """A price as a terminal writes it: three decimals with the yen, two from 100 up, else five."""
+    from cfd import instruments as ins
+    return f"{x:.{3 if ins.by_symbol(t.symbol).quote == 'JPY' else 2 if x >= 100 else 5}f}"
+
+
+def format_day_opens(trades: list, *, html: bool = True) -> str:
+    """The intraday paper trades opened in one pass, a bare block each: the market and the side, the entry,
+    the stop and the target."""
+    blocks = ["\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD day",
+                         f"Entry {_day_price(t, t.entry)}", f"Stop  {_day_price(t, t.stop_price)}",
+                         f"TP    {_day_price(t, t.target)}"]) for t in trades]
+    text = "\n\n".join(blocks)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_day_event(t, *, html: bool = True) -> str:
+    """The end of an intraday paper trade in a line: «EURUSD target 1.12250 +1.8R»."""
+    how = {"stop": "stop", "target": "target"}.get(t.reason, "closed")
+    text = f"{t.pair} {how} {_day_price(t, t.exit_price)} {t.result_r:+.1f}R"
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_day_board(board, *, day=None, final: bool = False, html: bool = True) -> str:
+    """The day league's scoreboard (cfd.intraday.Board): a row per idea -- R the sum after costs, Cl the
+    trades closed, W those that won, Op the open ones; with `day` a first column of that day's sum; with
+    `final` each row ends «pass» or «fail» (DAY_LEAGUE.md)."""
+    from cfd import intraday
+    title = "Day league final" if final else f"Day league {day:%d.%m}" if day else "Day league"
+    lines = [f"{title} {board.start:%d.%m}-{board.end - dt.timedelta(days=1):%d.%m}",
+             f"{'':<10}" + (f"{'Day':>6} " if day else "") + f"{'R':>6} {'Cl':>3} {'W':>3} {'Op':>2}"]
+    rows = [(intraday.IDEAS[s.idea], s) for s in board.scores]
+    for name, s in rows:
+        row = f"{name:<10}" + (f"{s.today:>+6.2f} " if day else "") + f"{s.net:>+6.2f} {s.closed:>3} {s.wins:>3} {s.open:>2}"
+        lines.append(row + ((" pass" if s.qualifies else " fail") if final else ""))
+    scores = board.scores
+    lines.append(f"{'Total':<10}" + (f"{sum(s.today for s in scores):>+6.2f} " if day else "")
+                 + f"{sum(s.net for s in scores):>+6.2f} {sum(s.closed for s in scores):>3} "
+                   f"{sum(s.wins for s in scores):>3} {sum(s.open for s in scores):>2}")
+    for t in board.open:
+        lines += ["", f"{t.pair} {'Long' if t.side == 'long' else 'Short'}",
+                  f"{_day_price(t, t.entry)}  SL {_day_price(t, t.stop_price)}  TP {_day_price(t, t.target)}"]
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
 LEAGUE_NAMES = {"COT-WITH": "Speculators", "RATE-MOM": "Rates", "CMD-LEAD": "Commodities",
                 "MONTH-END": "Month-end", "BRK-RETEST": "Retest", "RNG-DEV": "Deviation"}
 
