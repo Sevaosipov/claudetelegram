@@ -375,10 +375,11 @@ def test_the_scoreboard_adds_up_each_idea_by_month_and_gives_the_verdict(conn):
         "Rates        +4.00  +4.00   8  0 pass",
         "Commodities  -1.00  -1.00   1  0 fail",
         "Month-end    +0.00  +0.00   0  0 fail",
+        "Retest       +0.00  +0.00   0  0 fail",
         "Total        +3.00  +3.00   9  0"]
     month = tn.format_league_board(board, month=(2026, 10), html=False).splitlines()
     assert month[0] == "League 10.2026 12.10-11.01" and month[3] == "Rates        +1.50  +4.00   8  0"
-    assert month[6:] == ["Total        +0.50  +3.00   9  0", "Since start +3.00R"]
+    assert month[7:] == ["Total        +0.50  +3.00   9  0", "Since start +3.00R"]
     conn.execute("UPDATE league_trades SET result2_r = 0.1 WHERE idea = 'RATE-MOM'")
     conn.commit()
     assert league.scoreboard(conn, dt.date(2027, 1, 12)).scores[1].net2 == pytest.approx(0.8)
@@ -434,3 +435,85 @@ def test_the_board_names_the_next_target_and_a_trade_not_yet_entered(conn):
     assert tn.format_league_board(league.scoreboard(conn, MON), html=False).endswith(
         "\n\nEURUSD Long\n1.00000  SL 0.96000  TP3 1.12000")
 
+
+
+# ------------------------------------------------------------------ idea 5: the break, the retest, the confirming bar
+def _bar(i, o, h, low, c):
+    return Bar(dt.datetime(2026, 1, 1, tzinfo=UTC) + dt.timedelta(days=i), o, h, low, c)
+
+
+def _range(n=40):
+    return [_bar(i, 1.0, 1.01, 0.99, 1.0) for i in range(n)]            # flat between 0.99 and 1.01
+
+
+def _flat_atr(bars, n):
+    return [0.02] * len(bars)
+
+
+def test_a_break_a_retest_and_a_confirming_bar_make_a_long_with_its_stop_and_target():
+    bars = _range() + [_bar(40, 1.0, 1.03, 1.0, 1.025),          # closes above the range's high 1.01: the breakout
+                       _bar(41, 1.025, 1.03, 1.008, 1.012),      # comes back to 1.01 -- closes above it, but down
+                       _bar(42, 1.012, 1.03, 1.011, 1.028)]      # the first up-close above the level: confirmed
+    [s] = league.brk_retest({"EURUSD": bars}, atr_of=_flat_atr)
+    assert (s.idea, s.side, s.ref, s.exit_after) == ("BRK-RETEST", "long", "2026-02-10-long", "bars:20")
+    assert s.stop_price == 1.0 and s.target_r == 2.0             # the lowest low from the breakout bar on
+    assert league.brk_retest({"EURUSD": bars[:-1]}, atr_of=_flat_atr) == []                # not confirmed yet
+    later = bars + [_bar(43, 1.028, 1.04, 1.02, 1.035)]
+    assert league.brk_retest({"EURUSD": later}, atr_of=_flat_atr) == []                    # said once
+
+
+def test_a_short_mirrors_it_and_no_retest_or_a_failed_break_is_nothing():
+    down = _range() + [_bar(40, 1.0, 1.0, 0.97, 0.975), _bar(41, 0.975, 0.992, 0.97, 0.988),
+                       _bar(42, 0.988, 0.989, 0.97, 0.972)]
+    [s] = league.brk_retest({"GBPUSD": down}, atr_of=_flat_atr)
+    assert (s.side, s.stop_price) == ("short", 1.0)
+    no_retest = _range() + [_bar(40, 1.0, 1.03, 1.0, 1.025), _bar(41, 1.025, 1.04, 1.02, 1.035),
+                            _bar(42, 1.035, 1.05, 1.041, 1.045)]             # each low stays above the last level
+    assert league.brk_retest({"EURUSD": no_retest}, atr_of=_flat_atr) == []
+    failed = _range() + [_bar(40, 1.0, 1.03, 1.0, 1.025), _bar(41, 1.025, 1.03, 0.98, 0.985),   # deep back under the level
+                         _bar(42, 0.985, 1.03, 0.985, 1.028)]
+    assert league.brk_retest({"EURUSD": failed}, atr_of=_flat_atr) == []
+    assert league.brk_retest({"EURUSD": _range(30)}, atr_of=_flat_atr) == []                # too little history
+
+
+def _retest_trade(conn, today_open=1.03, ref="r"):
+    feed = league.Feed(MON, fetch_of({"EURUSD=X": eurusd(today_open=today_open)}))
+    sig5 = league.Signal("BRK-RETEST", "EURUSD", "long", ref, 0.0, "bars:20", stop_price=1.0, target_r=2.0)
+    t = league.make(conn, sig5, feed)
+    return t, league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), MON)
+
+
+def test_a_trade_with_a_named_stop_leaves_at_its_target(conn):
+    t, events = _retest_trade(conn)                              # entry 1.03, stop 1.00: R 0.03, target 1.09
+    assert events == ["open"] and t.stop == 1.0 and league.target_of(t) == pytest.approx(1.09)
+    day = dt.date(2026, 10, 14)
+    up = {MON: (1.03, 1.04, 1.02, 1.03), dt.date(2026, 10, 13): (1.03, 1.10, 1.02, 1.08)}
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=up, upto=day)}))
+    assert league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day)[-1] == "close"
+    assert (t.reason, t.exit_price) == ("target", pytest.approx(1.09))
+    assert t.result_r == pytest.approx(2.0 - (0.015 + 1 * 0.010) / 100 * 1.03 / 0.03)
+    assert tn.format_league_event(t, "close", html=False).startswith("EURUSD target 1.09000 +1.9")
+
+
+def test_inside_one_bar_the_stop_comes_before_the_target(conn):
+    t, _ = _retest_trade(conn)
+    day = dt.date(2026, 10, 14)
+    both = {MON: (1.03, 1.04, 1.02, 1.03), dt.date(2026, 10, 13): (1.03, 1.10, 0.99, 1.0)}
+    feed = league.Feed(day, fetch_of({"EURUSD=X": eurusd(extra=both, upto=day)}))
+    league.advance(t, feed.bars(t.symbol), feed.forming(t.symbol), day)
+    assert t.reason == "stop"
+
+
+def test_an_open_on_the_wrong_side_of_the_stop_or_too_far_from_it_is_no_trade(conn):
+    t, events = _retest_trade(conn, today_open=0.99)             # under the named stop
+    assert events == [] and (t.status, t.reason, t.result_r) == ("closed", "void", 0.0)
+    league._save(conn, t)
+    assert league.closed_trades(conn) == [] and league.live_trades(conn) == []
+    far, events = _retest_trade(conn, today_open=1.20, ref="r2")           # 10 ATR away
+    assert events == [] and far.reason == "void"
+
+
+def test_a_target_trade_shows_its_levels_up_to_the_target(conn):
+    t, _ = _retest_trade(conn)
+    assert tn.format_league_opens([t], html=False) == (
+        "EURUSD Long · CFD test\nEntry 1.03000\nStop  1.00000\nTP1   1.06000\nTP2   1.09000")

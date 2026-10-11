@@ -704,6 +704,8 @@ CREATE TABLE IF NOT EXISTS cfd_plans (
 # databases created before it. (table, column, type declaration)
 _ADDED_COLUMNS = [
     ("watch_levels", "intraday_at", "TEXT"),                    # when the intraday break was told (watch.intraday)
+    ("league_trades", "stop_price", "REAL"),                   # a stop the signal names itself (BRK-RETEST)
+    ("league_trades", "target_r", "REAL"),                     # ... and a target that many R away: a real exit
     ("league_trades", "checkpoint", "INTEGER DEFAULT 0"),      # the highest of TP1..TP4 reached (marks, not exits)
     # the second version of a league trade, which closes a quarter at each of TP1..TP4 (amendment A2)
     ("league_trades", "stage2", "INTEGER DEFAULT 0"),          # take-profits filled

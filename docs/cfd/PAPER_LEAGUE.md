@@ -81,3 +81,22 @@ The user asked for a second version of every trade that does close at the take-p
 The scoreboard shows both. The verdict stays on the first version, as fixed before the first trade; the second is the
 comparison the user asked for.
 
+## Amendment A3 (2026-10-11): a fifth idea, BRK-RETEST («Пробой и ретест»)
+
+The user sent a price-action book (15-minute chart patterns: break of a level, retest, confirming candle, stop below
+the previous low, target at 2 or 3 times the stop) and asked to try its idea. The book has no statistics and its
+patterns are drawn by eye, so its one mechanical rule is written down here and run forward like the others. It is on
+**daily** bars, as the rest of the league (the book is on 15 minutes: the league has no intraday engine).
+
+- **Pairs:** EURUSD, GBPUSD, AUDUSD, NZDUSD, USDJPY, USDCAD, USDCHF, XAUUSD, BTCUSD, ETHUSD.
+- **Long** (a short mirrors it): a bar closes above the highest high of the 20 bars before it, the bar before it had
+  not (the breakout); within the next 5 bars a bar's low comes back to that level (the retest); the first bar from
+  the retest on that closes above the level and above its own open confirms -- the signal is made when that bar is
+  the last completed one. No close may be more than one ATR(14) back under the level on the way.
+- **Entry** at the next open. **Stop:** the lowest low from the breakout bar to the confirming bar. No trade when the
+  entry is on the wrong side of the stop, or the stop is 0.25 ATR or nearer, or more than 3 ATR away.
+- **Target:** 2 times the stop's distance -- a real exit, unlike the TP marks of the other ideas. Inside one bar the
+  stop comes before the target.
+- **Otherwise** out at the open of the 20th bar after the entry bar.
+- ref: the breakout bar's date and the side. The idea joins on the league's third day and ends with it.
+

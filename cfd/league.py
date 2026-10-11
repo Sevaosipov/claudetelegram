@@ -27,7 +27,8 @@ WEEKS = 13
 START_KEY, QUIET_KEY, BOARD_KEY, FINAL_KEY = "league_start", "league_quiet", "league_board_{month}", "league_final"
 _FOREVER = 100 * 365 * 24 * 3600
 FINANCING_PCT = 0.010            # of the entry per night, every pair
-IDEAS = {"COT-WITH": "За спекулянтами", "RATE-MOM": "Ставки", "CMD-LEAD": "Сырьё", "MONTH-END": "Конец месяца"}
+IDEAS = {"COT-WITH": "За спекулянтами", "RATE-MOM": "Ставки", "CMD-LEAD": "Сырьё", "MONTH-END": "Конец месяца",
+         "BRK-RETEST": "Пробой и ретест"}
 MIN_TRADES = 8                   # the verdict: at least this many closed trades
 
 
@@ -65,6 +66,10 @@ class Trade:
     realized2: float = 0.0
     exit2_date: str | None = None
     result2_r: float | None = None
+    # A signal may name its own stop and a target (amendment A3, BRK-RETEST): then the stop is that price
+    # and the trade also leaves at the target, `target_r` times the stop's distance from the entry.
+    stop_price: float | None = None
+    target_r: float | None = None
 
 
 _COLUMNS = [f.name for f in fields(Trade)]
@@ -80,13 +85,19 @@ def live_trades(conn) -> list[Trade]:
 
 
 def closed_trades(conn) -> list[Trade]:
-    return trades(conn, "WHERE status = 'closed'")
+    """The trades that ran and ended; one that was never entered («void») is not a result."""
+    return trades(conn, "WHERE status = 'closed' AND COALESCE(reason, '') != 'void'")
 
 
 CHECKPOINTS = 4                  # TP1..TP4 = +1R..+4R
 
 
-def level(t: Trade, k: int) -> float:
+def target_of(t: Trade) -> float | None:
+    """The price of the trade's target, when it has one and is entered."""
+    return level(t, t.target_r) if t.target_r and t.entry is not None and t.stop is not None else None
+
+
+def level(t: Trade, k: float) -> float:
     """The price of TPk: k times the stop's distance in the trade's favour of the entry."""
     sign = 1 if t.side == "long" else -1
     return t.entry + sign * k * abs(t.entry - t.stop)
@@ -132,6 +143,11 @@ class Signal:
     ref: str
     stop_atr: float
     exit_after: str
+    stop_price: float | None = None
+    target_r: float | None = None
+
+
+MIN_R_ATR, MAX_R_ATR = 0.25, 3.0        # a named stop nearer or further than this from the entry: no trade
 
 
 def make(conn, sig: Signal, feed: Feed) -> Trade | None:
@@ -147,9 +163,9 @@ def make(conn, sig: Signal, feed: Feed) -> Trade | None:
         return None
     cur = conn.execute(
         "INSERT INTO league_trades (idea, pair, symbol, side, ref, signal_date, atr, stop_atr, exit_after, "
-        "status, created) VALUES (?,?,?,?,?,?,?,?,?,'pending',?)",
+        "status, created, stop_price, target_r) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)",
         (sig.idea, sig.pair, inst.symbol, sig.side, sig.ref, bars[-1].ts.date().isoformat(), atr, sig.stop_atr,
-         sig.exit_after, dt.datetime.now().isoformat(timespec="seconds")))
+         sig.exit_after, dt.datetime.now().isoformat(timespec="seconds"), sig.stop_price, sig.target_r))
     conn.commit()
     return trades(conn, "WHERE id = ?", (cur.lastrowid,))[0]
 
@@ -212,17 +228,31 @@ def advance(t: Trade, bars: Sequence[Bar], forming: float | None, today: dt.date
         at_open = None                   # the price the trade left at this bar's open, if it did
         if t.status == "pending":
             t.status, t.entry_date, t.entry = "open", day.isoformat(), open_
-            t.stop = open_ - sign * t.stop_atr * t.atr
+            t.stop = t.stop_price if t.stop_price is not None else open_ - sign * t.stop_atr * t.atr
+            distance = sign * (open_ - t.stop)
+            if t.stop_price is not None and not MIN_R_ATR * t.atr < distance <= MAX_R_ATR * t.atr:
+                # the open is on the wrong side of the named stop, or too near or too far: no trade
+                t.status, t.exit_date, t.exit_price, t.reason = "closed", day.isoformat(), open_, "void"
+                t.result_r = t.result2_r = 0.0
+                t.last_bar = day.isoformat() if bar is not None else t.last_bar
+                return events
             events.append("open")
         else:
             after = sum(1 for d, _o, _b in days if dt.date.fromisoformat(t.entry_date) < d <= day)
+            target = target_of(t)
             if sign * (open_ - t.stop) <= 0:
                 _close(t, day, open_, "stop")
+            elif target is not None and sign * (open_ - target) >= 0:
+                _close(t, day, open_, "target")
             elif _due(t, day, after):
                 _close(t, day, open_, "time")
             at_open = open_ if t.status == "closed" else None
         if t.status == "open" and bar is not None and sign * ((bar.low if sign > 0 else bar.high) - t.stop) <= 0:
             _close(t, day, t.stop, "stop")
+        target = target_of(t)
+        if (t.status == "open" and bar is not None and target is not None
+                and sign * ((bar.high if sign > 0 else bar.low) - target) >= 0):
+            _close(t, day, target, "target")                # the stop came first inside the bar; then the target
         _staged(t, day, bar, at_open)
         if t.status == "closed" and t.result2_r is None:           # cannot outlive the trade: its stop is no lower
             _staged(t, day, None, t.exit_price)
@@ -306,6 +336,51 @@ def cmd_lead(closes: dict[str, list[tuple[dt.date, float]]], today: dt.date) -> 
             continue
         side = "long" if (moves[-1] > 0) == with_commodity else "short"
         out.append(Signal("CMD-LEAD", pair, side, rows[-1][0].isoformat(), 1.5, "bars:3"))
+    return out
+
+
+BRK_PAIRS = ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDJPY", "USDCAD", "USDCHF", "XAUUSD", "BTCUSD", "ETHUSD")
+BRK_RANGE, BRK_WINDOW, BRK_TARGET_R, BRK_MAX_BARS = 20, 5, 2.0, 20
+
+
+def brk_retest(bars_by_pair: dict[str, list[Bar]], atr_of=None) -> list[Signal]:
+    """Idea 5: a break of the 20-bar range, a retest of the broken level and a confirming bar -- the one
+    mechanical rule of the price-action book the user sent. Long (a short mirrors it): a bar closes above
+    the highest high of the BRK_RANGE bars before it, the bar before it had not; within BRK_WINDOW bars a
+    bar's low comes back to that level; and the last completed bar is the first after that retest to close
+    above the level, above its own open. No close may fall more than one ATR back under the level on the
+    way. The stop is the lowest low from the breakout bar on; the target BRK_TARGET_R times that distance."""
+    out = []
+    for pair, bars in bars_by_pair.items():
+        n = len(bars)
+        if n < BRK_RANGE + BRK_WINDOW + 15:
+            continue
+        atr = (atr_of or ind.atr)(bars, 14)
+        c = n - 1
+        for side, sign in (("long", 1), ("short", -1)):
+            hi = (lambda b: b.high) if sign > 0 else (lambda b: -b.low)        # the side's «high», mirrored
+            lo = (lambda b: b.low) if sign > 0 else (lambda b: -b.high)
+            cl = (lambda b: sign * b.close)
+            op = (lambda b: sign * b.open)
+            found = None
+            for b in range(c - 1, c - 1 - BRK_WINDOW, -1):                      # the breakout bar, newest first
+                level_ = max(hi(x) for x in bars[b - BRK_RANGE:b])
+                if not (cl(bars[b]) > level_ >= cl(bars[b - 1])) or not atr[b]:
+                    continue
+                after = bars[b + 1:c + 1]
+                if any(cl(x) < level_ - atr[b] for x in after):
+                    continue
+                retest = next((i for i, x in enumerate(after) if lo(x) <= level_), None)
+                if retest is None:
+                    continue
+                confirmed = [i for i, x in enumerate(after) if i >= retest and cl(x) > level_ and cl(x) > op(x)]
+                if confirmed and confirmed[0] == len(after) - 1:                # the last bar is the first to confirm
+                    found = (b, sign * min(lo(x) for x in bars[b:c + 1]))
+                    break
+            if found:
+                b, stop = found
+                out.append(Signal("BRK-RETEST", pair, side, f"{bars[b].ts.date().isoformat()}-{side}", 0.0,
+                                  f"bars:{BRK_MAX_BARS}", stop_price=stop, target_r=BRK_TARGET_R))
     return out
 
 
@@ -465,6 +540,7 @@ def signals_of_the_day(today: dt.date, feed: Feed, *, cot=None, yields=None) -> 
         ("RATE-MOM", lambda: rate_mom((yields or load_yields)(today), today)),
         ("CMD-LEAD", lambda: cmd_lead({s: closes(s) for s in CMD_PAIRS}, today)),
         ("MONTH-END", lambda: month_end(closes("^GSPC"), today)),
+        ("BRK-RETEST", lambda: brk_retest({p: feed.bars(ins.by_name(p).symbol) for p in BRK_PAIRS})),
     )
     out = []
     for name, run_ in ideas:

@@ -1364,7 +1364,8 @@ def format_league_opens(trades: list, *, html: bool = True) -> str:
     blocks = []
     for t in trades:
         rows = [("Entry", t.entry), ("Stop", t.stop)]
-        rows += [(f"TP{k}", league.level(t, k)) for k in range(1, league.CHECKPOINTS + 1)]
+        last = int(t.target_r) if t.target_r else league.CHECKPOINTS      # a trade with a target ends there
+        rows += [(f"TP{k}", league.level(t, k)) for k in range(1, last + 1)]
         blocks.append("\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD test"]
                                 + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]))
     text = "\n\n".join(blocks)
@@ -1381,7 +1382,8 @@ def format_league_event(t, event: str, *, html: bool = True) -> str:
         k = int(event[3:])
         text = f"{t.pair} TP{k} {_league_plain(t, league.level(t, k))}"
     else:
-        text = f"{t.pair} {'stop' if t.reason == 'stop' else 'closed'} {_league_plain(t, t.exit_price)} {t.result_r:+.2f}R"
+        how = {"stop": "stop", "target": "target"}.get(t.reason, "closed")
+        text = f"{t.pair} {how} {_league_plain(t, t.exit_price)} {t.result_r:+.2f}R"
         if t.result2_r is not None:
             text += f" (staged {t.result2_r:+.2f}R)"
     return f"<pre>{_esc(text)}</pre>" if html else text
@@ -1487,7 +1489,7 @@ def format_watch_list(levels: list, *, html: bool = True) -> str:
 
 
 LEAGUE_NAMES = {"COT-WITH": "Speculators", "RATE-MOM": "Rates", "CMD-LEAD": "Commodities",
-                "MONTH-END": "Month-end"}
+                "MONTH-END": "Month-end", "BRK-RETEST": "Retest"}
 
 
 def format_league_board(board, *, month: tuple[int, int] | None = None, final: bool = False,
