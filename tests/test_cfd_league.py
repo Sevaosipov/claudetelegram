@@ -579,3 +579,18 @@ def test_a_closed_market_has_no_open_on_a_weekend_but_crypto_has():
     assert league.Feed(sunday, fetch_of({"EURUSD=X": rows})).forming("EURUSD=X") is None
     assert league.Feed(sunday, fetch_of({"BTC-USD": rows})).forming("BTC-USD") is not None
 
+
+def test_the_speculators_positions_come_from_the_cftc_api():
+    asked = []
+
+    def get(url):
+        asked.append(url)
+        return (b'[{"cftc_contract_market_code":"099741","report_date_as_yyyy_mm_dd":"2026-10-06T00:00:00.000",'
+                b'"open_interest_all":"1000","noncomm_positions_long_all":"300","noncomm_positions_short_all":"100"},'
+                b'{"cftc_contract_market_code":"099741","report_date_as_yyyy_mm_dd":"2026-09-29T00:00:00.000",'
+                b'"open_interest_all":"0","noncomm_positions_long_all":"1","noncomm_positions_short_all":"1"},'
+                b'{"cftc_contract_market_code":"096742","report_date_as_yyyy_mm_dd":"bad"}]')
+
+    assert league.load_cot(MON, get=get) == {"099741": [(dt.date(2026, 10, 6), pytest.approx(0.2))]}
+    assert asked[0].startswith(league.COT_API + "?") and "2022-10-01" in asked[0] and "097741" in asked[0]
+

@@ -481,8 +481,34 @@ def _text(url: str) -> str:
     return (_get(url) or b"").decode("utf-8", errors="replace")
 
 
-def load_cot(today: dt.date) -> dict[str, list[tuple[dt.date, float]]]:
-    return r4.load_cot(today=today, get=_get)
+COT_API = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"      # legacy report, futures only
+COT_YEARS = 4                    # of history asked for: the index looks back r4.COT_WINDOW = 156 weeks
+
+
+def load_cot(today: dt.date, get=None) -> dict[str, list[tuple[dt.date, float]]]:
+    """contract code -> [(report date, net non-commercial ÷ open interest)], oldest first, as
+    r4.load_cot gives it -- from the CFTC's public reporting API: its site refuses a script the yearly
+    archives r4 reads."""
+    import json
+    from urllib.parse import urlencode
+    codes = ", ".join(f"'{c}'" for c in r4.COT_MARKETS)
+    since = today.replace(year=today.year - COT_YEARS, day=1).isoformat()
+    query = urlencode({
+        "$select": "cftc_contract_market_code, report_date_as_yyyy_mm_dd, open_interest_all, "
+                   "noncomm_positions_long_all, noncomm_positions_short_all",
+        "$where": f"cftc_contract_market_code in ({codes}) AND report_date_as_yyyy_mm_dd >= '{since}T00:00:00'",
+        "$order": "report_date_as_yyyy_mm_dd", "$limit": 50000})
+    out: dict[str, dict[dt.date, float]] = {}
+    for row in json.loads((get or _get)(f"{COT_API}?{query}") or b"[]"):
+        try:
+            day = dt.date.fromisoformat(row["report_date_as_yyyy_mm_dd"][:10])
+            oi = float(row["open_interest_all"])
+            net = float(row["noncomm_positions_long_all"]) - float(row["noncomm_positions_short_all"])
+        except (KeyError, ValueError):
+            continue
+        if oi > 0:
+            out.setdefault(row["cftc_contract_market_code"].strip(), {})[day] = net / oi
+    return {code: sorted(by_day.items()) for code, by_day in out.items()}
 
 
 def _us_yields(today: dt.date) -> dict[dt.date, float]:
