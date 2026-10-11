@@ -51,3 +51,8 @@ The user asked for EURUSD first, at least three take-profit levels, and TradingV
 These rules were backtested first (PREREGISTRATION_DAY_EURUSD.md, REPORT_DAY_EURUSD.md): on 2021-2024 none of the
 168 variants qualified, this one included. The league runs it forward as the user asked; the report is the honest
 expectation.
+
+## Amendment A2 (2026-10-11, before the first run)
+
+The user will trade at IC Markets on a Raw Spread account: EURUSD's round trip is counted as 0.8 pips (about 0.1 of
+spread and $7 a lot) instead of 0.015 % of the price.

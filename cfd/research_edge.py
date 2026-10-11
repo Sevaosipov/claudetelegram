@@ -223,3 +223,29 @@ def table(results: list[Result]) -> str:
         lines.append(f"{x.name:<34}{x.n:>5}{x.total:>+8.1f}{x.mean:>+7.3f}{x.t:>+6.2f}{x.win:>5.0%} {x.years_up:>2} "
                      + "".join(f"{x.by_year.get(y, 0.0):>+6.1f}" for y in years))
     return "\n".join(lines)
+
+
+# ================================================================ the session rule (PREREGISTRATION_SESSION.md)
+SESSION_COST_PIPS = {"EURUSD": 0.8, "GBPUSD": 1.1}
+
+
+def session(bars: list[Bar], cost_pips: float, first: dt.date, last: dt.date, *, enter: int = 11, leave: int = 18,
+            side: str = "short") -> Result:
+    """Every weekday of `first`..`last`: `side` at `enter`:00 Europe/Riga, out at `leave`:00, stop 1 ADR."""
+    adr = rd.daily_range(bars)
+    sign = 1 if side == "long" else -1
+    rows = []
+    for j in range(1, len(bars)):
+        at = day.local(bars[j].ts)
+        if at.weekday() >= 5 or at.hour != enter or at.minute or not first <= at.date() <= last:
+            continue
+        r = adr.get(bars[j - 1].ts.date())
+        if not r:
+            continue
+        got = trade(bars, j, side, r, until=day._at(at.date(), dt.time(leave)))
+        if got is None:
+            continue
+        entry = bars[j].open
+        gross = got[0] + rd.COST_PCT / 100.0 * entry / r          # trade() took the default cost: put it back
+        rows.append((at.year, gross - cost_pips * 1e-4 / r))
+    return result(f"{side} {enter}:00-{leave}:00", rows)
