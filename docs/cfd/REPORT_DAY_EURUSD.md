@@ -20,3 +20,17 @@ filter did not help measurably.
 
 What this means: on a 15-minute chart the cost is 10-15 % of the risk on every trade, so a rule needs a real edge of
 that size just to break even, and these patterns have none.
+
+## Round 2: fewer trades, further targets (2026-10-11)
+
+The user's proposal, as 120 candidates (cost caps 0.25R / 0.10R / 0.07R, trend on or off, exits at 3R, 4R, 5R, no
+target, or thirds at 2R-3R-4R). Design period: 18 made money, 5 qualified; chosen by the rule fixed beforehand:
+**ASIA-SWEEP, cost at most 0.10R, out at 5R or 18:00** -- 149 trades, +12.3R, +0.083R a trade (2021 down, 2022-24 up).
+
+**Hold-out, run once (2025-01-01 to 2026-10-02): fail.** 39 trades, -0.3R, 2025 +1.4R, 2026 -1.7R. For scale, its
+four siblings with other exits: +4.2R, +2.2R, +1.5R, -1.1R, each with 2026 down.
+
+Reading: being selective did what was hoped on costs -- the same idea went from -0.14R a trade to about zero -- but
+about zero is all it is, on two trades a month. That is neither a profit nor day trading. Further targets did not
+help: 3R, 4R, 5R and no target gave the same result within noise. The hold-out is now used; a third search would
+need new data to be judged on.
