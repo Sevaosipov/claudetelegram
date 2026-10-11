@@ -126,6 +126,8 @@ class Feed:
             cleaned = data.clean_rows(rows, data.DAILY).bars
             done = [b for b in cleaned if b.ts.date() < self.today]
             forming = next((b.open for b in cleaned if b.ts.date() == self.today), None)
+            if self.today.weekday() >= 5 and not symbol.endswith("-USD"):
+                forming = None           # Yahoo's weekend stub of a closed market is not an open (only crypto trades)
             self._loaded[symbol] = (done, forming)
         return self._loaded[symbol]
 
@@ -395,13 +397,15 @@ def brk_retest(bars_by_pair: dict[str, list[Bar]], atr_of=None) -> list[Signal]:
 
 
 DEV_RANGE, DEV_WINDOW, DEV_MIN_WIDTH_ATR, DEV_MAX_BARS = 20, 3, 2.0, 20
+DEV_MAX_DRIFT = 0.5              # of the range's width, first close to last: more is a trend, not a range (A5)
 
 
 def rng_dev(bars_by_pair: dict[str, list[Bar]], atr_of=None) -> list[Signal]:
     """Idea 6: «one deviation forms the other» -- the one mechanical rule of the recorded sessions the user
     sent. Long (a short mirrors it): a bar's low goes under the lowest low of the DEV_RANGE bars before it;
     the last completed bar, that one or one of the DEV_WINDOW - 1 after it, is the first to close back
-    above that low. The range is at least DEV_MIN_WIDTH_ATR wide. The stop is the lowest low from the
+    above that low. The range is at least DEV_MIN_WIDTH_ATR wide and went sideways: its last close is within
+    DEV_MAX_DRIFT of its width of its first. The stop is the lowest low from the
     piercing bar on; the target the range's other side."""
     out = []
     for pair, bars in bars_by_pair.items():
@@ -418,6 +422,8 @@ def rng_dev(bars_by_pair: dict[str, list[Bar]], atr_of=None) -> list[Signal]:
                 before = bars[b - DEV_RANGE:b]
                 floor, roof = min(lo(x) for x in before), max(hi(x) for x in before)
                 if not atr[b] or lo(bars[b]) >= floor or roof - floor < DEV_MIN_WIDTH_ATR * atr[b]:
+                    continue
+                if abs(before[-1].close - before[0].close) > DEV_MAX_DRIFT * (roof - floor):
                     continue
                 if cl(bars[c]) > floor and all(cl(x) <= floor for x in bars[b:c]):
                     out.append(Signal("RNG-DEV", pair, side, f"{bars[b].ts.date().isoformat()}-{side}", 0.0,
