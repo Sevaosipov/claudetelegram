@@ -100,7 +100,7 @@ def test_a_signal_is_filled_at_the_next_open_and_leaves_in_thirds_at_its_three_t
     assert _pass(conn, 37, rest, sent) == (0, 1)
     [t] = day.trades(conn)
     assert (t.reason, t.stage, t.exit_price) == ("target", 3, pytest.approx(1.006))
-    assert t.result_r == pytest.approx((1 + 2 + 3) / 3 - 0.015 / 100 * 1.0015 / 0.0015)
+    assert t.result_r == pytest.approx((1 + 2 + 3) / 3 - 0.8e-4 / 0.0015)
     assert sent[-2:] == ["<pre>EURUSD TP2 1.00450 stop 1.00300</pre>", "<pre>EURUSD TP3 1.00600 +1.9R</pre>"]
     assert _pass(conn, 38, {**rest, 36: (1.006, 1.0065, 1.0055, 1.006)}, sent) == (0, 0)
     assert len(day.trades(conn, "WHERE idea = 'OPEN-RANGE'")) == 1                        # one a day
@@ -115,8 +115,8 @@ def test_after_the_first_target_the_rest_leaves_at_the_entry(conn):
     assert _pass(conn, 37, back, sent) == (0, 1)
     [t] = day.trades(conn, "WHERE idea = 'OPEN-RANGE'")
     assert (t.reason, t.exit_price) == ("stop", 1.0015)
-    assert t.result_r == pytest.approx(1 / 3 - 0.015 / 100 * 1.0015 / 0.0015)
-    assert sent[-1] == "<pre>EURUSD closed 1.00150 +0.2R</pre>"
+    assert t.result_r == pytest.approx(1 / 3 - 0.8e-4 / 0.0015)
+    assert sent[-1] == "<pre>EURUSD closed 1.00150 +0.3R</pre>"
 
 
 def test_no_entry_beside_a_high_importance_event(conn):
@@ -142,7 +142,7 @@ def test_every_trade_is_out_at_six_in_the_evening(conn):
     assert _pass(conn, 60, calm, sent) == (0, 0)                               # 17:45: still open
     assert _pass(conn, 61, calm, sent) == (0, 1)                               # bar 60 opens at 18:00 in Riga
     [t] = day.trades(conn)
-    assert (t.reason, t.exit_price) == ("time", 1.002) and sent[-2] == "<pre>EURUSD closed 1.00200 +0.2R</pre>"
+    assert (t.reason, t.exit_price) == ("time", 1.002) and sent[-2] == "<pre>EURUSD closed 1.00200 +0.3R</pre>"
     assert sent[-1].startswith("<pre>Day league 12.10 12.10-08.11\n")           # the day's board, once
     assert _pass(conn, 62, calm, sent) == (0, 0) and len(sent) == 3
 
@@ -189,10 +189,10 @@ def test_the_board_and_the_command(conn):
     assert tn.format_day_board(board, html=False).splitlines() == [
         "Day league 12.10-08.11",
         "               R  Cl   W Op",
-        "Open range +1.90   1   1  0",
+        "Open range +1.95   1   1  0",
         "Retest     +0.00   0   0  0",
         "Asia sweep +0.00   0   0  0",
-        "Total      +1.90   1   1  0"]
+        "Total      +1.95   1   1  0"]
     final = tn.format_day_board(board, final=True, html=False).splitlines()
     assert final[0] == "Day league final 12.10-08.11" and final[2].endswith(" fail")        # one trade is not twenty
     assert "не присылаю" in day.handle_command(conn, "/day off") and day.quiet(conn)

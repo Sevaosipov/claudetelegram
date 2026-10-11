@@ -128,9 +128,15 @@ def _at(day: dt.date, clock: dt.time, tz=TZ) -> dt.datetime:
     return dt.datetime.combine(day, clock, tzinfo=tz).astimezone(UTC)
 
 
+COST_PIPS = {"EURUSD": 0.8}      # A2: the user's account, IC Markets Raw Spread (0.1 spread and $7 a lot)
+
+
 def cost_r(t: Trade) -> float:
-    """The round trip in R."""
-    return ins.by_symbol(t.symbol).costs.round_trip_pct / 100.0 * t.entry / abs(t.entry - t.stop_price)
+    """The round trip in R: the user's broker's where it is known, else the table of cfd/instruments.py."""
+    distance = abs(t.entry - t.stop_price)
+    if t.pair in COST_PIPS:
+        return COST_PIPS[t.pair] * 1e-4 / distance
+    return ins.by_symbol(t.symbol).costs.round_trip_pct / 100.0 * t.entry / distance
 
 
 def level(t: Trade, k: int) -> float:
