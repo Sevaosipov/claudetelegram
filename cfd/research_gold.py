@@ -44,3 +44,25 @@ def load_gold(first_year: int = FIRST_YEAR, today: dt.date | None = None, cache_
                 if volume > 0 and low > 0:
                     bars.append(Bar(start + dt.timedelta(seconds=secs), o / 1e3, high / 1e3, low / 1e3, c / 1e3))
     return bars
+
+
+# ================================================================ the search (PREREGISTRATION_GOLD.md)
+DESIGN = (dt.date(2010, 1, 1), dt.date(2018, 12, 31))
+HOLDOUT_FROM = dt.date(2019, 1, 1)
+COST_USD, NIGHT_PCT = 0.30, 0.020
+MIN_TRADES, MIN_YEARS, MIN_T = 80, 7, 2.5
+
+
+def run(period: str, only: list[str] | None = None, log=print, sides=("long", "short"), bars=None):
+    """The 53 candidates of cfd/research_edge.py on gold, at gold's costs."""
+    from cfd import research_edge as edge
+    edge.COST_ABS, edge.NIGHT_PCT = COST_USD, NIGHT_PCT
+    try:
+        return edge.run(period, only, log, bars=bars or load_gold(), design=DESIGN, holdout_from=HOLDOUT_FROM,
+                        sides=sides)
+    finally:
+        edge.COST_ABS = edge.NIGHT_PCT = None
+
+
+def qualifies(x) -> bool:
+    return x.n >= MIN_TRADES and x.years_up >= MIN_YEARS and x.t >= MIN_T
