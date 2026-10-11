@@ -1364,8 +1364,11 @@ def format_league_opens(trades: list, *, html: bool = True) -> str:
     blocks = []
     for t in trades:
         rows = [("Entry", t.entry), ("Stop", t.stop)]
-        last = int(t.target_r) if t.target_r else league.CHECKPOINTS      # a trade with a target ends there
-        rows += [(f"TP{k}", league.level(t, k)) for k in range(1, last + 1)]
+        if t.target_r:                   # a trade with a target ends there: the marks before it, then it
+            marks = [k for k in range(1, league.CHECKPOINTS + 1) if k < t.target_r - 1e-9]
+            rows += [(f"TP{k}", league.level(t, k)) for k in marks] + [(f"TP{len(marks) + 1}", league.target_of(t))]
+        else:
+            rows += [(f"TP{k}", league.level(t, k)) for k in range(1, league.CHECKPOINTS + 1)]
         blocks.append("\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD test"]
                                 + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]))
     text = "\n\n".join(blocks)
@@ -1489,7 +1492,7 @@ def format_watch_list(levels: list, *, html: bool = True) -> str:
 
 
 LEAGUE_NAMES = {"COT-WITH": "Speculators", "RATE-MOM": "Rates", "CMD-LEAD": "Commodities",
-                "MONTH-END": "Month-end", "BRK-RETEST": "Retest"}
+                "MONTH-END": "Month-end", "BRK-RETEST": "Retest", "RNG-DEV": "Deviation"}
 
 
 def format_league_board(board, *, month: tuple[int, int] | None = None, final: bool = False,
