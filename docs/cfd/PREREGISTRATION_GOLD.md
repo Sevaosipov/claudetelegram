@@ -14,3 +14,10 @@ PULLBACK, DONCHIAN, SESSION, WEEK -- 53 candidates, unchanged) are run on gold, 
 - **Verdict:** the chosen one, once, on the hold-out: its sum above zero and at least 6 of the 8 years above zero.
   Gold more than tripled over the hold-out, so a rule that is only ever long passes it too easily: the longs' and
   the shorts' results are reported apart.
+
+### Amendment A1 (2026-10-11, before any run on gold): the data
+
+The user's MetaTrader 5 terminal at IC Markets now gives the bot its own history (mt5/BotBridge.mq5). Its hourly
+gold bars are complete from 2016; before that it has one bar a day. So: **2016 onward from IC Markets' own feed** --
+the broker the trades will be made at -- and **2010-2015 from Dukascopy**. The periods, candidates, costs, choice
+and verdict are unchanged.
