@@ -131,3 +131,9 @@ any RNG-DEV trade closed:
   closed market. This holds for every idea.
 
 The USDCAD trade is void (never a result), as a trade the rules would not make.
+
+## Note (2026-10-11): the source of COT-WITH
+
+The CFTC site began refusing scripted downloads of its yearly archives (403), so the league reads the same legacy
+futures-only report from the CFTC's public reporting API. Checked on 364 rows of 2025: every value is the same. The
+rules are unchanged.
