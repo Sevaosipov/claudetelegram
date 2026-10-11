@@ -118,3 +118,16 @@ other side. It is run forward here like the others, on daily bars.
   stop is. Inside one bar the stop comes before the target.
 - **Otherwise** out at the open of the 20th bar after the entry bar.
 - ref: the piercing bar's date and the side. The idea joins on the league's third day and ends with it.
+
+## Amendment A5 (2026-10-11, an hour after A4, one RNG-DEV trade made, none closed)
+
+The first run of RNG-DEV made a USDCAD short whose «range» was a month's rise from 1.38 to 1.43: the 20-bar high and
+low of a trend, with the target ten times the stop away. A4 did not say what a range is. Two corrections, made before
+any RNG-DEV trade closed:
+
+- **The range went sideways:** its last close is no further from its first than half the range's width. Otherwise no
+  signal.
+- **No entry on a weekend** except in crypto: that run was on a Sunday and the trade was filled at Yahoo's stub of a
+  closed market. This holds for every idea.
+
+The USDCAD trade is void (never a result), as a trade the rules would not make.

@@ -565,3 +565,17 @@ def test_a_target_nearer_than_the_stop_is_no_trade(conn):
     t, events = _deviation_trade(conn, 1.05)                     # 0.02 to the target, 0.03 to the stop
     assert events == [] and t.reason == "void" and league.closed_trades(conn) == []
 
+
+def test_a_trend_is_not_a_range():
+    rising = [_bar(i, 1.0 + 0.002 * i, 1.01 + 0.002 * i, 0.99 + 0.002 * i, 1.0 + 0.002 * i) for i in range(40)]
+    top = rising + [_bar(40, 1.08, 1.095, 1.07, 1.075)]          # a new high, closed back under the old one
+    assert league.rng_dev({"USDCAD": top}, atr_of=lambda b, n: [0.005] * len(b)) == []
+
+
+def test_a_closed_market_has_no_open_on_a_weekend_but_crypto_has():
+    sunday = dt.date(2026, 10, 11)
+    rows = eurusd(upto=sunday)
+    assert league.Feed(MON, fetch_of({"EURUSD=X": eurusd()})).forming("EURUSD=X") is not None
+    assert league.Feed(sunday, fetch_of({"EURUSD=X": rows})).forming("EURUSD=X") is None
+    assert league.Feed(sunday, fetch_of({"BTC-USD": rows})).forming("BTC-USD") is not None
+
