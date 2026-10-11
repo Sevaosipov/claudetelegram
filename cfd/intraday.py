@@ -13,7 +13,7 @@ from dataclasses import dataclass, fields
 from zoneinfo import ZoneInfo
 
 import db
-from cfd import data, league
+from cfd import data, league, mt5_bridge
 from cfd import indicators as ind
 from cfd import instruments as ins
 from cfd.data import Bar
@@ -371,7 +371,7 @@ def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None
         try:
             symbol = ins.by_name(pair).symbol
             mine = [t for t in live if t.symbol == symbol]
-            cleaned = data.clean_rows((fetch or data.yahoo_fetch)(symbol, M15), M15,
+            cleaned = data.clean_rows((fetch or mt5_bridge.fetch_or(data.yahoo_fetch))(symbol, M15), M15,
                                       max_wick=data.MAX_WICK_CRYPTO if symbol.endswith("-USD") else None).bars
             bars = [b for b in cleaned if b.ts + BAR <= now]
             forming = next((b for b in cleaned if b.ts <= now < b.ts + BAR), None)
