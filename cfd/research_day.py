@@ -203,11 +203,15 @@ def simulate(bars: list[Bar], s: Setup, exit_: str, max_cost_r: float) -> float 
         if sign * (s.own_target - entry) < r:
             return None
         levels = [(sign * (s.own_target - entry) / r, 1.0)]
-    elif exit_ in ("X1", "X2", "X3"):
-        levels = [(float(exit_[1]), 1.0)]
+    elif exit_ == "XT":                                           # round 2: no target
+        levels = []
+    elif exit_ == "X234":                                         # round 2: thirds at 2R, 3R, 4R
+        levels = [(2.0, 1 / 3), (3.0, 1 / 3), (4.0, 1 / 3)]
+    elif exit_[1:].isdigit():
+        levels = [(float(exit_[1:]), 1.0)]
     else:
         levels = [(1.0, 1 / 3), (2.0, 1 / 3), (3.0, 1 / 3)]
-    trail = exit_ == "X3TP"
+    trail = exit_ in ("X3TP", "X234")
     stop_r, left, got, k = -1.0, 1.0, 0.0, 0
     while j < len(bars) and left > 1e-9:
         b = bars[j]
@@ -231,7 +235,7 @@ def simulate(bars: list[Bar], s: Setup, exit_: str, max_cost_r: float) -> float 
             left -= levels[k][1]
             k += 1
             if trail:
-                stop_r = 0.0 if k == 1 else 1.0
+                stop_r = 0.0 if k == 1 else levels[k - 2][0]
         j += 1
     if left > 1e-9:                                               # the data ended
         return None
@@ -307,3 +311,39 @@ def table(scores: list[Score]) -> str:
         lines.append(f"{s.name:<44}{s.n:>5}{s.total:>+8.1f}{s.mean:>+7.3f}{s.win:>5.0%}"
                      + "".join(f"{s.by_year.get(y, 0.0):>+8.1f}" for y in years))
     return "\n".join(lines)
+
+
+# ================================================================ round 2: fewer trades, further targets
+COST_CAPS = (0.25, 0.10, 0.07)
+EXITS_2 = ("X3", "X4", "X5", "XT", "X234")
+MIN_TRADES_2 = 100
+
+
+def run2(period: str, only: list[str] | None = None, log=print) -> list[Score]:
+    bars, _spread = to_m15(load_m1())
+    first, last = DESIGN if period == "design" else (HOLDOUT_FROM, bars[-1].ts.date())
+    log(f"{period}: {first} .. {last}")
+    made = setups(bars, first, last)
+    scores = []
+    for idea, cap, trend, exit_ in product(IDEAS, COST_CAPS, (False, True), EXITS_2):
+        name = " ".join([idea, f"C{cap:.2f}", *(["F-TREND"] if trend else []), exit_])
+        if only and name not in only:
+            continue
+        results = []
+        for s in made:
+            if s.idea != idea or (trend and (s.side == "long") != s.trend_up):
+                continue
+            r = simulate(bars, s, exit_, cap)
+            if r is not None:
+                results.append((day.local(bars[s.i].ts + day.BAR).year, r))
+        by_year: dict[int, float] = {}
+        for year, r in results:
+            by_year[year] = by_year.get(year, 0.0) + r
+        n, total = len(results), sum(r for _y, r in results)
+        scores.append(Score(name, n, total, total / n if n else 0.0,
+                            sum(1 for _y, r in results if r > 0) / n if n else 0.0, by_year))
+    return sorted(scores, key=lambda s: -s.mean)
+
+
+def qualifies2(s: Score) -> bool:
+    return s.n >= MIN_TRADES_2 and sum(1 for v in s.by_year.values() if v > 0) >= MIN_YEARS_UP
