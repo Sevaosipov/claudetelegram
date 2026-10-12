@@ -58,6 +58,7 @@ import chart_check
 import cluster
 import db
 import insider_score
+import marketcap
 import model
 import positions
 import sec_edgar
@@ -837,6 +838,7 @@ def main():
           f"{' '.join(sys.argv[1:]) or '(no flags)'} ===")
 
     conn = db.connect(DB_PATH)
+    marketcap.load_isin_listings(conn)
 
     if args.healthcheck:
         sys.exit(run_healthcheck(conn, args))

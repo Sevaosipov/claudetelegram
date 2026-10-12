@@ -20,6 +20,7 @@ import json
 
 import chart_check
 import crypto
+import marketcap
 import positions
 import t212_account
 import telegram_notify
@@ -41,6 +42,13 @@ SCORING_FAILED_WARNING = "⚠️ Оценка сигналов на этой н�
 def _plain(x: float) -> str:
     """A price as a trading terminal writes it: a point, no spaces; two decimals from 1, more below."""
     return f"{x:.{2 if x >= 1 else 4 if x >= 0.01 else 6}f}"
+
+
+def shown(ticker: str) -> str:
+    """The name a ticker is shown by: a coin's symbol; for an ISIN, the short name of the listing Trading
+    212 sells it as (marketcap.ISIN_LISTINGS), when there is one."""
+    listed = marketcap.ISIN_LISTINGS.get(str(ticker).upper())
+    return listed[2] if listed else crypto.symbol_of(ticker)
 
 
 def buy_text(pick: dict) -> str:
@@ -71,7 +79,7 @@ def buy_text(pick: dict) -> str:
         rows.append(("Chart", verdict))
     if pick.get("report"):                          # the next earnings report, when it is near
         rows.append(("Earn", f"{dt.date.fromisoformat(pick['report']):%d.%m}"))
-    block = [f"{crypto.symbol_of(pick['ticker'])} Buy · {KIND}"] + [f"{name:<6}{value}" for name, value in rows]
+    block = [f"{shown(pick['ticker'])} Buy · {KIND}"] + [f"{name:<6}{value}" for name, value in rows]
     if pick.get("t212") is False:
         block.append("Not on Trading 212")
     if pick.get("risk"):
@@ -83,7 +91,9 @@ def buy_text(pick: dict) -> str:
 
 def facts(pick: dict) -> str:
     """What the bot knows of a pick, as plain lines for the analyst's chart check (analyst.signal_note)."""
-    lines = [f"Тикер: {pick['ticker']}" + (f" ({pick['company']})" if pick.get("company") else "")]
+    listed = marketcap.ISIN_LISTINGS.get(str(pick["ticker"]).upper())
+    ticker = f"{listed[0]} (ISIN {pick['ticker']})" if listed else pick["ticker"]      # the symbol a chart knows
+    lines = [f"Тикер: {ticker}" + (f" ({pick['company']})" if pick.get("company") else "")]
     if pick.get("reasons"):
         lines.append("Причины сигнала: " + "; ".join(r for r in pick["reasons"] if r))
     if pick.get("score") is not None:
@@ -208,7 +218,7 @@ def _left_out_line(conn, today: dt.date) -> str | None:
     import db
     iso = today.isocalendar()
     kept = db.get_cached_json(conn, LEFT_OUT_KEY.format(week=f"{iso.year}-W{iso.week:02d}"))
-    names = [f"{crypto.symbol_of(d['ticker'])} ({d.get('why') or WHY_TAKEOVER})"
+    names = [f"{shown(d['ticker'])} ({d.get('why') or WHY_TAKEOVER})"
              for d in kept if isinstance(d, dict) and d.get("ticker")] if isinstance(kept, list) else []
     return f"Не вошли в сигналы: {', '.join(names)}" if names else None
 

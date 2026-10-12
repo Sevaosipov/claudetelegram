@@ -104,6 +104,8 @@ def _fetch_per_eur(currency: str) -> float | None:
 def per_eur(currency: str, conn=None) -> float:
     """How many units of `currency` make one EUR. Always returns something
     usable -- live rate, else cached, else hardcoded fallback, else 1.0."""
+    if currency in ("GBX", "GBp"):               # pence, London's quoting unit: a hundredth of a pound
+        return 100.0 * per_eur("GBP", conn)
     currency = (currency or "EUR").upper()
     if currency == "EUR":
         return 1.0

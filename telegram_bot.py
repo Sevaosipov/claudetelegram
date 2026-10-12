@@ -91,6 +91,7 @@ import assets
 import backtest
 import crypto
 import db
+import marketcap
 import positions
 import research
 import sources
@@ -911,6 +912,7 @@ def main() -> int:
         return 1
 
     conn = db.connect(DB_PATH)
+    marketcap.load_isin_listings(conn)
     session = requests.Session()
 
     if args.once:
