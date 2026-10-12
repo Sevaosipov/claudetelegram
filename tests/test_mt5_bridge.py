@@ -19,20 +19,25 @@ def test_the_server_clock_is_seven_hours_ahead_of_new_york():
 def test_fresh_files_are_read_and_anything_else_falls_back(tmp_path):
     (tmp_path / "EURUSD_M15_recent.csv").write_text(
         HEAD + "2026.10.12 12:00,1.12000,1.12100,1.11900,1.12050,340,2\nbroken row\n")
-    got = bridge.rows("EURUSD=X", "15m", folder=tmp_path)
+    at = dt.datetime(2026, 10, 12, 9, 20, tzinfo=UTC).timestamp()
+    os.utime(tmp_path / "EURUSD_M15_recent.csv", (at, at))
+    got = bridge.rows("EURUSD=X", "15m", folder=tmp_path, now=at)
     assert got == [("2026-10-12T09:00:00+00:00", 1.12, 1.121, 1.119, 1.1205)]
     assert bridge.rows("EURUSD=X", "1h", folder=tmp_path) is None            # no such file
     assert bridge.rows("BTC-USD", "15m", folder=tmp_path) is None            # a symbol the bridge does not carry
-    old = os.path.getmtime(tmp_path / "EURUSD_M15_recent.csv") + bridge.MAX_AGE + 5
-    assert bridge.rows("EURUSD=X", "15m", folder=tmp_path, now=old) is None  # the terminal has stopped writing
+    assert bridge.rows("EURUSD=X", "15m", folder=tmp_path, now=at + bridge.MAX_AGE + 5) is None    # stopped writing
+    late = at + 3600
+    os.utime(tmp_path / "EURUSD_M15_recent.csv", (late, late))
+    assert bridge.rows("EURUSD=X", "15m", folder=tmp_path, now=late) is None  # a fresh file of old bars
 
 
 def test_fetch_or_prefers_the_terminal(tmp_path, monkeypatch):
     monkeypatch.setenv("MT5_BRIDGE_DIR", str(tmp_path))
     fetch = bridge.fetch_or(lambda symbol, interval: [("yahoo",)])
     assert fetch("EURUSD=X", "15m") == [("yahoo",)]
-    (tmp_path / "EURUSD_M15_recent.csv").write_text(HEAD + "2026.10.12 12:00,1.12,1.121,1.119,1.1205,340,2\n")
-    assert fetch("EURUSD=X", "15m")[0][0] == "2026-10-12T09:00:00+00:00"
+    stamp = (dt.datetime.now(UTC).astimezone(bridge.NEW_YORK) + bridge.SERVER_AHEAD_OF_NEW_YORK).strftime("%Y.%m.%d %H:%M")
+    (tmp_path / "EURUSD_M15_recent.csv").write_text(HEAD + f"{stamp},1.12,1.121,1.119,1.1205,340,2\n")
+    assert fetch("EURUSD=X", "15m")[0][1:] == (1.12, 1.121, 1.119, 1.1205)
 
 
 def test_the_history_file_gives_bars_and_spreads(tmp_path):

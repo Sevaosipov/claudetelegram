@@ -66,7 +66,14 @@ def rows(symbol: str, interval: str, *, kind: str = "recent", folder: Path | Non
     try:
         if kind == "recent" and (now or time.time()) - path.stat().st_mtime > MAX_AGE:
             return None
-        return [(ts.isoformat(), o, h, low, c) for ts, o, h, low, c, _spread in _read(path)]
+        got = _read(path)
+        minutes = {"15m": 15, "1h": 60}.get(interval)
+        if kind == "recent" and minutes and got:
+            # a fresh file can still hold old bars: the terminal answers from its cache until it has synced
+            age = dt.datetime.fromtimestamp(now or time.time(), UTC) - got[-1][0]
+            if age > dt.timedelta(minutes=3 * minutes):
+                return None
+        return [(ts.isoformat(), o, h, low, c) for ts, o, h, low, c, _spread in got]
     except OSError:
         return None
 
