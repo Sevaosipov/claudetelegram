@@ -101,6 +101,7 @@ import watch
 import telegram_notify
 from cfd import intraday as cfd_intraday
 from cfd import league as cfd_league
+from cfd import sk_live as cfd_sk
 from cfd import live as cfd_live
 from cfd import plan as cfd_plan
 
@@ -151,6 +152,8 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "/size — на сколько евро покупать по сигналу: недельный бюджет (/size budget 30) или риск "
              "и предел доли счёта.\n"
              "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
+             "/sk — стратегия SK (последовательность 0-A-B-C) на бумаге: лимитные заявки по EURUSD и золоту "
+             "на 4-часовых свечах (/sk off — без сообщений).\n"
              "/day — дневная бумажная лига: внутридневные CFD-сделки 09:00–18:00, тест на 4 недели "
              "(/day off — без сообщений о сделках).\n"
              "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
@@ -234,6 +237,19 @@ def _handle_day_command(conn, text: str) -> bool:
     except Exception as e:
         print(f"[telegram_bot] /day failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось выполнить /day ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_sk_command(conn, text: str) -> bool:
+    """/sk: the SK paper run's board and its mute switch (cfd/sk_live.py). Returns False for any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/sk":
+        return False
+    try:
+        telegram_notify.send_text(cfd_sk.handle_command(conn, text))
+    except Exception as e:
+        print(f"[telegram_bot] /sk failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /sk ({type(e).__name__}). Попробуйте позже.")
     return True
 
 
@@ -735,7 +751,7 @@ def _handle_message(conn, text: str) -> None:
     text = (text or "").strip()
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
             or _handle_size_command(conn, text) or _handle_league_command(conn, text)
-            or _handle_day_command(conn, text)
+            or _handle_day_command(conn, text) or _handle_sk_command(conn, text)
             or _handle_watch_command(conn, text) or _handle_signals_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
@@ -807,6 +823,14 @@ def _day_league(conn) -> None:
         print(f"[telegram_bot] day league failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+def _sk_pass(conn) -> None:
+    """One pass of the SK paper run (cfd/sk_live.py). Whatever it raises is logged and the polling goes on."""
+    try:
+        cfd_sk.run(conn)
+    except Exception as e:
+        print(f"[telegram_bot] SK failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=time.time,
            sleep=time.sleep, rounds: int | None = None) -> None:
     """The always-on loop: long-poll Telegram, and sync the Trading 212 account at start and then
@@ -821,7 +845,7 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
     away, not 15 minutes: the key will not heal by itself."""
     next_sync, wait = clock(), T212_SYNC_SECONDS
     next_plans = clock()
-    day_slot = None
+    day_slot = sk_hour = None
     backoff = 5
     done = 0
     while rounds is None or done < rounds:
@@ -837,6 +861,9 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
         if now % DAY_BAR_SECONDS >= DAY_BAR_LAG and int(now // DAY_BAR_SECONDS) != day_slot:
             day_slot = int(now // DAY_BAR_SECONDS)
             _day_league(conn)
+            if int(now // 3600) != sk_hour:                 # the SK rule reads four-hour bars: once an hour
+                sk_hour = int(now // 3600)
+                _sk_pass(conn)
         try:
             _poll_once(conn, token, chat_id, session)
             backoff = 5
