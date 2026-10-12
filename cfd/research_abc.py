@@ -18,7 +18,7 @@ LOOK = 96
 def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int, *, m: float, e: float,
            stop_at: float, thirds: bool, look: int = LOOK, stop_atr: float | None = None,
            targets: tuple | None = None, trend: list | None = None, cost: float = COST,
-           night_pct: float = NIGHT_PCT) -> list[tuple[int, float]]:
+           night_pct: float = NIGHT_PCT, break_k: int = 0, c_target: str | None = None) -> list[tuple[int, float]]:
     """(year, result in R after costs) of one side's trades; `sign` +1 long, -1 short (prices mirrored).
     `stop_at` is the retracement the stop sits at: 1.0 is point 0, more is beyond it; with `stop_atr` the
     stop is that many ATR from the entry instead. `look` bars make «an absolute low». `targets` (round 3) are
@@ -28,6 +28,15 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
     lo = [sign * (b.low if sign > 0 else b.high) for b in bars]
     op = [sign * b.open for b in bars]
     out = []
+    last_swing = [None] * len(bars)          # the last swing high confirmed by each bar (`break_k` bars a side)
+    if break_k:
+        cur_swing = None
+        for j in range(len(bars)):
+            p = j - break_k
+            if p >= break_k and hi[p] >= max(hi[p - break_k:p + break_k + 1]):
+                cur_swing = hi[p]
+            last_swing[j] = cur_swing
+    barrier = None
     zero = top = None
     order = None                       # (entry, stop, [levels]) waiting for a fill, set at bar `since`
     since = -1
@@ -40,6 +49,7 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
         fills = bool(order) and i > since and lo[i] <= order[0]
         if not fills and lo[i] <= min(lo[i - look + 1:i + 1]):   # a new extreme: a new point 0
             zero, top, order = lo[i], hi[i], None
+            barrier = last_swing[i]                              # the lower high a structure shift must break
             i += 1
             continue
         if zero is None:
@@ -55,7 +65,8 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
             order = None
             r = entry - stop
             if r > 0 and cost / r <= MAX_COST_R:
-                got, j = _run(bars, hi, lo, op, i, entry, stop, levels, thirds, even=targets is not None)
+                got, j = _run(bars, hi, lo, op, i, entry, stop, levels, thirds,
+                              even=targets is not None or c_target is not None)
                 if got is not None:
                     nights = (bars[j].ts.date() - bars[i].ts.date()).days
                     out.append((day.local(bars[i].ts).year,
@@ -70,11 +81,15 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
             top, order = hi[i], None                             # a new A is forming
         size = top - zero
         with_trend = trend is None or (trend[i] is not None and sign * bars[i].close > sign * trend[i])
-        if order is None and atr[i] and size >= m * atr[i] and lo[i] <= top - 0.382 * size and with_trend:
+        shifted = not break_k or (barrier is not None and top > barrier)
+        if order is None and atr[i] and size >= m * atr[i] and lo[i] <= top - 0.382 * size and with_trend \
+                and shifted:
             entry = top - e * size
             if lo[i] > entry:                                    # not already through the entry
                 stop = entry - stop_atr * atr[i] if stop_atr else top - stop_at * size
                 levels = [zero + k * size for k in targets] if targets else [top, entry + size, entry + 1.618 * size]
+                if c_target:                                     # round 2: A, C (the entry plus 0-A), or both
+                    levels = {"A": [top], "C": [entry + size], "A+C": [top, entry + size]}[c_target]
                 order = (entry, stop, levels)
                 since = i
         i += 1
@@ -211,5 +226,28 @@ def run_tpr(period: str, only: list[str] | None = None, log=print):
                     rows += trades(bars, atr, first, last, sign, m=m, e=e, stop_at=1.0, thirds=False, look=300,
                                    targets=TARGETS[target], trend=ema if trend else None, cost=cost, night_pct=night)
                 out.setdefault(name, {})[market] = rows
+        log(f"  {market} done")
+    return out
+
+
+def run_sk(period: str, log=print):
+    """Round 2: {candidate: {market: rows}} with the structure shift."""
+    out: dict[str, dict[str, list]] = {}
+    for market in [*PIP, "XAUUSD"]:
+        hours = market_hours(market)
+        cost = 0.30 if market == "XAUUSD" else COST_PIPS[market] * PIP[market]
+        night = 0.020 if market == "XAUUSD" else 0.010
+        for frame in ("H1", "H4"):
+            bars = hours if frame == "H1" else to_h4(hours)
+            first, last = TPR_DESIGN if period == "design" else (TPR_HOLDOUT_FROM, bars[-1].ts.date())
+            start = next(k for k, b in enumerate(bars) if b.ts.date() >= first - dt.timedelta(days=120))
+            bars = bars[start:]
+            atr = ind.atr(bars, 14)
+            for e, target in product((0.5, 0.618), ("A", "C", "A+C")):
+                rows = []
+                for sign in (1, -1):
+                    rows += trades(bars, atr, first, last, sign, m=0.0, e=e, stop_at=1.0, thirds=False, look=300,
+                                   cost=cost, night_pct=night, break_k=3, c_target=target)
+                out.setdefault(f"SK {frame} E{e:g} {target}", {})[market] = rows
         log(f"  {market} done")
     return out
