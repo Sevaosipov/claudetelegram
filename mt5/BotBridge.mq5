@@ -8,10 +8,13 @@
 //|   <SYMBOL>_<TF>_recent.csv   the last RecentBars bars, refreshed   |
 //|   <SYMBOL>_<TF>_history.csv  up to HistoryBars bars, every 6 hours |
 //|   quotes.csv                 bid, ask and the clocks, refreshed    |
+//|   account.csv, positions.csv, deals.csv   the account's balance, |
+//|                              its open positions and the deals of  |
+//|                              the last 90 days, once a minute       |
 //| Times are the trade server's; the reader converts them.           |
 //+------------------------------------------------------------------+
 #property copyright "disclosure-bot"
-#property version   "1.00"
+#property version   "1.10"
 #property description "Writes bars and quotes to files for disclosure-bot. It never trades."
 
 input string Symbols        = "XAUUSD,EURUSD";  // symbols, comma-separated, as Market Watch names them
@@ -23,6 +26,7 @@ input int    RefreshSeconds = 20;
 string   g_symbols[];
 string   g_tfs[];
 datetime g_history_at = 0;
+datetime g_account_at = 0;
 int      g_history_rows = 0;
 
 ENUM_TIMEFRAMES TfOf(const string name)
@@ -90,6 +94,83 @@ void WriteQuotes()
    FileMove("botbridge\\quotes.tmp", FILE_COMMON, "botbridge\\quotes.csv", FILE_COMMON | FILE_REWRITE);
   }
 
+// The account, read only: its balance, what is open, and the deals of the last 90 days.
+void WriteAccount()
+  {
+   int handle = FileOpen("botbridge\\account.tmp", FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle != INVALID_HANDLE)
+     {
+      FileWriteString(handle, "balance,equity,margin,free_margin,currency,leverage,server_time\n");
+      FileWriteString(handle, DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ","
+                      + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ","
+                      + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN), 2) + ","
+                      + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2) + ","
+                      + AccountInfoString(ACCOUNT_CURRENCY) + ","
+                      + IntegerToString(AccountInfoInteger(ACCOUNT_LEVERAGE)) + ","
+                      + TimeToString(TimeTradeServer(), TIME_DATE | TIME_SECONDS) + "\n");
+      FileClose(handle);
+      FileMove("botbridge\\account.tmp", FILE_COMMON, "botbridge\\account.csv", FILE_COMMON | FILE_REWRITE);
+     }
+
+   handle = FileOpen("botbridge\\positions.tmp", FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle != INVALID_HANDLE)
+     {
+      FileWriteString(handle, "ticket,time,symbol,side,volume,price_open,sl,tp,profit,swap\n");
+      for(int i = 0; i < PositionsTotal(); i++)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0)
+            continue;
+         string symbol = PositionGetString(POSITION_SYMBOL);
+         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         FileWriteString(handle, IntegerToString((long)ticket) + ","
+                         + TimeToString((datetime)PositionGetInteger(POSITION_TIME), TIME_DATE | TIME_SECONDS) + ","
+                         + symbol + ","
+                         + (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "buy" : "sell") + ","
+                         + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) + ","
+                         + DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), digits) + ","
+                         + DoubleToString(PositionGetDouble(POSITION_SL), digits) + ","
+                         + DoubleToString(PositionGetDouble(POSITION_TP), digits) + ","
+                         + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) + ","
+                         + DoubleToString(PositionGetDouble(POSITION_SWAP), 2) + "\n");
+        }
+      FileClose(handle);
+      FileMove("botbridge\\positions.tmp", FILE_COMMON, "botbridge\\positions.csv", FILE_COMMON | FILE_REWRITE);
+     }
+
+   datetime to = TimeTradeServer() + 86400;
+   if(!HistorySelect(to - 91 * 86400, to))
+      return;
+   handle = FileOpen("botbridge\\deals.tmp", FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+      return;
+   FileWriteString(handle, "ticket,time,symbol,side,entry,volume,price,profit,commission,swap,position\n");
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+     {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0)
+         continue;
+      long type = HistoryDealGetInteger(deal, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+         continue;                                  // deposits, credits and the like are not trades
+      string symbol = HistoryDealGetString(deal, DEAL_SYMBOL);
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+      long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+      FileWriteString(handle, IntegerToString((long)deal) + ","
+                      + TimeToString((datetime)HistoryDealGetInteger(deal, DEAL_TIME), TIME_DATE | TIME_SECONDS) + ","
+                      + symbol + "," + (type == DEAL_TYPE_BUY ? "buy" : "sell") + ","
+                      + (entry == DEAL_ENTRY_IN ? "in" : entry == DEAL_ENTRY_OUT ? "out" : "other") + ","
+                      + DoubleToString(HistoryDealGetDouble(deal, DEAL_VOLUME), 2) + ","
+                      + DoubleToString(HistoryDealGetDouble(deal, DEAL_PRICE), digits) + ","
+                      + DoubleToString(HistoryDealGetDouble(deal, DEAL_PROFIT), 2) + ","
+                      + DoubleToString(HistoryDealGetDouble(deal, DEAL_COMMISSION), 2) + ","
+                      + DoubleToString(HistoryDealGetDouble(deal, DEAL_SWAP), 2) + ","
+                      + IntegerToString(HistoryDealGetInteger(deal, DEAL_POSITION_ID)) + "\n");
+     }
+   FileClose(handle);
+   FileMove("botbridge\\deals.tmp", FILE_COMMON, "botbridge\\deals.csv", FILE_COMMON | FILE_REWRITE);
+  }
+
 // The history files: at start, then every 6 hours; and again a minute later while the terminal is still
 // loading more bars from the server (the count keeps growing).
 void WriteHistory()
@@ -127,6 +208,11 @@ void OnTimer()
       for(int t = 0; t < ArraySize(g_tfs); t++)
          WriteBars(g_symbols[s], g_tfs[t], RecentBars, "recent");
    WriteQuotes();
+   if(TimeLocal() - g_account_at >= 60)
+     {
+      g_account_at = TimeLocal();
+      WriteAccount();
+     }
    if(TimeLocal() - g_history_at >= 6 * 3600)
       WriteHistory();
   }

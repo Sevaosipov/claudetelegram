@@ -753,6 +753,15 @@ CREATE TABLE IF NOT EXISTS sk_trades (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sk_trades_ref ON sk_trades(pair, ref);
 
+-- The spread of each market the MetaTrader bridge carries, sampled from its live quote every quarter of an hour
+-- (cfd/mt5_bridge.sample_spreads): what a trade really costs at the user's broker, hour by hour.
+CREATE TABLE IF NOT EXISTS mt5_spreads (
+    ts     TEXT NOT NULL,             -- UTC, ISO
+    name   TEXT NOT NULL,             -- EURUSD
+    spread REAL NOT NULL,             -- ask - bid, in price units
+    PRIMARY KEY (ts, name)
+);
+
 -- The user's own CFD trades (cfd/plan.py, /cfd plan): one row per trade the user told the bot about, followed
 -- through its four take-profit stages to its close. The bot never places an order.
 CREATE TABLE IF NOT EXISTS cfd_plans (

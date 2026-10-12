@@ -103,3 +103,126 @@ def spread_points(name: str, frame: str, folder: Path | None = None) -> list[int
         return [s for *_bar, s in _read(folder / f"{name}_{frame}_history.csv")] if folder else []
     except OSError:
         return []
+
+
+# ---------------------------------------------------------------- the account, read only (BotBridge 1.10)
+def _table(name: str, folder: Path | None = None) -> list[dict]:
+    folder = folder or bridge_dir()
+    if not folder:
+        return []
+    try:
+        with (folder / name).open(newline="") as f:
+            return list(csv.DictReader(f))
+    except OSError:
+        return []
+
+
+def _when(stamp: str) -> dt.datetime | None:
+    try:
+        naive = dt.datetime.strptime(stamp.strip(), "%Y.%m.%d %H:%M:%S")
+    except ValueError:
+        return None
+    return (naive - SERVER_AHEAD_OF_NEW_YORK).replace(tzinfo=NEW_YORK).astimezone(UTC)
+
+
+def _f(row: dict, key: str) -> float:
+    try:
+        return float(row.get(key) or 0)
+    except ValueError:
+        return 0.0
+
+
+def account(folder: Path | None = None) -> dict | None:
+    """{balance, equity, currency, ...} of the terminal's account, or None when the bridge has not written it."""
+    rows = _table("account.csv", folder)
+    if not rows:
+        return None
+    row = rows[0]
+    return {"balance": _f(row, "balance"), "equity": _f(row, "equity"), "margin": _f(row, "margin"),
+            "currency": row.get("currency") or "", "at": _when(row.get("server_time") or "")}
+
+
+def open_positions(folder: Path | None = None) -> list[dict]:
+    return [{"symbol": r.get("symbol", ""), "side": r.get("side", ""), "volume": _f(r, "volume"),
+             "price": _f(r, "price_open"), "sl": _f(r, "sl"), "tp": _f(r, "tp"),
+             "profit": _f(r, "profit") + _f(r, "swap"), "at": _when(r.get("time") or "")}
+            for r in _table("positions.csv", folder)]
+
+
+def closed_trades(folder: Path | None = None) -> list[dict]:
+    """The closing deals of the last 90 days: when, the symbol, the lots and the result after commission and
+    swap (the commission of the opening deal of the same position is counted in)."""
+    rows = _table("deals.csv", folder)
+    opening: dict[str, float] = {}
+    for r in rows:
+        if r.get("entry") == "in":
+            opening[r.get("position", "")] = opening.get(r.get("position", ""), 0.0) + _f(r, "commission")
+    out = []
+    for r in rows:
+        if r.get("entry") != "out":
+            continue
+        net = _f(r, "profit") + _f(r, "commission") + _f(r, "swap") + opening.pop(r.get("position", ""), 0.0)
+        out.append({"symbol": r.get("symbol", ""), "side": "buy" if r.get("side") == "sell" else "sell",
+                    "volume": _f(r, "volume"), "price": _f(r, "price"), "net": net, "at": _when(r.get("time") or "")})
+    return out
+
+
+def quotes(folder: Path | None = None) -> dict[str, dict]:
+    """symbol -> {bid, ask, point} as the terminal last wrote them."""
+    return {r.get("symbol", ""): {"bid": _f(r, "bid"), "ask": _f(r, "ask"), "point": _f(r, "point")}
+            for r in _table("quotes.csv", folder)}
+
+
+# ---------------------------------------------------------------- measured costs
+COMMISSION_USD_PER_LOT = 7.0     # IC Markets Raw Spread, the round trip
+LOT = {"EURUSD": 100_000, "XAUUSD": 100}
+
+
+MIN_SAMPLES = 20
+
+
+def sample_spreads(conn, folder: Path | None = None, now: float | None = None) -> int:
+    """Store the live spread of every quoted market (mt5_spreads), when the terminal wrote its quotes within
+    MAX_AGE seconds and the market is open (a spread above zero). Returns the rows stored."""
+    folder = folder or bridge_dir()
+    if not folder:
+        return 0
+    try:
+        if (now or time.time()) - (folder / "quotes.csv").stat().st_mtime > MAX_AGE:
+            return 0
+    except OSError:
+        return 0
+    stamp = dt.datetime.fromtimestamp(now or time.time(), UTC).isoformat(timespec="seconds")
+    rows = [(stamp, name, q["ask"] - q["bid"]) for name, q in quotes(folder).items() if q["ask"] > q["bid"] > 0]
+    conn.executemany("INSERT OR IGNORE INTO mt5_spreads (ts, name, spread) VALUES (?,?,?)", rows)
+    conn.commit()
+    return len(rows)
+
+
+def measured_cost(name: str, folder: Path | None = None, *, conn=None, hours=(6, 15)) -> dict | None:
+    """What a round trip of `name` costs in price units at the user's broker, in `hours` (UTC; 09:00-18:00 in
+    Riga is about 6-15): the median of the spreads sampled from the live quote (mt5_spreads) once there are
+    MIN_SAMPLES of them -- until then the median of the terminal's 15-minute bars, which record each bar's
+    lowest spread and so understate it (`floor` is then True) -- and the commission added. None when the
+    bridge has no quote for it."""
+    folder = folder or bridge_dir()
+    q = quotes(folder).get(name) if folder else None
+    if not q or not q["point"] or name not in LOT:
+        return None
+    samples = []
+    if conn is not None:
+        samples = sorted(s for ts, s in conn.execute("SELECT ts, spread FROM mt5_spreads WHERE name = ?", (name,))
+                         if hours[0] <= dt.datetime.fromisoformat(ts).hour < hours[1])
+    floor = len(samples) < MIN_SAMPLES
+    if floor:
+        try:
+            bars = _read(folder / f"{name}_M15_history.csv")
+        except OSError:
+            bars = []
+        samples = sorted(s * q["point"] for ts, *_rest, s in bars[-20_000:] if hours[0] <= ts.hour < hours[1])
+        if len(samples) < 100:
+            return None
+    spread = samples[len(samples) // 2]
+    commission = COMMISSION_USD_PER_LOT / LOT[name]
+    return {"spread": spread, "commission": commission, "round_trip": spread + commission,
+            "live": q["ask"] - q["bid"], "samples": len(samples), "floor": floor}

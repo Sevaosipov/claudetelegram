@@ -1608,6 +1608,47 @@ def format_sk_board(trades: list, start, *, html: bool = True) -> str:
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
+# ------------------------------------------------------------------ the MetaTrader account and costs (cfd/mt5_bridge.py)
+def format_mt5(account, positions: list, closed: list, now, *, html: bool = True) -> str:
+    """The user's MetaTrader account as the bridge reports it: the balance and equity, what is open, and the
+    closed trades of 7 and 30 days after commission and swap."""
+    if not account:
+        text = ("MT5: no account data. Attach BotBridge 1.10 to a chart in MetaTrader 5.")
+        return f"<pre>{_esc(text)}</pre>" if html else text
+    cur = account["currency"]
+    lines = [f"MT5 {cur} {account['balance']:,.2f} · equity {account['equity']:,.2f}"]
+    if positions:
+        lines.append("Open")
+        for p in positions:
+            levels = "".join(f"  {k} {_sk_price(p['symbol'], p[v])}" for k, v in (("SL", "sl"), ("TP", "tp")) if p[v])
+            lines.append(f"{p['symbol']} {p['side']} {p['volume']:.2f}  {_sk_price(p['symbol'], p['price'])}{levels}  "
+                         f"{p['profit']:+.2f}")
+    for days in (7, 30):
+        rows = [c for c in closed if c["at"] and (now - c["at"]).days < days]
+        won = sum(1 for c in rows if c["net"] > 0)
+        lines.append(f"Closed {days:>2}d  {sum(c['net'] for c in rows):+.2f}  {len(rows)} trades, {won} won")
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_spreads(costs: dict, assumed: dict, *, html: bool = True) -> str:
+    """The measured round-trip cost of each market the bridge carries beside what the tests assumed."""
+    lines = [f"{'':<7}{'spread':>8} {'+comm':>8} {'assumed':>8} {'now':>8}"]
+    floors = False
+    for name, c in costs.items():
+        if not c:
+            lines.append(f"{name:<7} no data")
+            continue
+        digits = 2 if name.startswith("XA") else 5
+        floors = floors or c.get("floor", False)
+        lines.append(f"{name:<7}{c['spread']:>8.{digits}f} {c['round_trip']:>8.{digits}f} "
+                     f"{assumed.get(name, 0.0):>8.{digits}f} {c['live']:>8.{digits}f}" + ("*" if c.get("floor") else ""))
+    if floors:
+        lines.append("* lowest spread per bar; live samples are being collected")
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
 LEAGUE_NAMES = {"COT-WITH": "Speculators", "RATE-MOM": "Rates", "CMD-LEAD": "Commodities",
                 "MONTH-END": "Month-end", "BRK-RETEST": "Retest", "RNG-DEV": "Deviation"}
 
