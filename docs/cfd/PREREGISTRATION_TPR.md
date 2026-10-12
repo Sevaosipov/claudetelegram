@@ -89,3 +89,17 @@ trend, the 0-A-B-C is drawn on the 1-hour chart, and the entry is looked for on 
 - **Choice,** 2021-2024: at least 100 trades, 3 of the 4 years up, t at least 2.5; the highest t. **Verdict,** once,
   2025-01-01 on: sum above zero and both years above zero. (EURUSD's hourly bars of 2020-2026 were part of the
   four-hour test already; these rules have not been run on them.)
+
+## Round 6 (2026-10-12, before the run): the same rule on seven markets
+
+The user asked to bring round 5's best result (+0.09R a trade, t 0.9 on 135 EURUSD trades) closer to the bar.
+Changing the rule until its t rises on the same four years would only fit them. The honest way to a higher t is more
+trades of the **same** rule: if the edge is real, seven markets give about seven times the trades and t rises with
+them; if it is chance, it falls back to zero.
+
+- **The rule, unchanged:** round 5's «stop at point 0, out at A», no trend filter.
+- **Markets:** EURUSD, GBPUSD, AUDUSD, USDJPY, EURGBP, EURJPY, GBPJPY -- FXCM one-minute candles; costs 0.8 / 1.1 / 0.9
+  / 0.9 / 1.2 / 1.3 / 1.8 pips, 0.010 % a night.
+- **Design 2021-2024,** all markets together: at least 500 trades, 3 of the 4 years up, at least 5 of the 7 markets
+  up, t at least 2.5. Then, only if it passes, **once on 2025-01-01 on:** sum above zero, both years above zero, at
+  least 5 of the 7 markets up.
