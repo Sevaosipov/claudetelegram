@@ -55,3 +55,18 @@ period, same frame; the hold-out is still unseen.
 Design period: 18 of the 120 made money, 5 qualified. The highest mean among them: **ASIA-SWEEP C0.10 X5** -- the
 Asia sweep, taken only when the cost is at most 0.10R, everything out at 5R or at 18:00: 149 trades in four years,
 +12.3R, +0.083R a trade, 2021 down and 2022-2024 up. It is the one candidate run on the hold-out.
+
+## Round 3 (2026-10-12, written before it was run): what sets a day like 12 October apart
+
+The open-range trade of 12 October worked: EURUSD had been falling for weeks and broke down again. The user asked
+to adapt the rule to such days. Only what is known at the entry can be used, so five conditions are tried on the
+open-range rule as it now runs (stop at the range's middle, thirds at 1R-2R-3R, no time exit, 0.8 pips, 0.010 % a
+night, one trade at a time): **T20** -- the break is with the 20-day move (the close against the close 20 trading
+days before); **T5** -- with the 5-day move; **NARROW** -- London's first-hour range is no wider than the median of
+the 20 days before; **EARLY** -- the break comes by 12:00 Riga; **PREV** -- the break is in the direction of the day
+before (its close against the close a day earlier). Candidates: the rule alone, each condition, each pair (16).
+
+- **Choice** on 2021-2024: at least 150 trades, a profit in 3 of the 4 years, t at least 2.5; the highest t.
+  None: «no adaptation found», the hold-out stays shut for this rule.
+- **Verdict:** the chosen one, once, on 2025-01-01 on (not run by the open-range rule so far): sum above zero and
+  both years above zero.
