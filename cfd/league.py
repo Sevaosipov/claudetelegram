@@ -667,7 +667,9 @@ def run(conn, *, today: dt.date | None = None, fetch: data.Fetch | None = None, 
             except Exception as e:
                 print(f"[league] {sig.idea} {sig.pair}: {type(e).__name__}: {e}", file=sys.stderr)
     if new and loud:
-        send(telegram_notify.format_league_opens(new))
+        from cfd import sizing
+        send(telegram_notify.format_league_opens(
+            new, lots={t.id: sizing.lots(conn, t.pair, t.entry, t.stop) for t in new if t.entry and t.stop}))
     _boards(conn, today, send, over)
     return opened, closed
 

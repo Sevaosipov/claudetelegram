@@ -1366,7 +1366,7 @@ def _league_plain(t, x: float) -> str:
     return f"{x:.{3 if ins.by_symbol(t.symbol).quote == 'JPY' else 5}f}"
 
 
-def format_league_opens(trades: list, *, html: bool = True) -> str:
+def format_league_opens(trades: list, *, lots: dict | None = None, html: bool = True) -> str:
     """The paper trades opened in one pass as one message, nothing but what is needed to place them: a
     block per trade -- the pair and the side, the entry, the stop and TP1..TP4 -- in a fixed-width font,
     one value a line (a row of eight columns does not fit a phone's screen)."""
@@ -1379,8 +1379,10 @@ def format_league_opens(trades: list, *, html: bool = True) -> str:
             rows += [(f"TP{k}", league.level(t, k)) for k in marks] + [(f"TP{len(marks) + 1}", league.target_of(t))]
         else:
             rows += [(f"TP{k}", league.level(t, k)) for k in range(1, league.CHECKPOINTS + 1)]
+        size = (lots or {}).get(t.id)                # the lot size, when /risk is set (cfd/sizing.py)
         blocks.append("\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD test"]
-                                + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]))
+                                + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]
+                                + ([f"Lots  {size}"] if size else [])))
     text = "\n\n".join(blocks)
     return f"<pre>{_esc(text)}</pre>" if html else text
 
@@ -1565,12 +1567,12 @@ def _sk_price(pair: str, x: float) -> str:
     return f"{x:.{3 if pair.endswith('JPY') else 2 if x >= 100 else 5}f}"
 
 
-def format_sk_order(t, *, html: bool = True) -> str:
+def format_sk_order(t, *, lots: str | None = None, html: bool = True) -> str:
     """A limit order of the SK rule as a bare block: the market, the side and the strategy, the entry, the
-    stop and the target."""
+    stop and the target, and the lot size when /risk is set (cfd/sizing.py)."""
     text = "\n".join([f"{t.pair} {'Buy' if t.side == 'long' else 'Sell'} limit · CFD · SK",
                       f"Entry {_sk_price(t.pair, t.entry)}", f"Stop  {_sk_price(t.pair, t.stop)}",
-                      f"TP    {_sk_price(t.pair, t.target)}"])
+                      f"TP    {_sk_price(t.pair, t.target)}"] + ([f"Lots  {lots}"] if lots else []))
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 

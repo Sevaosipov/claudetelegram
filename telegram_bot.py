@@ -103,6 +103,7 @@ import telegram_notify
 from cfd import intraday as cfd_intraday
 from cfd import league as cfd_league
 from cfd import sk_live as cfd_sk
+from cfd import sizing as cfd_sizing
 from cfd import live as cfd_live
 from cfd import plan as cfd_plan
 
@@ -155,6 +156,8 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
              "/sk — стратегия SK (последовательность 0-A-B-C) на бумаге: лимитные заявки по EURUSD и золоту "
              "на 4-часовых свечах (/sk off — без сообщений).\n"
+             "/risk — сколько евро можно потерять на одной CFD-сделке (/risk 10): в сигналах появится "
+             "размер в лотах для IC Markets.\n"
              "/day — дневная бумажная лига: внутридневные CFD-сделки 09:00–18:00, тест на 4 недели "
              "(/day off — без сообщений о сделках).\n"
              "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
@@ -238,6 +241,20 @@ def _handle_day_command(conn, text: str) -> bool:
     except Exception as e:
         print(f"[telegram_bot] /day failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось выполнить /day ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_risk_command(conn, text: str) -> bool:
+    """/risk: the euros a CFD trade may lose, from which a signal's lot size is worked out (cfd/sizing.py).
+    Returns False for any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/risk":
+        return False
+    try:
+        telegram_notify.send_text(telegram_notify._esc(cfd_sizing.handle_command(conn, text)))
+    except Exception as e:
+        print(f"[telegram_bot] /risk failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /risk ({type(e).__name__}). Попробуйте позже.")
     return True
 
 
@@ -752,7 +769,7 @@ def _handle_message(conn, text: str) -> None:
     text = (text or "").strip()
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
             or _handle_size_command(conn, text) or _handle_league_command(conn, text)
-            or _handle_day_command(conn, text) or _handle_sk_command(conn, text)
+            or _handle_day_command(conn, text) or _handle_sk_command(conn, text) or _handle_risk_command(conn, text)
             or _handle_watch_command(conn, text) or _handle_signals_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
