@@ -135,16 +135,25 @@ def test_inside_one_bar_the_stop_comes_first_and_a_gap_leaves_at_the_open(conn):
     assert (t.reason, t.exit_price) == ("stop", 1.0) and sent[-1] == "<pre>EURUSD Open range stop 1.00000 -1.1R</pre>"
 
 
-def test_every_trade_is_out_at_six_in_the_evening(conn):
+def test_a_trade_outlives_six_in_the_evening_and_pays_for_its_nights(conn):
     sent = []
     _pass(conn, 35, QUIET_34, sent)
-    calm = {**QUIET_34, **{i: (1.002, 1.0025, 1.0015, 1.002) for i in range(35, 61)}}
-    assert _pass(conn, 60, calm, sent) == (0, 0)                               # 17:45: still open
-    assert _pass(conn, 61, calm, sent) == (0, 1)                               # bar 60 opens at 18:00 in Riga
-    [t] = day.trades(conn)
-    assert (t.reason, t.exit_price) == ("time", 1.002) and sent[-2] == "<pre>EURUSD Open range closed 1.00200 +0.3R</pre>"
-    assert sent[-1].startswith("<pre>Day league 12.10 12.10-08.11\n")           # the day's board, once
-    assert _pass(conn, 62, calm, sent) == (0, 0) and len(sent) == 3
+    calm = {**QUIET_34, **{i: (1.002, 1.0025, 1.0015, 1.002) for i in range(35, 140)}}
+    assert _pass(conn, 61, calm, sent) == (0, 0)                               # bar 60 opens at 18:00 in Riga
+    assert _pass(conn, 100, calm, sent) == (0, 0)                              # the night
+    assert day.trades(conn, "WHERE idea = 'OPEN-RANGE'")[0].status == "open" and len(sent) == 1
+    hit = {**calm, 130: (1.002, 1.002, 0.9995, 1.0)}                           # the next day: the stop
+    assert _pass(conn, 132, hit, sent) == (0, 1)
+    [t] = day.trades(conn, "WHERE idea = 'OPEN-RANGE'")
+    assert (t.reason, t.exit_price) == ("stop", 1.0)
+    assert t.result_r == pytest.approx(-1 - 0.8e-4 / 0.0015 - 0.010 / 100 * 1.0015 / 0.0015)      # one night
+
+
+def test_an_idea_waits_for_its_open_trade(conn):
+    first = day.make(conn, day.Signal("BRK-15", "EURUSD", "long", "2026-10-12", 1.0), bars(31)[-1], 0.002)
+    assert first is not None
+    assert day.make(conn, day.Signal("BRK-15", "EURUSD", "long", "2026-10-13", 1.0), bars(31)[-1], 0.002) is None
+    assert day.make(conn, day.Signal("ASIA-SWEEP", "EURUSD", "long", "2026-10-13", 1.0), bars(31)[-1], 0.002)
 
 
 def test_no_signal_after_five_and_nothing_on_a_weekend_or_from_old_bars(conn):

@@ -34,6 +34,7 @@ NEWS_GAP = dt.timedelta(minutes=30)          # no entry this near a high-importa
 CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
 ASIA_HOURS, SWEEP_WINDOW = 6, 3
 WEEKS, MIN_TRADES = 4, 20
+NIGHT_PCT = 0.010                            # A3: financing a calendar night held, % of the price
 STALE = dt.timedelta(minutes=30)             # a last bar older than this: the market is shut or the feed late
 START_KEY, QUIET_KEY, FINAL_KEY, DAY_KEY = "day_league_start", "day_league_quiet", "day_league_final", "day_league_{day}"
 _FOREVER = 100 * 365 * 24 * 3600
@@ -106,10 +107,11 @@ class Signal:
 
 
 def make(conn, sig: Signal, bar: Bar, atr: float) -> Trade | None:
-    """The paper trade of a signal made on `bar`, kept as `pending`; None when it was made before."""
-    if conn.execute("SELECT 1 FROM day_trades WHERE idea = ? AND pair = ? AND ref = ?",
+    """The paper trade of a signal made on `bar`, kept as `pending`; None when it was made before or the
+    idea's last trade in that market is not closed."""
+    if conn.execute("SELECT 1 FROM day_trades WHERE idea = ? AND pair = ? AND (ref = ? OR status != 'closed')",
                     (sig.idea, sig.pair, sig.ref)).fetchone():
-        return None
+        return None                      # said before, or the idea still has a trade in the market (A3)
     cur = conn.execute(
         "INSERT INTO day_trades (idea, pair, symbol, side, ref, signal_ts, atr, stop_price, target_r, target_price, "
         "status, created) VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?)",
@@ -154,19 +156,20 @@ def _close(t: Trade, ts: dt.datetime, price: float, reason: str) -> None:
     t.realized += t.remaining * _r(t, price)
     t.remaining = 0.0
     t.status, t.exit_ts, t.exit_price, t.reason = "closed", ts.isoformat(), price, reason
-    t.result_r = t.realized - cost_r(t)
+    nights = (ts.date() - dt.datetime.fromisoformat(t.entry_ts).date()).days
+    t.result_r = t.realized - cost_r(t) - nights * NIGHT_PCT / 100.0 * t.entry / abs(t.entry - t.stop_price)
 
 
 def _void(t: Trade, ts: dt.datetime, price: float) -> None:
     t.status, t.exit_ts, t.exit_price, t.reason, t.result_r = "closed", ts.isoformat(), price, "void", 0.0
 
 
-def _enter(t: Trade, ts: dt.datetime, open_: float, flat: dt.datetime) -> bool:
+def _enter(t: Trade, ts: dt.datetime, open_: float) -> bool:
     """Fill a pending trade at a bar's open, or void it (DAY_LEAGUE.md, «No trade»)."""
     sign = 1 if t.side == "long" else -1
     t.entry_ts, t.entry = ts.isoformat(), open_
     distance = sign * (open_ - t.stop_price)
-    if ts >= flat or distance <= 0 or distance > MAX_R_ATR * t.atr or cost_r(t) > MAX_COST_R:
+    if distance <= 0 or distance > MAX_R_ATR * t.atr or cost_r(t) > MAX_COST_R:
         _void(t, ts, open_)
         return False
     t.status, t.stop, t.stage, t.remaining, t.realized = "open", t.stop_price, 0, 1.0, 0.0
@@ -175,26 +178,23 @@ def _enter(t: Trade, ts: dt.datetime, open_: float, flat: dt.datetime) -> bool:
 
 def advance(t: Trade, bars: Sequence[Bar], forming: Bar | None, now: dt.datetime) -> list[str]:
     """Move a trade through the bars it has not seen: fill a pending one at the open of the bar after its
-    signal bar, then, bar by bar, the 18:00 exit at the open, a gap through the stop at the open, the
-    stop inside the bar, then the take-profits the bar reached: a third of the position at each of
-    TP1..TP3, the stop to the entry after TP1 and to TP1 after TP2 (it acts from the next bar). Of the
-    forming bar only the open is known: it can fill, and it can end the day. Returns the events in order:
-    "open", "tp:K", "close"."""
+    signal bar, then, bar by bar, a gap through the stop at the open, the stop inside the bar, then the
+    take-profits the bar reached: a third of the position at each of TP1..TP3, the stop to the entry
+    after TP1 and to TP1 after TP2 (it acts from the next bar). There is no time exit (A3): a trade
+    lives until its stop or TP3, overnight and over a weekend. Of the forming bar only the open is known:
+    it can fill. Returns the events in order: "open", "tp:K", "close"."""
     events = []
     sign = 1 if t.side == "long" else -1
     signal_ts = dt.datetime.fromisoformat(t.signal_ts)
-    flat = _at(local(signal_ts).date(), FLAT_AT)
     seen = dt.datetime.fromisoformat(t.last_ts or t.signal_ts)
     for bar, done in [(b, True) for b in bars if b.ts > seen] + ([(forming, False)] if forming else []):
         if bar.ts <= signal_ts or t.status == "closed":
             continue
         if t.status == "pending":
-            if _enter(t, bar.ts, bar.open, flat):
+            if _enter(t, bar.ts, bar.open):
                 events.append("open")
         elif bar.ts > dt.datetime.fromisoformat(t.entry_ts):
-            if bar.ts >= flat:
-                _close(t, bar.ts, bar.open, "time")
-            elif sign * (bar.open - t.stop) <= 0:
+            if sign * (bar.open - t.stop) <= 0:
                 _close(t, bar.ts, bar.open, "stop")
         if done and t.status == "open":
             if sign * ((bar.low if sign > 0 else bar.high) - t.stop) <= 0:
@@ -213,10 +213,6 @@ def advance(t: Trade, bars: Sequence[Bar], forming: Bar | None, now: dt.datetime
                         t.stop = t.entry if t.stage == 1 else level(t, t.stage - 1)
         if done:
             t.last_ts = bar.ts.isoformat()
-    if t.status == "pending" and now >= flat:
-        _void(t, now, t.stop_price)
-    elif t.status == "open" and now >= flat + STALE and bars:      # the feed stopped before 18:00: the last close
-        _close(t, flat, bars[-1].close, "time")
     if t.status == "closed" and t.reason != "void":
         events.append("close")
     return events
@@ -405,14 +401,16 @@ def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None
 
 
 def _boards(conn, here: dt.datetime, send: Send) -> None:
-    """The scoreboard once a day, after 18:00 on a day that had trades and none is left open; the final
-    one once, when the four weeks are over."""
-    if live_trades(conn) or db.get_cached_value(conn, START_KEY, _FOREVER) is None:
+    """The scoreboard once a day, after 18:00 on a day a trade closed; the final one once, when the four
+    weeks are over and no trade is left open."""
+    if db.get_cached_value(conn, START_KEY, _FOREVER) is None:
         return
     import telegram_notify
     today = here.date()
     over = today >= end_date(conn, today)
     if over:
+        if live_trades(conn):
+            return
         if not db.get_cached_value(conn, FINAL_KEY, _FOREVER) and (closed_trades(conn) or today > end_date(conn, today)):
             if send(telegram_notify.format_day_board(scoreboard(conn, today), final=True)):
                 db.save_cached_value(conn, FINAL_KEY, 1.0)
