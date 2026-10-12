@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 import db
-from cfd import data, mt5_bridge, research_abc
+from cfd import data, mt5_bridge, paper, research_abc, sizing
 from cfd import indicators as ind
 from cfd.data import Bar
 
@@ -126,6 +126,8 @@ def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None
                 old = trades(conn, "WHERE pair = ? AND ref = ?", (pair, ref))
                 live = new["status"] in ("pending", "open")
                 if not old:
+                    if live and paper.stopped(conn, paper.key_of("SK", pair)):
+                        continue                         # the market is retired (paper.STOP_R): no new orders
                     scored = int(not first_run or live)
                     conn.execute(
                         "INSERT INTO sk_trades (pair, ref, side, entry, stop, target, order_ts, status, fill_ts, "
@@ -147,7 +149,8 @@ def run(conn, *, now: dt.datetime | None = None, fetch: data.Fetch | None = None
                     continue
                 stamp = dt.datetime.fromisoformat(t.exit_ts or t.fill_ts or t.order_ts)
                 if before is None and live:                     # a new order (or, at the start, one in force)
-                    sent += bool(send(telegram_notify.format_sk_order(t)))
+                    sent += bool(send(telegram_notify.format_sk_order(
+                        t, lots=sizing.lots(conn, t.pair, t.entry, t.stop))))
                     if t.status == "open":
                         sent += bool(send(telegram_notify.format_sk_event(t)))
                 elif before is not None and now - stamp <= FRESH:

@@ -1366,7 +1366,7 @@ def _league_plain(t, x: float) -> str:
     return f"{x:.{3 if ins.by_symbol(t.symbol).quote == 'JPY' else 5}f}"
 
 
-def format_league_opens(trades: list, *, html: bool = True) -> str:
+def format_league_opens(trades: list, *, lots: dict | None = None, html: bool = True) -> str:
     """The paper trades opened in one pass as one message, nothing but what is needed to place them: a
     block per trade -- the pair and the side, the entry, the stop and TP1..TP4 -- in a fixed-width font,
     one value a line (a row of eight columns does not fit a phone's screen)."""
@@ -1379,8 +1379,10 @@ def format_league_opens(trades: list, *, html: bool = True) -> str:
             rows += [(f"TP{k}", league.level(t, k)) for k in marks] + [(f"TP{len(marks) + 1}", league.target_of(t))]
         else:
             rows += [(f"TP{k}", league.level(t, k)) for k in range(1, league.CHECKPOINTS + 1)]
+        size = (lots or {}).get(t.id)                # the lot size, when /risk is set (cfd/sizing.py)
         blocks.append("\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD test"]
-                                + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]))
+                                + [f"{name:<6}{_league_plain(t, value)}" for name, value in rows]
+                                + ([f"Lots  {size}"] if size else [])))
     text = "\n\n".join(blocks)
     return f"<pre>{_esc(text)}</pre>" if html else text
 
@@ -1565,12 +1567,12 @@ def _sk_price(pair: str, x: float) -> str:
     return f"{x:.{3 if pair.endswith('JPY') else 2 if x >= 100 else 5}f}"
 
 
-def format_sk_order(t, *, html: bool = True) -> str:
+def format_sk_order(t, *, lots: str | None = None, html: bool = True) -> str:
     """A limit order of the SK rule as a bare block: the market, the side and the strategy, the entry, the
-    stop and the target."""
+    stop and the target, and the lot size when /risk is set (cfd/sizing.py)."""
     text = "\n".join([f"{t.pair} {'Buy' if t.side == 'long' else 'Sell'} limit · CFD · SK",
                       f"Entry {_sk_price(t.pair, t.entry)}", f"Stop  {_sk_price(t.pair, t.stop)}",
-                      f"TP    {_sk_price(t.pair, t.target)}"])
+                      f"TP    {_sk_price(t.pair, t.target)}"] + ([f"Lots  {lots}"] if lots else []))
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
@@ -1602,6 +1604,47 @@ def format_sk_board(trades: list, start, *, html: bool = True) -> str:
         if t.status in ("pending", "open"):
             lines += ["", f"{t.pair} {'Buy' if t.side == 'long' else 'Sell'} · {'open' if t.status == 'open' else 'limit'}",
                       f"{_sk_price(t.pair, t.entry)}  SL {_sk_price(t.pair, t.stop)}  TP {_sk_price(t.pair, t.target)}"]
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+# ------------------------------------------------------------------ the MetaTrader account and costs (cfd/mt5_bridge.py)
+def format_mt5(account, positions: list, closed: list, now, *, html: bool = True) -> str:
+    """The user's MetaTrader account as the bridge reports it: the balance and equity, what is open, and the
+    closed trades of 7 and 30 days after commission and swap."""
+    if not account:
+        text = ("MT5: no account data. Attach BotBridge 1.10 to a chart in MetaTrader 5.")
+        return f"<pre>{_esc(text)}</pre>" if html else text
+    cur = account["currency"]
+    lines = [f"MT5 {cur} {account['balance']:,.2f} · equity {account['equity']:,.2f}"]
+    if positions:
+        lines.append("Open")
+        for p in positions:
+            levels = "".join(f"  {k} {_sk_price(p['symbol'], p[v])}" for k, v in (("SL", "sl"), ("TP", "tp")) if p[v])
+            lines.append(f"{p['symbol']} {p['side']} {p['volume']:.2f}  {_sk_price(p['symbol'], p['price'])}{levels}  "
+                         f"{p['profit']:+.2f}")
+    for days in (7, 30):
+        rows = [c for c in closed if c["at"] and (now - c["at"]).days < days]
+        won = sum(1 for c in rows if c["net"] > 0)
+        lines.append(f"Closed {days:>2}d  {sum(c['net'] for c in rows):+.2f}  {len(rows)} trades, {won} won")
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_spreads(costs: dict, assumed: dict, *, html: bool = True) -> str:
+    """The measured round-trip cost of each market the bridge carries beside what the tests assumed."""
+    lines = [f"{'':<7}{'spread':>8} {'+comm':>8} {'assumed':>8} {'now':>8}"]
+    floors = False
+    for name, c in costs.items():
+        if not c:
+            lines.append(f"{name:<7} no data")
+            continue
+        digits = 2 if name.startswith("XA") else 5
+        floors = floors or c.get("floor", False)
+        lines.append(f"{name:<7}{c['spread']:>8.{digits}f} {c['round_trip']:>8.{digits}f} "
+                     f"{assumed.get(name, 0.0):>8.{digits}f} {c['live']:>8.{digits}f}" + ("*" if c.get("floor") else ""))
+    if floors:
+        lines.append("* lowest spread per bar; live samples are being collected")
     text = "\n".join(lines)
     return f"<pre>{_esc(text)}</pre>" if html else text
 

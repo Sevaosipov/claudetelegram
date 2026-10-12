@@ -137,3 +137,9 @@ The USDCAD trade is void (never a result), as a trade the rules would not make.
 The CFTC site began refusing scripted downloads of its yearly archives (403), so the league reads the same legacy
 futures-only report from the CFTC's public reporting API. Checked on 364 rows of 2025: every value is the same. The
 rules are unchanged.
+
+## Amendment A6 (2026-10-12): an idea is retired at -10R
+
+An idea whose closed trades sum to -10R or worse makes no new trades (cfd/paper.py): from there a pass within the
+13 weeks is implausible and the answer is known. Its open trades run to their end and its row stays on the board,
+marked «stopped». No idea was near the line when this was written (every idea at 0.00R, none closed).

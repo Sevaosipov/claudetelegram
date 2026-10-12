@@ -103,6 +103,7 @@ import telegram_notify
 from cfd import intraday as cfd_intraday
 from cfd import league as cfd_league
 from cfd import sk_live as cfd_sk
+from cfd import sizing as cfd_sizing
 from cfd import live as cfd_live
 from cfd import plan as cfd_plan
 
@@ -155,6 +156,12 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
              "/sk — стратегия SK (последовательность 0-A-B-C) на бумаге: лимитные заявки по EURUSD и золоту "
              "на 4-часовых свечах (/sk off — без сообщений).\n"
+             "/risk — сколько евро можно потерять на одной CFD-сделке (/risk 10): в сигналах появится "
+             "размер в лотах для IC Markets.\n"
+             "/mt5 — счёт MetaTrader 5: баланс, открытые позиции, результат закрытых сделок за 7 и 30 дней.\n"
+             "/spread — измеренная стоимость сделки (спред и комиссия) по данным MetaTrader.\n"
+             "/paper — все бумажные тесты CFD на одной доске (приходит и по понедельникам); идея, "
+             "ушедшая в −10R, останавливается сама.\n"
              "/day — дневная бумажная лига: внутридневные CFD-сделки 09:00–18:00, тест на 4 недели "
              "(/day off — без сообщений о сделках).\n"
              "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
@@ -238,6 +245,57 @@ def _handle_day_command(conn, text: str) -> bool:
     except Exception as e:
         print(f"[telegram_bot] /day failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось выполнить /day ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_risk_command(conn, text: str) -> bool:
+    """/risk: the euros a CFD trade may lose, from which a signal's lot size is worked out (cfd/sizing.py).
+    Returns False for any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/risk":
+        return False
+    try:
+        telegram_notify.send_text(telegram_notify._esc(cfd_sizing.handle_command(conn, text)))
+    except Exception as e:
+        print(f"[telegram_bot] /risk failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /risk ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_paper_command(conn, text: str) -> bool:
+    """/paper: every paper test on one board (cfd/paper.py). Returns False for any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/paper":
+        return False
+    try:
+        from cfd import paper
+        telegram_notify.send_text(paper.board(conn, dt.date.today()))
+    except Exception as e:
+        print(f"[telegram_bot] /paper failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /paper ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_mt5_command(conn, text: str) -> bool:
+    """/mt5: the MetaTrader account as the bridge reports it; /spread: the measured costs. Returns False for
+    any other message."""
+    from cfd import mt5_bridge
+    parts = text.split()
+    command = parts[0].lower().split("@")[0] if parts else ""
+    if command not in ("/mt5", "/spread"):
+        return False
+    try:
+        if command == "/mt5":
+            telegram_notify.send_text(telegram_notify.format_mt5(
+                mt5_bridge.account(), mt5_bridge.open_positions(), mt5_bridge.closed_trades(),
+                dt.datetime.now(dt.timezone.utc)))
+        else:
+            telegram_notify.send_text(telegram_notify.format_spreads(
+                {name: mt5_bridge.measured_cost(name, conn=conn) for name in cfd_sk.MARKETS},
+                {name: cost for name, (_symbol, cost, _night) in cfd_sk.MARKETS.items()}))
+    except Exception as e:
+        print(f"[telegram_bot] {command} failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить {command} ({type(e).__name__}). Попробуйте позже.")
     return True
 
 
@@ -752,7 +810,8 @@ def _handle_message(conn, text: str) -> None:
     text = (text or "").strip()
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
             or _handle_size_command(conn, text) or _handle_league_command(conn, text)
-            or _handle_day_command(conn, text) or _handle_sk_command(conn, text)
+            or _handle_day_command(conn, text) or _handle_sk_command(conn, text) or _handle_risk_command(conn, text)
+            or _handle_mt5_command(conn, text) or _handle_paper_command(conn, text)
             or _handle_watch_command(conn, text) or _handle_signals_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
@@ -824,6 +883,15 @@ def _day_league(conn) -> None:
         print(f"[telegram_bot] day league failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+def _sample_spreads(conn) -> None:
+    """Store the live spreads the MetaTrader bridge quotes (cfd/mt5_bridge.py). A failure is logged."""
+    try:
+        from cfd import mt5_bridge
+        mt5_bridge.sample_spreads(conn)
+    except Exception as e:
+        print(f"[telegram_bot] spread sample failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _sk_pass(conn) -> None:
     """One pass of the SK paper run (cfd/sk_live.py). Whatever it raises is logged and the polling goes on."""
     try:
@@ -862,6 +930,7 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
         if now % DAY_BAR_SECONDS >= DAY_BAR_LAG and int(now // DAY_BAR_SECONDS) != day_slot:
             day_slot = int(now // DAY_BAR_SECONDS)
             _day_league(conn)
+            _sample_spreads(conn)
             if int(now // 3600) != sk_hour:                 # the SK rule reads four-hour bars: once an hour
                 sk_hour = int(now // 3600)
                 _sk_pass(conn)

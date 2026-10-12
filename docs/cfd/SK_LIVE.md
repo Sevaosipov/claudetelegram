@@ -16,3 +16,4 @@ runs on paper so the user can watch the method work in real time; the tests are 
   the four-hour bars, so a fill or a close is told up to four hours after it happened; an order placed with its
   stop and target at the broker needs no faster news.
 - `/sk` shows the results since the start and the orders in force; `/sk off` mutes the messages.
+- **Stop rule (cfd/paper.py):** a market whose closed trades sum to -10R or worse gets no new orders.

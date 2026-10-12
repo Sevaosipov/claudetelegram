@@ -716,7 +716,7 @@ def main_run(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "DB_PATH", tmp_path / "data" / "d.db")
     monkeypatch.setattr(bot, "LOG_PATH", tmp_path / "data" / "bot.log")
     for name in ("run_sec_pass", "run_stake_pass", "run_144_pass", "run_house_pass",
-                 "run_bafin_pass", "run_norway_pass", "run_sweden_pass", "run_uk_pass", "run_senate_pass",
+                 "run_bafin_pass", "run_norway_pass", "run_sweden_pass", "run_uk_pass", "_paper_pass", "run_senate_pass",
                  "run_crypto_treasury_pass", "run_crypto_etf_pass", "run_farside_pass",
                  "run_onchain_pass"):
         monkeypatch.setattr(bot, name, lambda *a, **kw: 0)
