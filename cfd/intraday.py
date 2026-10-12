@@ -27,6 +27,7 @@ ENTRY_FROM, ENTRY_UNTIL, FLAT_AT = dt.time(9), dt.time(17), dt.time(18)
 MARKETS = ("EURUSD",)                        # amendment A1: EURUSD first
 OPEN_RANGE_MARKETS = MARKETS
 IDEAS = {"OPEN-RANGE": "Open range", "BRK-15": "Retest", "ASIA-SWEEP": "Asia sweep"}
+ACTIVE = ("OPEN-RANGE",)                     # A4: the ideas that make new trades
 MAX_R_ATR, MAX_COST_R = 4.0, 0.25
 TARGET_R = 2.0                               # the rule before A1; a signal still names it
 LEVELS = 3                                   # TP1..TP3 = +1R..+3R, a third of the position at each (A1)
@@ -282,7 +283,7 @@ def asia_sweep(pair: str, bars: Sequence[Bar]) -> list[Signal]:
 def signals(pair: str, bars: Sequence[Bar]) -> list[Signal]:
     out = []
     for name, idea in (("OPEN-RANGE", open_range), ("BRK-15", brk_15), ("ASIA-SWEEP", asia_sweep)):
-        if name == "OPEN-RANGE" and pair not in OPEN_RANGE_MARKETS:
+        if name not in ACTIVE or (name == "OPEN-RANGE" and pair not in OPEN_RANGE_MARKETS):
             continue
         try:
             out += idea(pair, bars)

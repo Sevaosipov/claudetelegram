@@ -70,3 +70,8 @@ trade now lives until its stop or TP3, overnight and over a weekend.
 For the record: holding these entries longer was tested before this change (REPORT_SWING_EURUSD.md) and did not
 help. The two trades of 12 October stay scored as they closed.
 
+## Amendment A4 (2026-10-12, after the first day; no trade open)
+
+The user chose to go on with OPEN-RANGE alone: BRK-15 and ASIA-SWEEP make no new trades. Their trades so far stay
+on the board.
+
