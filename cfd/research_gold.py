@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import lzma
 import struct
-import time
 from pathlib import Path
 
 from cfd import research4 as r4
@@ -15,35 +14,32 @@ UTC = dt.timezone.utc
 FIRST_YEAR = 2010
 
 
-def load_gold(first_year: int = FIRST_YEAR, today: dt.date | None = None, cache_dir: Path = r4.CACHE_DIR,
-              pause: float = 1.5, log=None) -> list[Bar]:
-    """Dukascopy's hourly bid candles of XAUUSD in UTC, the hours with no volume left out; a past month is
-    kept once fetched, the running month is not asked for."""
-    today = today or dt.date.today()
+MT5_FROM = 2016                  # amendment A1: from here the broker's own hourly bars
+
+
+def _duka_month(path: Path, year: int, month: int) -> list[Bar]:
+    raw = lzma.decompress(path.read_bytes())
+    start = dt.datetime(year, month, 1, tzinfo=UTC)
+    out = []
+    for k in range(len(raw) // 24):
+        secs, o, c, low, high, volume = struct.unpack(">5if", raw[k * 24:(k + 1) * 24])
+        if volume > 0 and low > 0:
+            out.append(Bar(start + dt.timedelta(seconds=secs), o / 1e3, high / 1e3, low / 1e3, c / 1e3))
+    return out
+
+
+def load_gold(cache_dir: Path = r4.CACHE_DIR) -> list[Bar]:
+    """Hourly XAUUSD in UTC: Dukascopy's bid candles 2010-2015 (the months fetched, the hours with no
+    volume left out), then the hourly history of the user's MetaTrader 5 terminal (cfd/mt5_bridge.py)."""
+    from cfd import mt5_bridge
     bars: list[Bar] = []
-    for year in range(first_year, today.year + 1):
+    for year in range(FIRST_YEAR, MT5_FROM):
         for month in range(1, 13):
-            if (year, month) >= (today.year, today.month):
-                break
             path = cache_dir / "duka" / f"XAUUSD_{year}_{month:02d}.bi5"
-            if not path.exists():
-                body = r4._get(f"https://datafeed.dukascopy.com/datafeed/XAUUSD/{year}/{month - 1:02d}/"
-                               "BID_candles_hour_1.bi5")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(body or b"")
-                if log:
-                    log(f"{path.name} {len(body or b'')}")
-                time.sleep(pause)
-            body = path.read_bytes()
-            if not body:
-                continue
-            raw = lzma.decompress(body)
-            start = dt.datetime(year, month, 1, tzinfo=UTC)
-            for k in range(len(raw) // 24):
-                secs, o, c, low, high, volume = struct.unpack(">5if", raw[k * 24:(k + 1) * 24])
-                if volume > 0 and low > 0:
-                    bars.append(Bar(start + dt.timedelta(seconds=secs), o / 1e3, high / 1e3, low / 1e3, c / 1e3))
-    return bars
+            if path.exists() and path.stat().st_size:
+                bars += _duka_month(path, year, month)
+    hourly_from = dt.datetime(MT5_FROM, 1, 18, tzinfo=UTC)          # before it the terminal has one bar a day
+    return bars + [b for b in mt5_bridge.history("XAUUSD", "H1") if b.ts >= hourly_from]
 
 
 # ================================================================ the search (PREREGISTRATION_GOLD.md)
