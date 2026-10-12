@@ -103,3 +103,18 @@ them; if it is chance, it falls back to zero.
 - **Design 2021-2024,** all markets together: at least 500 trades, 3 of the 4 years up, at least 5 of the 7 markets
   up, t at least 2.5. Then, only if it passes, **once on 2025-01-01 on:** sum above zero, both years above zero, at
   least 5 of the 7 markets up.
+
+## Round 7 (2026-10-12, before the run): Open range and SK together
+
+The user asked what happens if SK works inside the current strategy. As rules: the **Open range** trade of the day
+league as it runs (15-minute bars, the first close outside London's first hour, stop at the range's middle, thirds
+at 1R-2R-3R with the stop moved up, no time exit) is taken **only when the SK sequence agrees**:
+
+- **ACTIVE:** an SK sequence of the same direction is in force on the 1-hour chart at that moment -- its order is
+  waiting or its trade is open (the live rule: 300 bars, structure shift, 61.8 % entry, stop at point 0, out at A).
+- **LAST:** the most recent SK order on the 1-hour chart, whatever became of it, was in the same direction.
+- For scale: Open range **alone**, and Open range only when SK **disagrees** (the opposite of LAST).
+
+Seven currency pairs (FXCM minute candles), 2021-2024, costs as in round 6. **Choice** between ACTIVE and LAST: at
+least 300 trades, 3 of the 4 years up, 5 of the 7 markets up, t at least 2.5; the higher t. **Verdict,** once, on
+2025-01-01 on: sum above zero, both years above zero, 5 of the 7 markets up.
