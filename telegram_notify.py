@@ -1550,6 +1550,52 @@ def format_day_board(board, *, day=None, final: bool = False, html: bool = True)
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
+# ------------------------------------------------------------------ the SK sequence on paper (cfd/sk_live.py)
+def _sk_price(pair: str, x: float) -> str:
+    return f"{x:.{3 if pair.endswith('JPY') else 2 if x >= 100 else 5}f}"
+
+
+def format_sk_order(t, *, html: bool = True) -> str:
+    """A limit order of the SK rule as a bare block: the market, the side and the strategy, the entry, the
+    stop and the target."""
+    text = "\n".join([f"{t.pair} {'Buy' if t.side == 'long' else 'Sell'} limit · CFD · SK",
+                      f"Entry {_sk_price(t.pair, t.entry)}", f"Stop  {_sk_price(t.pair, t.stop)}",
+                      f"TP    {_sk_price(t.pair, t.target)}"])
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_sk_event(t, *, html: bool = True) -> str:
+    """What became of an SK order, in a line: «EURUSD SK filled 1.12050», «EURUSD SK cancelled», «EURUSD SK
+    TP 1.12400 +1.5R», «EURUSD SK stop 1.11800 -1.1R»."""
+    if t.status == "open":
+        text = f"{t.pair} SK filled {_sk_price(t.pair, t.fill_price)}"
+    elif t.status == "cancelled":
+        text = f"{t.pair} SK cancelled"
+    elif t.status == "closed":
+        won = (t.result_r or 0.0) > 0
+        text = f"{t.pair} SK {'TP' if won else 'stop'} {_sk_price(t.pair, t.target if won else t.stop)} {t.result_r:+.1f}R"
+    else:
+        text = f"{t.pair} SK waiting at {_sk_price(t.pair, t.entry)}"
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
+def format_sk_board(trades: list, start, *, html: bool = True) -> str:
+    """The SK paper run: a row per market -- R the sum after costs, Cl the trades closed, W the winners --
+    then the orders waiting and the trades open."""
+    lines = [f"SK since {start:%d.%m}", f"{'':<7}{'R':>6} {'Cl':>3} {'W':>3}"]
+    pairs = sorted({t.pair for t in trades}) or ["EURUSD", "XAUUSD"]
+    done = [t for t in trades if t.status == "closed"]
+    for name, rows in [(p, [t for t in done if t.pair == p]) for p in pairs] + [("Total", done)]:
+        lines.append(f"{name:<7}{sum(t.result_r for t in rows):>+6.2f} {len(rows):>3} "
+                     f"{sum(1 for t in rows if t.result_r > 0):>3}")
+    for t in trades:
+        if t.status in ("pending", "open"):
+            lines += ["", f"{t.pair} {'Buy' if t.side == 'long' else 'Sell'} · {'open' if t.status == 'open' else 'limit'}",
+                      f"{_sk_price(t.pair, t.entry)}  SL {_sk_price(t.pair, t.stop)}  TP {_sk_price(t.pair, t.target)}"]
+    text = "\n".join(lines)
+    return f"<pre>{_esc(text)}</pre>" if html else text
+
+
 LEAGUE_NAMES = {"COT-WITH": "Speculators", "RATE-MOM": "Rates", "CMD-LEAD": "Commodities",
                 "MONTH-END": "Month-end", "BRK-RETEST": "Retest", "RNG-DEV": "Deviation"}
 

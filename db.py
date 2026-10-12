@@ -701,6 +701,27 @@ CREATE TABLE IF NOT EXISTS day_trades (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS day_trades_ref ON day_trades(idea, pair, ref);
 
+-- The SK sequence on paper (cfd/sk_live.py, docs/cfd/SK_LIVE.md): one row per limit order the rule placed.
+-- The bot never places an order.
+CREATE TABLE IF NOT EXISTS sk_trades (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair       TEXT NOT NULL,              -- EURUSD
+    ref        TEXT NOT NULL,              -- the bars of point 0 and of A, and the side
+    side       TEXT NOT NULL,              -- long | short
+    entry      REAL NOT NULL,              -- the limit
+    stop       REAL NOT NULL,
+    target     REAL NOT NULL,
+    order_ts   TEXT NOT NULL,              -- UTC end of the bar that made the order
+    status     TEXT NOT NULL,              -- pending | open | closed | cancelled
+    fill_ts    TEXT,
+    fill_price REAL,
+    exit_ts    TEXT,
+    result_r   REAL,                       -- after costs
+    scored     INTEGER NOT NULL DEFAULT 0, -- 1: ordered after the paper run began, counts on the board
+    created    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS sk_trades_ref ON sk_trades(pair, ref);
+
 -- The user's own CFD trades (cfd/plan.py, /cfd plan): one row per trade the user told the bot about, followed
 -- through its four take-profit stages to its close. The bot never places an order.
 CREATE TABLE IF NOT EXISTS cfd_plans (

@@ -216,3 +216,12 @@ def _no_real_caches_or_mirror(monkeypatch, tmp_path):
     monkeypatch.setattr(upkeep, "ICLOUD_DRIVE", tmp_path / "no-cloud")
     monkeypatch.delenv(upkeep.MIRROR_ENV, raising=False)
 
+
+@pytest.fixture(autouse=True)
+def no_real_terminal(monkeypatch):
+    """The MetaTrader bridge's files on this machine are not the tests' business: a test that wants bridge
+    files names its own folder (MT5_BRIDGE_DIR, or the `folder` argument)."""
+    from cfd import mt5_bridge
+    monkeypatch.setattr(mt5_bridge, "_MAC", "/nonexistent/disclosure-bot/botbridge")
+    monkeypatch.delenv("MT5_BRIDGE_DIR", raising=False)
+

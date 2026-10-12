@@ -19,12 +19,16 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
            stop_at: float, thirds: bool, look: int = LOOK, stop_atr: float | None = None,
            targets: tuple | None = None, trend: list | None = None, cost: float = COST,
            night_pct: float = NIGHT_PCT, break_k: int = 0, c_target: str | None = None,
-           cci: list | None = None, stop_fixed: float | None = None) -> list[tuple[int, float]]:
+           cci: list | None = None, stop_fixed: float | None = None,
+           log: list | None = None) -> list[tuple[int, float]]:
     """(year, result in R after costs) of one side's trades; `sign` +1 long, -1 short (prices mirrored).
     `stop_at` is the retracement the stop sits at: 1.0 is point 0, more is beyond it; with `stop_atr` the
     stop is that many ATR from the entry instead. `look` bars make «an absolute low». `targets` (round 3) are
     the exits as multiples of 0-A from point 0, an equal share at each; `trend` an average the close must be
-    above (mirrored) for a setup to count."""
+    above (mirrored) for a setup to count. With `log` (cfd/sk_live.py) what happens is appended to it as
+    it happens -- ("order", bar, bar of 0, bar of A, entry, stop, target), ("cancel", bar), ("void", bar),
+    ("fill", bar, price), ("exit", bar, result in R) -- prices mirrored as here; and the replay stops at a
+    trade the bars leave open."""
     hi = [sign * (b.high if sign > 0 else b.low) for b in bars]
     lo = [sign * (b.low if sign > 0 else b.high) for b in bars]
     op = [sign * b.open for b in bars]
@@ -50,6 +54,8 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
             break
         fills = bool(order) and i > since and lo[i] <= order[0]
         if not fills and lo[i] <= min(lo[i - look + 1:i + 1]):   # a new extreme: a new point 0
+            if order and log is not None:
+                log.append(("cancel", i))
             zero, top, order = lo[i], hi[i], None
             zero_i = top_i = i
             barrier = last_swing[i]                              # the lower high a structure shift must break
@@ -67,6 +73,8 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
             entry = min(entry, op[i])                            # a gap under the limit: the open
             order = None
             r = entry - stop
+            if log is not None:
+                log.append(("fill", i, entry) if r > 0 and cost / r <= MAX_COST_R else ("void", i))
             if r > 0 and cost / r <= MAX_COST_R:
                 got, j = _run(bars, hi, lo, op, i, entry, stop, levels, thirds,
                               even=targets is not None or c_target is not None)
@@ -74,13 +82,19 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
                     nights = (bars[j].ts.date() - bars[i].ts.date()).days
                     out.append((day.local(bars[i].ts).year,
                                 got - (cost + nights * night_pct / 100.0 * abs(entry)) / r))
+                    if log is not None:
+                        log.append(("exit", j, out[-1][1]))
                     zero = top = None                            # the sequence is spent
                     i = j + 1
                     continue
+                if log is not None:
+                    break                                        # the trade is still open: nothing after it yet
             zero = top = None                                    # filled, or refused for its cost: spent
             i += 1
             continue
         if hi[i] > top:
+            if order and log is not None:
+                log.append(("cancel", i))
             top, order, top_i = hi[i], None, i                   # a new A is forming
         size = top - zero
         with_trend = trend is None or (trend[i] is not None and sign * bars[i].close > sign * trend[i])
@@ -101,6 +115,8 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
                               "C161": [entry + 1.618 * size]}[c_target]
                 order = (entry, stop, levels)
                 since = i
+                if log is not None:
+                    log.append(("order", i, zero_i, top_i, entry, stop, levels[0]))
         i += 1
     return out
 
