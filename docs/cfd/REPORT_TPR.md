@@ -22,3 +22,11 @@ sequence counts only after price has broken the last lower high. With that condi
 12 candidates: **none qualified.** Two were slightly above zero -- four-hour bars, out at A: +0.065R a trade on 492
 trades at the 61.8 % entry (t 1.1, four years of eight up, 2017-2019 all down). The other ten lost. The hold-out
 was not run.
+
+## Round 3: the English SK System course -- the CCI check and stops inside the zone (2026-10-12)
+
+Eight markets, 2012-2019, 26 candidates: **none qualified;** 24 lost, two were at zero (+0.01R and +0.02R a trade,
+t 0.1). The CCI check on points 0 and A changed nothing that matters: round 1's least bad rule went from -0.025R
+to +0.009R a trade on a third of the trades. The stops inside the 50-66.7 % zone are the worst thing tried on this
+method: they are hit nine times in ten (5-10 % of the trades win), and the few large wins do not pay for it --
+down to -0.46R a trade. The hold-out was not run.

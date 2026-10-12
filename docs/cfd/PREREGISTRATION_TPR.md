@@ -42,3 +42,13 @@ in the «golden zone» of 0-A, the target is C. As rules, on the eight markets a
 only if A is above the last swing high confirmed before point 0 (a swing high: a bar's high above the three bars
 either side). Entry 50 % or 61.8 %; stop at point 0; target A, or C = the entry plus 0-A, or half at each;
 one-hour or four-hour bars: **12 candidates**. Choice and verdict as above.
+
+## Round 3 (2026-10-12, before the run): the English SK System course
+
+A second playlist (LogicaTrading, eight short episodes; six could be read) gives two things not tested yet. **The
+CCI check:** point 0 is right when CCI(20) is beyond 100 on its side (under -100 at a low, above +100 at a high)
+and A when it is beyond 100 on the other. **Entries inside the 50-66.7 % zone with the stop at the zone's next
+level:** entry 50 % with the stop at 66.7 %, entry 55.9 % with the stop at 61.8 %, entry 61.8 % with the stop at
+66.7 %. Candidates, eight markets, 2012-2019: those three entry-and-stop pairs x target A or C x CCI on or off x
+one-hour or four-hour bars (24), and the CCI check on round 1's least bad rule (entry 61.8 %, stop at point 0,
+out at A) on both bar sizes (2): **26**. Choice and verdict as above.
