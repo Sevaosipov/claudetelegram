@@ -30,6 +30,12 @@ def bars(n: int, special=None, start: int = 0) -> list[Bar]:
     return [Bar(dt.datetime.fromisoformat(r[0]), *r[1:]) for r in rows(n, special, start)]
 
 
+@pytest.fixture(autouse=True)
+def open_range_on(monkeypatch):
+    """The league is stopped (A5); the engine's tests run it as it ran, with OPEN-RANGE making trades."""
+    monkeypatch.setattr(day, "ACTIVE", ("OPEN-RANGE",))
+
+
 def fetch_of(table):
     return lambda symbol, interval: table.get(symbol, [])
 
@@ -215,3 +221,9 @@ def test_the_board_and_the_command(conn):
     finally:
         telegram_notify.send_text = orig
     assert told and told[0].startswith("<pre>Day league 12.10-08.11")
+
+
+def test_a_stopped_league_makes_no_trade(conn, monkeypatch):
+    monkeypatch.setattr(day, "ACTIVE", ())
+    assert _pass(conn, 35, QUIET_34, []) == (0, 0) and day.trades(conn) == []
+

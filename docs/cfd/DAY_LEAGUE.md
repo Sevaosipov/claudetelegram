@@ -75,3 +75,9 @@ help. The two trades of 12 October stay scored as they closed.
 The user chose to go on with OPEN-RANGE alone: BRK-15 and ASIA-SWEEP make no new trades. Their trades so far stay
 on the board.
 
+## Amendment A5 (2026-10-12): stopped
+
+The user stopped Open range after the seven-market test (REPORT_TPR.md, round 7: 6,606 trades, -0.088R a trade, no
+year of four up). No idea of the day league makes new trades; a trade still open runs to its end, and `/day` shows
+what was scored.
+
