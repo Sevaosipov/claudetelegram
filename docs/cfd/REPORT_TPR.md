@@ -30,3 +30,11 @@ t 0.1). The CCI check on points 0 and A changed nothing that matters: round 1's 
 to +0.009R a trade on a third of the trades. The stops inside the 50-66.7 % zone are the worst thing tried on this
 method: they are hit nine times in ten (5-10 % of the trades win), and the few large wins do not pay for it --
 down to -0.46R a trade. The hold-out was not run.
+
+## Round 4: the Tradebook's fixed 20-pip stop (2026-10-12)
+
+Eight markets, one-hour bars, 2012-2019, the four entries (50 %, 55.9 %, 61.8 %, 66.7 %) with a 20-pip stop, out at
+the 161.8 % extension or at A: **all eight lost,** -0.03R to -0.14R a trade on 4,300-5,300 trades each, at most
+three years of eight up. With the far target one trade in five wins. The hold-out was not run.
+
+Over the five rounds on this method: 150 candidates, none qualifying.

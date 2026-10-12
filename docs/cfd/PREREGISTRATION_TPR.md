@@ -52,3 +52,11 @@ level:** entry 50 % with the stop at 66.7 %, entry 55.9 % with the stop at 61.8 
 66.7 %. Candidates, eight markets, 2012-2019: those three entry-and-stop pairs x target A or C x CCI on or off x
 one-hour or four-hour bars (24), and the CCI check on round 1's least bad rule (entry 61.8 %, stop at point 0,
 out at A) on both bar sizes (2): **26**. Choice and verdict as above.
+
+## Round 4 (2026-10-12, before the run): the Tradebook's own numbers
+
+The «Tradebook of SK-System» (S. Wenzel, 59 pages, for Stefan Kassing's system) names what the other sources left
+open: the stop is a **fixed 20 pips** on the major currencies and metals; the entries are the four levels 50 %,
+55.9 %, 61.8 %, 66.7 %; the target is the 161.8 % extension (C = the entry plus 1.618 x 0-A). Eight markets, one-hour
+bars, 2012-2019: each of the four entries with the 20-pip stop ($2.00 on gold), out at C or at A: **8 candidates**.
+Choice and verdict as above.
