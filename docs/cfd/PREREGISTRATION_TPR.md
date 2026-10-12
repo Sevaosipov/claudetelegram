@@ -33,3 +33,12 @@ settings. So the rule is tested on eight markets at once, and judged on all of t
 - **Verdict,** once, on the hold-out: the sum above zero, at least 5 of the 8 markets up, and at least 4 of the
   years 2020-2024 up.
 - A pass becomes the bot's live rule (paper first). A fail is reported as a fail.
+
+## Round 2 (2026-10-12, before the run): the structure shift of the «SK System» videos
+
+The user sent a playlist on the same method (SK System). What it adds to the sheet: a sequence counts only after a
+**structure shift** -- in a fall, price must first break the last lower high; that break's high is A, the entry is
+in the «golden zone» of 0-A, the target is C. As rules, on the eight markets and periods above: a setup is valid
+only if A is above the last swing high confirmed before point 0 (a swing high: a bar's high above the three bars
+either side). Entry 50 % or 61.8 %; stop at point 0; target A, or C = the entry plus 0-A, or half at each;
+one-hour or four-hour bars: **12 candidates**. Choice and verdict as above.
