@@ -21,6 +21,7 @@ Sources:
     Senate eFD        the Senate half of the same, opt-in via --senate and currently
                         unreachable from here (senate_efd.py)
     BaFin             German Directors' Dealings (bafin.py)
+    FCA NSM           UK director dealings (uk.py)
     Oslo Børs         Norwegian Managers' Transactions (norway.py)
     Finansinspektionen  Swedish insider register (sweden.py)
 
@@ -88,6 +89,7 @@ from passes import (
     run_senate_pass,
     run_stake_pass,
     run_sweden_pass,
+    run_uk_pass,
 )
 
 BASE_DIR = Path(__file__).parent
@@ -173,7 +175,7 @@ def _which_sources(args) -> dict:
     collect_new_signals() (via strategy.buy_side_signals) so the two never drift
     apart."""
     only_set = (args.sec_only or args.house_only or args.bafin_only or args.norway_only
-                or args.sweden_only or args.crypto_only)
+                or args.sweden_only or args.uk_only or args.crypto_only)
     sec = args.sec_only or not only_set
     return {
         "sec": sec,
@@ -181,6 +183,7 @@ def _which_sources(args) -> dict:
         "bafin": (args.bafin_only or not only_set) and not args.no_bafin,
         "norway": (args.norway_only or not only_set) and not args.no_norway,
         "sweden": (args.sweden_only or not only_set) and not args.no_sweden,
+        "uk": (args.uk_only or not only_set) and not args.no_uk,
         # Never implied by "all sources": it has to be asked for explicitly, because
         # it is currently unreachable from here (see senate_efd.py).
         "senate": args.senate,
@@ -284,7 +287,7 @@ def _commit_signals(conn, signals) -> None:
             cluster.commit_alert(conn, s)
 
 
-_FILTER_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only",
+_FILTER_FLAGS = ("sec_only", "house_only", "bafin_only", "norway_only", "sweden_only", "uk_only",
                  "crypto_only", "min_score", "min_liquidity")
 
 
@@ -795,6 +798,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="how far back (calendar days) to look for unscanned days in FI's export. "
                           "Like --sec-days this is a gap-recovery window, not a per-run workload. "
                           "Raise for a backfill, e.g. --sweden-only --sweden-days 90. Default 7")
+    ap.add_argument("--uk-only", action="store_true")
+    ap.add_argument("--no-uk", action="store_true",
+                     help="skip the UK (director dealings in the FCA's National Storage Mechanism)")
+    ap.add_argument("--uk-days", type=int, default=5,
+                     help="how far back (calendar days) to look for unscanned days of UK announcements. "
+                          "Raise for a backfill, e.g. --uk-only --uk-days 60. Default 5")
     ap.add_argument("--include-share-programs", action="store_true",
                      help="count Swedish transactions tied to a share-incentive programme toward "
                           "signals. Off by default: those are compensation being disclosed, not a "
@@ -886,6 +895,8 @@ def main():
             new_by_source["NORWAY"] = _run_source("NORWAY", run_norway_pass, conn, args)
         if do_sweden:
             new_by_source["SWEDEN"] = _run_source("SWEDEN", run_sweden_pass, conn, args)
+        if sources["uk"]:
+            new_by_source["UK"] = _run_source("UK", run_uk_pass, conn, args)
         if do_senate:
             new_by_source["SENATE"] = _run_source("SENATE", run_senate_pass, conn, args)
         if do_crypto:

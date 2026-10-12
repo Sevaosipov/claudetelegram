@@ -65,6 +65,22 @@ def bafin_role(position: str | None) -> str:
     return "officer"   # "Sonstige Führungsperson" and anything unlabelled
 
 
+def uk_role(position: str | None, related_party) -> str:
+    """The role of a UK notification's «Position / status» cell."""
+    if related_party:
+        return "associate"
+    low = (position or "").lower()
+    if "chief executive" in low or re.search(r"\bceo\b", low):
+        return "ceo"
+    if "chief financial" in low or "finance director" in low or re.search(r"\bcfo\b", low):
+        return "cfo"
+    if "chair" in low:
+        return "chair"
+    if "director" in low:
+        return "director"
+    return "officer"
+
+
 def sweden_role(position: str | None, related_party) -> str:
     if related_party:
         return "associate"

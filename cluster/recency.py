@@ -20,6 +20,8 @@ _SPECS = {
     "NORWAY": ("norway_purchases", "ticker", "person", "date(found_at)", "txn_type = 'P'"),
     "SWEDEN": ("sweden_purchases", "isin", "person",
                "COALESCE(date(published), date(found_at))", "txn_type = 'P'"),
+    "UK": ("uk_purchases", "isin", "person",
+           "COALESCE(date(published), date(found_at))", "txn_type = 'P'"),
     "SEC13DG": ("sec_stakes", "ticker", "person_name", "date(found_at)", ""),
 }
 

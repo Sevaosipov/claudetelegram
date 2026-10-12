@@ -240,6 +240,16 @@ def format_sweden_line(t: dict) -> str:
     )
 
 
+def format_uk_line(t: dict) -> str:
+    verb = "bought" if t["txn_type"] == "P" else "sold"
+    role = f" ({t['position']})" if t.get("position") else ""
+    return (
+        f"🇬🇧 FCA: {t['person']}{role} {verb} {t['issuer_name']} ({t['isin']})\n"
+        f"   {datefmt.fmt(t['txn_date'])} · {t['shares']:g} sh @ {t['price']:,.4f} GBP/sh = {t['value']:,.0f} GBP\n"
+        f"   {t['source_url']}"
+    )
+
+
 def format_treasury_line(t) -> str:
     """t is a crypto_treasury.TreasuryTxn."""
     verb = "bought" if t.side == "P" else "sold"
@@ -413,7 +423,7 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 
 
 _SOURCE_ICON = {"SEC": "🟢", "HOUSE": "🏛", "SENATE": "🏛", "BAFIN": "🇩🇪",
-                "NORWAY": "🇳🇴", "SWEDEN": "🇸🇪"}
+                "NORWAY": "🇳🇴", "SWEDEN": "🇸🇪", "UK": "🇬🇧"}
 
 # Signal amounts arrive already converted to EUR by cluster.py (see fx.py), so
 # every source formats the same way here. The per-filing lines above stay in

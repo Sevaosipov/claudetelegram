@@ -29,6 +29,8 @@ NORWAY_MIN_BUYERS = 2
 
 SWEDEN_WINDOW_DAYS = 14  # same rationale again -- corporate insiders, not politicians
 SWEDEN_MIN_BUYERS = 2
+UK_WINDOW_DAYS = 14      # the same again
+UK_MIN_BUYERS = 2
 
 # The Senate files under the same STOCK Act deadline as the House, so it gets the
 # same window rather than the corporate-insider one.
@@ -54,6 +56,7 @@ HOUSE_SOLO_THRESHOLD = 500_000
 BAFIN_SOLO_THRESHOLD = 500_000
 NORWAY_SOLO_THRESHOLD = 500_000
 SWEDEN_SOLO_THRESHOLD = 500_000
+UK_SOLO_THRESHOLD = 500_000
 
 # Exit signal: fires when a meaningful fraction of the people who bought a ticker
 # later sell it -- e.g. 5 people bought AAPL, 3 of those same 5 later sold it.

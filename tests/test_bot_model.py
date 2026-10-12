@@ -648,7 +648,7 @@ def test_filtered_run_is_true_for_any_filter_flag_and_false_for_a_plain_run():
     for flag in bot._FILTER_FLAGS:
         assert bot._filtered_run(types.SimpleNamespace(**{flag: 1})) is True
     assert set(bot._FILTER_FLAGS) == {"sec_only", "house_only", "bafin_only", "norway_only",
-                                      "sweden_only", "crypto_only", "min_score", "min_liquidity"}
+                                      "sweden_only", "uk_only", "crypto_only", "min_score", "min_liquidity"}
 
 
 # ------------------------------------------------------------ collect_new_signals
@@ -716,7 +716,7 @@ def main_run(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "DB_PATH", tmp_path / "data" / "d.db")
     monkeypatch.setattr(bot, "LOG_PATH", tmp_path / "data" / "bot.log")
     for name in ("run_sec_pass", "run_stake_pass", "run_144_pass", "run_house_pass",
-                 "run_bafin_pass", "run_norway_pass", "run_sweden_pass", "run_senate_pass",
+                 "run_bafin_pass", "run_norway_pass", "run_sweden_pass", "run_uk_pass", "run_senate_pass",
                  "run_crypto_treasury_pass", "run_crypto_etf_pass", "run_farside_pass",
                  "run_onchain_pass"):
         monkeypatch.setattr(bot, name, lambda *a, **kw: 0)
