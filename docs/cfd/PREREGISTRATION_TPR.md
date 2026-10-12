@@ -60,3 +60,14 @@ open: the stop is a **fixed 20 pips** on the major currencies and metals; the en
 55.9 %, 61.8 %, 66.7 %; the target is the 161.8 % extension (C = the entry plus 1.618 x 0-A). Eight markets, one-hour
 bars, 2012-2019: each of the four entries with the 20-pip stop ($2.00 on gold), out at C or at A: **8 candidates**.
 Choice and verdict as above.
+
+## The rule that goes live, and its one run on the hold-out (2026-10-12, before the run)
+
+No candidate of the five rounds qualified, so by the plan the hold-out would stay shut. The user has now asked to
+test the SK strategy itself, live. The version with the best design result is the one that will run on paper:
+**four-hour bars; point 0 the extreme of 300 bars; a structure shift (A above the last swing high confirmed before
+point 0); valid after a 38.2 % retracement; a limit entry at 61.8 %; stop at point 0; everything out at A**
+(design: 492 trades, +0.065R a trade, t 1.1, four years of eight up). Before it goes live it is run **once** on
+2020-01-01 on, the eight markets, as a fair statement of what to expect -- declared here as outside the choice rule,
+with the same verdict: sum above zero, at least 5 of the 8 markets up, at least 4 of the years 2020-2024 up.
+Whatever it shows, the hold-out is then used for this method.
