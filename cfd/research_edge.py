@@ -159,6 +159,13 @@ def run(period: str, only: list[str] | None = None, log=print, *, bars: list[Bar
                                 "until": bars[i + 1].ts + dt.timedelta(days=hold)}
                     play(f"PULLBACK rsi{low_} stop{s}adr {target} {hold}d", sig, make)
 
+    # the baseline of PREREGISTRATION_GOLD.md: with the trend whenever free, the pullback's stop and exits
+    if only and "BASELINE trend" in only:
+        def base(i, side):
+            a = adr.get(bars[i].ts.date())
+            return {"r": a, "levels": THIRDS, "trail": True, "until": bars[i + 1].ts + dt.timedelta(days=14)}
+        play("BASELINE trend", [(i, "long" if closes[i] > trend[i] else "short") for i in watched], base)
+
     # DONCHIAN
     for n in (120, 240, 480):
         sig = []
