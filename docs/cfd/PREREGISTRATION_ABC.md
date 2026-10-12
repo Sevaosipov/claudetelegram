@@ -18,3 +18,12 @@ is tight and goes to break-even. It gives no statistics. Written as rules (long;
 - **Choice** on 2021-2024 (FXCM one-minute candles as 15-minute bars): at least 150 trades, 3 of 4 years up, t at
   least 2.5; the highest t. None: «no rule found».
 - **Verdict:** the chosen one, once, on 2025-01-01 on: sum above zero and both years above zero.
+
+## Round 2 (2026-10-12, before the run): four-hour bars, other stops
+
+The user asked for the same sequence on 4-hour bars with the stop adapted. EURUSD 4-hour bars from the hourly
+history; **design 2012-2019, hold-out 2020 on** (not run by this rule). Point 0 is the extreme of the last 30 bars
+(a week). M 4 or 8 (ATR(14) of the 4-hour bars); E 50 % or 61.8 %; exit at A or in thirds; and five stops: the
+78.6 % retracement, point 0, 25 % or 50 % of the move beyond point 0, or 2 ATR from the entry -- 40 candidates.
+Costs as before. **Choice:** at least 100 trades, 6 of the 8 years up, t at least 2.5; the highest t. **Verdict:**
+once on the hold-out: sum above zero and at least 5 of its 7 years above zero.

@@ -16,9 +16,10 @@ LOOK = 96
 
 
 def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int, *, m: float, e: float,
-           stop_at: float, thirds: bool) -> list[tuple[int, float]]:
+           stop_at: float, thirds: bool, look: int = LOOK, stop_atr: float | None = None) -> list[tuple[int, float]]:
     """(year, result in R after costs) of one side's trades; `sign` +1 long, -1 short (prices mirrored).
-    `stop_at` is the retracement the stop sits at: 1.0 is point 0."""
+    `stop_at` is the retracement the stop sits at: 1.0 is point 0, more is beyond it; with `stop_atr` the
+    stop is that many ATR from the entry instead. `look` bars make «an absolute low»."""
     hi = [sign * (b.high if sign > 0 else b.low) for b in bars]
     lo = [sign * (b.low if sign > 0 else b.high) for b in bars]
     op = [sign * b.open for b in bars]
@@ -26,13 +27,13 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
     zero = top = None
     order = None                       # (entry, stop, [levels]) waiting for a fill, set at bar `since`
     since = -1
-    i = LOOK
+    i = look
     n = len(bars)
     while i < n:
         d = day.local(bars[i].ts).date()
         if d > last:
             break
-        if lo[i] <= min(lo[i - LOOK + 1:i + 1]):                 # a day's low: a new point 0
+        if lo[i] <= min(lo[i - look + 1:i + 1]):                 # a day's low: a new point 0
             zero, top, order = lo[i], hi[i], None
             i += 1
             continue
@@ -59,7 +60,8 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
         if order is None and atr[i] and size >= m * atr[i] and lo[i] <= top - 0.382 * size:
             entry = top - e * size
             if lo[i] > entry:                                    # not already through the entry
-                order = (entry, top - stop_at * size, [top, entry + size, entry + 1.618 * size])
+                stop = entry - stop_atr * atr[i] if stop_atr else top - stop_at * size
+                order = (entry, stop, [top, entry + size, entry + 1.618 * size])
                 since = i
         i += 1
     return out
@@ -104,5 +106,46 @@ def run(period: str, only: list[str] | None = None, log=print) -> list[edge.Resu
         rows = []
         for sign in (1, -1):
             rows += trades(bars, atr, first, last, sign, m=m, e=e, stop_at=stop_at, thirds=thirds)
+        out.append(edge.result(name, rows))
+    return sorted(out, key=lambda x: -x.t)
+
+
+# ---------------------------------------------------------------- round 2: four-hour bars, other stops
+H4_DESIGN = (dt.date(2012, 1, 1), dt.date(2019, 12, 31))
+H4_HOLDOUT_FROM = dt.date(2020, 1, 1)
+STOPS = {"78.6": (0.786, None), "0": (1.0, None), "0+25%": (1.25, None), "0+50%": (1.5, None), "2atr": (1.0, 2.0)}
+
+
+def to_h4(hours: list[Bar]) -> list[Bar]:
+    out, cur = [], None
+    for b in hours:
+        start = b.ts.replace(hour=b.ts.hour - b.ts.hour % 4)
+        if cur is None or cur[0] != start:
+            if cur:
+                out.append(Bar(*cur))
+            cur = [start, b.open, b.high, b.low, b.close]
+        else:
+            cur[2], cur[3], cur[4] = max(cur[2], b.high), min(cur[3], b.low), b.close
+    if cur:
+        out.append(Bar(*cur))
+    return out
+
+
+def run_h4(period: str, only: list[str] | None = None, log=print) -> list[edge.Result]:
+    bars = to_h4(rd.hourly())
+    first, last = H4_DESIGN if period == "design" else (H4_HOLDOUT_FROM, bars[-1].ts.date())
+    start = next(k for k, b in enumerate(bars) if b.ts.date() >= first - dt.timedelta(days=30))
+    bars = bars[max(start, 0):]
+    atr = ind.atr(bars, 14)
+    log(f"{period}: {first} .. {last}")
+    out = []
+    for m, e, stop, thirds in product((4.0, 8.0), (0.5, 0.618), STOPS, (False, True)):
+        name = f"ABC-H4 M{m:g} E{e:g} stop {stop} {'thirds' if thirds else 'A'}"
+        if only and name not in only:
+            continue
+        at, k = STOPS[stop]
+        rows = []
+        for sign in (1, -1):
+            rows += trades(bars, atr, first, last, sign, m=m, e=e, stop_at=at, thirds=thirds, look=30, stop_atr=k)
         out.append(edge.result(name, rows))
     return sorted(out, key=lambda x: -x.t)
