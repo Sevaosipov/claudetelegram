@@ -16,10 +16,14 @@ LOOK = 96
 
 
 def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int, *, m: float, e: float,
-           stop_at: float, thirds: bool, look: int = LOOK, stop_atr: float | None = None) -> list[tuple[int, float]]:
+           stop_at: float, thirds: bool, look: int = LOOK, stop_atr: float | None = None,
+           targets: tuple | None = None, trend: list | None = None, cost: float = COST,
+           night_pct: float = NIGHT_PCT) -> list[tuple[int, float]]:
     """(year, result in R after costs) of one side's trades; `sign` +1 long, -1 short (prices mirrored).
     `stop_at` is the retracement the stop sits at: 1.0 is point 0, more is beyond it; with `stop_atr` the
-    stop is that many ATR from the entry instead. `look` bars make «an absolute low»."""
+    stop is that many ATR from the entry instead. `look` bars make «an absolute low». `targets` (round 3) are
+    the exits as multiples of 0-A from point 0, an equal share at each; `trend` an average the close must be
+    above (mirrored) for a setup to count."""
     hi = [sign * (b.high if sign > 0 else b.low) for b in bars]
     lo = [sign * (b.low if sign > 0 else b.high) for b in bars]
     op = [sign * b.open for b in bars]
@@ -33,44 +37,55 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
         d = day.local(bars[i].ts).date()
         if d > last:
             break
-        if lo[i] <= min(lo[i - look + 1:i + 1]):                 # a day's low: a new point 0
+        fills = bool(order) and i > since and lo[i] <= order[0]
+        if not fills and lo[i] <= min(lo[i - look + 1:i + 1]):   # a new extreme: a new point 0
             zero, top, order = lo[i], hi[i], None
             i += 1
             continue
         if zero is None:
             i += 1
             continue
-        if order and i > since and lo[i] <= order[0] and d >= first:
+        # the fill comes before anything else in the bar: a bar that falls through the entry and through
+        # point 0 is a filled trade and a stop, not a setup that quietly lapsed
+        if fills and d < first:
+            order = None
+        elif fills:
             entry, stop, levels = order
             entry = min(entry, op[i])                            # a gap under the limit: the open
             order = None
             r = entry - stop
-            if r > 0 and COST / r <= MAX_COST_R:
-                got, j = _run(bars, hi, lo, op, i, entry, stop, levels, thirds)
+            if r > 0 and cost / r <= MAX_COST_R:
+                got, j = _run(bars, hi, lo, op, i, entry, stop, levels, thirds, even=targets is not None)
                 if got is not None:
                     nights = (bars[j].ts.date() - bars[i].ts.date()).days
                     out.append((day.local(bars[i].ts).year,
-                                got - (COST + nights * NIGHT_PCT / 100.0 * abs(entry)) / r))
+                                got - (cost + nights * night_pct / 100.0 * abs(entry)) / r))
                     zero = top = None                            # the sequence is spent
                     i = j + 1
                     continue
+            zero = top = None                                    # filled, or refused for its cost: spent
+            i += 1
+            continue
         if hi[i] > top:
             top, order = hi[i], None                             # a new A is forming
         size = top - zero
-        if order is None and atr[i] and size >= m * atr[i] and lo[i] <= top - 0.382 * size:
+        with_trend = trend is None or (trend[i] is not None and sign * bars[i].close > sign * trend[i])
+        if order is None and atr[i] and size >= m * atr[i] and lo[i] <= top - 0.382 * size and with_trend:
             entry = top - e * size
             if lo[i] > entry:                                    # not already through the entry
                 stop = entry - stop_atr * atr[i] if stop_atr else top - stop_at * size
-                order = (entry, stop, [top, entry + size, entry + 1.618 * size])
+                levels = [zero + k * size for k in targets] if targets else [top, entry + size, entry + 1.618 * size]
+                order = (entry, stop, levels)
                 since = i
         i += 1
     return out
 
 
-def _run(bars, hi, lo, op, i, entry, stop, levels, thirds):
+def _run(bars, hi, lo, op, i, entry, stop, levels, thirds, even=False):
     """The trade filled at bar i: (result in R before costs, exit index), or (None, i) when the data ends."""
     r = entry - stop
-    plan = [(p, 1 / 3) for p in levels] if thirds else [(levels[0], 1.0)]
+    plan = [(p, 1 / len(levels)) for p in levels] if even else \
+        [(p, 1 / 3) for p in levels] if thirds else [(levels[0], 1.0)]
     left, got, k, cur = 1.0, 0.0, 0, stop
     j = i
     while j < len(bars):
@@ -149,3 +164,52 @@ def run_h4(period: str, only: list[str] | None = None, log=print) -> list[edge.R
             rows += trades(bars, atr, first, last, sign, m=m, e=e, stop_at=at, thirds=thirds, look=30, stop_atr=k)
         out.append(edge.result(name, rows))
     return sorted(out, key=lambda x: -x.t)
+
+
+# ---------------------------------------------------------------- TPR across eight markets (PREREGISTRATION_TPR.md)
+TPR_DESIGN = (dt.date(2012, 1, 1), dt.date(2019, 12, 31))
+TPR_HOLDOUT_FROM = dt.date(2020, 1, 1)
+PIP = {"EURUSD": 1e-4, "GBPUSD": 1e-4, "AUDUSD": 1e-4, "USDJPY": 1e-2, "EURGBP": 1e-4, "EURJPY": 1e-2, "GBPJPY": 1e-2}
+COST_PIPS = {"EURUSD": 0.8, "GBPUSD": 1.1, "AUDUSD": 0.9, "USDJPY": 0.9, "EURGBP": 1.2, "EURJPY": 1.3, "GBPJPY": 1.8}
+TARGETS = {"A": (1.0,), "EXT": (1.618,), "A+EXT": (1.0, 1.618)}
+_HOURS: dict[str, list[Bar]] = {}
+
+
+def market_hours(name: str) -> list[Bar]:
+    if name not in _HOURS:
+        from cfd import research4 as r4
+        from cfd import research_gold
+        _HOURS[name] = (rd.hourly() if name == "EURUSD" else research_gold.load_gold() if name == "XAUUSD"
+                        else r4.load_fxcm_hourly(name, 2012, 2024))
+    return _HOURS[name]
+
+
+def tpr_names():
+    for frame, e, target, m, trend in product(("H1", "H4"), (0.5, 0.618), TARGETS, (0.0, 8.0), (False, True)):
+        yield (f"TPR {frame} E{e:g} {target}{' M8' if m else ''}{' trend' if trend else ''}", frame, e, target, m, trend)
+
+
+def run_tpr(period: str, only: list[str] | None = None, log=print):
+    """{candidate: {market: rows}} on the "design" or the "holdout" period."""
+    out: dict[str, dict[str, list]] = {}
+    for market in [*PIP, "XAUUSD"]:
+        hours = market_hours(market)
+        cost = 0.30 if market == "XAUUSD" else COST_PIPS[market] * PIP[market]
+        night = 0.020 if market == "XAUUSD" else 0.010
+        for frame in ("H1", "H4"):
+            bars = hours if frame == "H1" else to_h4(hours)
+            first, last = TPR_DESIGN if period == "design" else (TPR_HOLDOUT_FROM, bars[-1].ts.date())
+            start = next(k for k, b in enumerate(bars) if b.ts.date() >= first - dt.timedelta(days=120))
+            bars = bars[start:]
+            atr = ind.atr(bars, 14)
+            ema = ind.ema([b.close for b in bars], 200)
+            for name, fr, e, target, m, trend in tpr_names():
+                if fr != frame or (only and name not in only):
+                    continue
+                rows = []
+                for sign in (1, -1):
+                    rows += trades(bars, atr, first, last, sign, m=m, e=e, stop_at=1.0, thirds=False, look=300,
+                                   targets=TARGETS[target], trend=ema if trend else None, cost=cost, night_pct=night)
+                out.setdefault(name, {})[market] = rows
+        log(f"  {market} done")
+    return out
