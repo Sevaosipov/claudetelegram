@@ -18,6 +18,7 @@ from pathlib import Path
 
 import assets
 import crypto
+import marketcap
 import positions
 import sources
 
@@ -35,6 +36,9 @@ def listing(ticker: str, source: str | None) -> tuple[str, str] | None:
         return None
     if crypto.is_crypto(ticker):
         return symbol, "USD"
+    listed = marketcap.ISIN_LISTINGS.get((ticker or "").upper())
+    if listed:
+        return listed[0], listed[1]                 # an ISIN: Trading 212's listing and its currency
     for suffix, currency in _VENUE_CURRENCY.items():
         if symbol.endswith(suffix):
             return symbol, currency

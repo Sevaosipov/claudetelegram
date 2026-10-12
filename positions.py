@@ -309,7 +309,8 @@ def yahoo_symbol(ticker: str, source: str | None = None) -> str | None:
     if crypto.is_crypto(ticker):
         return crypto.yf_symbol(ticker)
     if marketcap._looks_like_isin(ticker):
-        return None
+        listed = marketcap.ISIN_LISTINGS.get(ticker.upper())    # the listing Trading 212 sells it as, if any
+        return listed[0] if listed else None
     suffix = marketcap.SOURCE_VENUE.get(source or "", "")
     return (ticker if suffix else ticker.replace(".", "-")) + suffix
 

@@ -39,6 +39,41 @@ SOURCE_VENUE = {
     "NORWAY": ".OL", "SWEDEN": ".ST",
 }
 
+# BaFin, the UK's announcements and Finansinspektionen name a company by its ISIN, which Yahoo cannot
+# price. Trading 212's own instrument list (t212_instruments) says which listing an ISIN trades as there --
+# SAPd_EQ / SAP / EUR, DGEl_EQ / DGE / GBX -- and that listing has a Yahoo symbol: SAP.DE, DGE.L. Loaded
+# once per process by load_isin_listings(); empty until then (and in tests), when an ISIN stays unpriced.
+#   ISIN -> (Yahoo symbol, the listing's currency, the short name to show)
+ISIN_LISTINGS: dict[str, tuple[str, str, str]] = {}
+_UK_PREFIXES = ("GB", "JE", "GG", "IM")
+
+
+def load_isin_listings(conn) -> int:
+    """Fill ISIN_LISTINGS from t212_instruments: the London line («l», pence or pounds) of an ISIN, or its
+    German line («d», euros) -- London first for a British ISIN, the German line first for any other.
+    Returns how many ISINs have a listing."""
+    try:
+        rows = conn.execute("SELECT ticker, isin, short_name, currency FROM t212_instruments "
+                            "WHERE type = 'STOCK' AND isin IS NOT NULL AND isin != ''").fetchall()
+    except Exception:
+        return 0
+    found: dict[str, dict[str, tuple[str, str, str]]] = {}
+    for ticker, isin, short, currency in rows:
+        code, _, kind = (ticker or "").partition("_")
+        if kind != "EQ" or not short or len(code) < 2:
+            continue
+        venue = code[-1]
+        if venue == "l" and currency in ("GBX", "GBP"):
+            found.setdefault(isin.upper(), {})["l"] = (short.replace(".", "-") + ".L", currency, short)
+        elif venue == "d" and currency == "EUR":
+            found.setdefault(isin.upper(), {})["d"] = (short + ".DE", "EUR", short)
+    ISIN_LISTINGS.clear()
+    for isin, lines in found.items():
+        order = ("l", "d") if isin.startswith(_UK_PREFIXES) else ("d", "l")
+        ISIN_LISTINGS[isin] = next(lines[k] for k in order if k in lines)
+    return len(ISIN_LISTINGS)
+
+
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 
 
@@ -109,10 +144,13 @@ def _fetch(ticker: str, suffixes: tuple[str, ...] = VENUE_SUFFIXES) -> dict | No
             price = _get(info, "last_price", "lastPrice")
             volume = _get(info, "three_month_average_volume", "threeMonthAverageVolume",
                            "ten_day_average_volume", "tenDayAverageVolume")
+            currency = str(_get(info, "currency") or "USD")
+            if currency in ("GBp", "GBX"):        # London quotes in pence, and counts the market cap in them
+                cap, price, currency = float(cap) / 100.0, (float(price) / 100.0 if price else price), "GBP"
             return {
                 "shares_outstanding": float(_get(info, "shares") or 0) or None,
                 "market_cap": float(cap),
-                "currency": str(_get(info, "currency") or "USD").upper(),
+                "currency": currency.upper(),
                 "exchange": str(_get(info, "exchange") or "") or None,
                 # Typical money traded per day. This, not market cap, is what decides
                 # whether a position can actually be opened and closed without moving
@@ -132,8 +170,19 @@ def facts(conn, ticker: str | None, source: str | None = None) -> dict | None:
     `source` is the signal source (SEC, NORWAY, ...) when known; it pins the lookup
     to that market instead of guessing across all of them.
     """
-    if not ticker or _looks_like_isin(ticker) or ticker.startswith("CRYPTO:"):
+    if not ticker or ticker.startswith("CRYPTO:"):
         return None
+    if _looks_like_isin(ticker):
+        listed = ISIN_LISTINGS.get(ticker.upper())
+        if not listed:
+            return None
+        base, _, tail = listed[0].rpartition(".")              # the listing Trading 212 sells it as
+        cached = db.get_company_facts(conn, listed[0], CACHE_TTL_SECONDS)
+        if cached is not None:
+            return cached if cached.get("market_cap") else None
+        fetched = _fetch(base, ("." + tail,))
+        db.save_company_facts(conn, listed[0], fetched or {})
+        return fetched
     ticker = clean_ticker(ticker)
     if not ticker:
         return None
