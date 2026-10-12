@@ -357,9 +357,10 @@ def bars_of(m1: list[tuple], minutes: int) -> list[Bar]:
     return out
 
 
-def run_mtf(period: str, log=print) -> list[edge.Result]:
+def run_mtf(period: str, log=print, pair: str = "EURUSD", raw: bool = False):
+    """Round 5 on `pair`; with `raw` the rows by candidate instead of the sorted results (round 6)."""
     from bisect import bisect_left
-    m1 = rd.load_m1()
+    m1 = rd.load_m1(pair)
     m5, h1 = bars_of(m1, 5), rd.to_hours(m1)
     h4 = to_h4(h1)
     first, last = rd.DESIGN if period == "design" else (rd.HOLDOUT_FROM, m5[-1].ts.date())
@@ -368,7 +369,7 @@ def run_mtf(period: str, log=print) -> list[edge.Result]:
     atr = ind.atr(h1, 14)
     ema4 = ind.ema([b.close for b in h4], 50)
     t4, t5 = [b.ts for b in h4], [b.ts for b in m5]
-    cost, night = 0.8e-4, 0.010
+    cost, night = COST_PIPS[pair] * PIP[pair], 0.010
     rows = {(trend, stop, target): [] for trend, stop, target in product((False, True), ("zone", "0"), ("A", "C"))}
     for sign in (1, -1):
         events: list = []
@@ -434,4 +435,6 @@ def run_mtf(period: str, log=print) -> list[edge.Result]:
                 nights = (m5[q].ts.date() - m5[entry_j].ts.date()).days
                 out.append((day.local(m5[entry_j].ts).year, result - (cost + nights * night / 100.0 * abs(entry)) / r))
     names = {k: f"MTF{' trend' if k[0] else ''} stop {k[1]} {k[2]}" for k in rows}
+    if raw:
+        return {names[k]: v for k, v in rows.items()}
     return sorted((edge.result(names[k], v) for k, v in rows.items()), key=lambda x: -x.t)
