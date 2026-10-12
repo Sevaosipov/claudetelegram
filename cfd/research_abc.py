@@ -339,3 +339,99 @@ def run_sk4(period: str, log=print):
             out.setdefault(f"SK4 H1 E{e:g} 20pips {target}", {})[market] = rows
         log(f"  {market} done")
     return out
+
+
+# ---------------------------------------------------------------- round 5: 4h trend, 1h sequence, 5m entry
+def bars_of(m1: list[tuple], minutes: int) -> list[Bar]:
+    out, cur = [], None
+    for ts, o, h, low, c, _ask in m1:
+        start = ts.replace(minute=ts.minute - ts.minute % minutes, second=0, microsecond=0)
+        if cur is None or cur[0] != start:
+            if cur:
+                out.append(Bar(*cur))
+            cur = [start, o, h, low, c]
+        else:
+            cur[2], cur[3], cur[4] = max(cur[2], h), min(cur[3], low), c
+    if cur:
+        out.append(Bar(*cur))
+    return out
+
+
+def run_mtf(period: str, log=print) -> list[edge.Result]:
+    from bisect import bisect_left
+    m1 = rd.load_m1()
+    m5, h1 = bars_of(m1, 5), rd.to_hours(m1)
+    h4 = to_h4(h1)
+    first, last = rd.DESIGN if period == "design" else (rd.HOLDOUT_FROM, m5[-1].ts.date())
+    start = next(k for k, b in enumerate(h1) if b.ts.date() >= first - dt.timedelta(days=60))
+    h1 = h1[start:]
+    atr = ind.atr(h1, 14)
+    ema4 = ind.ema([b.close for b in h4], 50)
+    t4, t5 = [b.ts for b in h4], [b.ts for b in m5]
+    cost, night = 0.8e-4, 0.010
+    rows = {(trend, stop, target): [] for trend, stop, target in product((False, True), ("zone", "0"), ("A", "C"))}
+    for sign in (1, -1):
+        events: list = []
+        trades(h1, atr, dt.date.min, dt.date.max, sign, m=0.0, e=0.5, stop_at=1.0, thirds=False, look=300,
+               cost=cost, night_pct=night, break_k=3, c_target="A", log=events)
+        order = None
+        for ev in events:
+            if ev[0] == "order":
+                order = ev
+                continue
+            if ev[0] != "fill" or order is None:
+                continue
+            _k, _i, _zi, _ti, level50, zero, top = order                 # mirrored prices
+            order = None
+            d = h1[ev[1]].ts.date()
+            if not first <= d <= last:
+                continue
+            j = bisect_left(t5, h1[ev[1]].ts)                            # the zone opens within this hour
+            end = h1[ev[1]].ts + dt.timedelta(days=3)
+            lo = lambda b: sign * (b.low if sign > 0 else b.high)        # noqa: E731
+            hi = lambda b: sign * (b.high if sign > 0 else b.low)        # noqa: E731
+            while j < len(m5) and lo(m5[j]) > level50:
+                j += 1
+            low_bar, entry_j = None, None
+            while j < len(m5) - 1 and m5[j].ts < end:
+                b = m5[j]
+                if lo(b) <= zero or hi(b) >= top:
+                    break                                                # through point 0, or back past A
+                if low_bar is None or lo(b) < lo(low_bar):
+                    low_bar = b
+                elif sign * b.close > hi(low_bar):
+                    entry_j = j + 1                                      # the turn: in at the next open
+                    break
+                j += 1
+            if entry_j is None:
+                continue
+            entry = sign * m5[entry_j].open
+            k4 = bisect_left(t4, m5[entry_j].ts - dt.timedelta(hours=4)) - 1      # the last completed 4-hour bar
+            with_trend = k4 >= 0 and ema4[k4] is not None and sign * h4[k4].close > sign * ema4[k4]
+            size = top - zero
+            for (trend, stop_kind, target_kind), out in rows.items():
+                if trend and not with_trend:
+                    continue
+                stop = lo(low_bar) if stop_kind == "zone" else zero
+                target = top if target_kind == "A" else entry + size
+                r = entry - stop
+                if r <= 0 or target <= entry or cost / r > MAX_COST_R:
+                    continue
+                q, result = entry_j, None
+                while q < len(m5):
+                    b = m5[q]
+                    if q > entry_j and sign * b.open <= stop:
+                        result = (sign * b.open - entry) / r
+                    elif lo(b) <= stop:
+                        result = -1.0
+                    elif q > entry_j and hi(b) >= target:
+                        result = (max(target, sign * b.open) - entry) / r
+                    if result is not None:
+                        break
+                    q += 1
+                if result is None:
+                    continue
+                nights = (m5[q].ts.date() - m5[entry_j].ts.date()).days
+                out.append((day.local(m5[entry_j].ts).year, result - (cost + nights * night / 100.0 * abs(entry)) / r))
+    names = {k: f"MTF{' trend' if k[0] else ''} stop {k[1]} {k[2]}" for k in rows}
+    return sorted((edge.result(names[k], v) for k, v in rows.items()), key=lambda x: -x.t)

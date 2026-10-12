@@ -71,3 +71,21 @@ point 0); valid after a 38.2 % retracement; a limit entry at 61.8 %; stop at poi
 2020-01-01 on, the eight markets, as a fair statement of what to expect -- declared here as outside the choice rule,
 with the same verdict: sum above zero, at least 5 of the 8 markets up, at least 4 of the years 2020-2024 up.
 Whatever it shows, the hold-out is then used for this method.
+
+## Round 5 (2026-10-12, before the run): four timeframes, as a user of the method describes it
+
+The user passed on a trader's note: the method «won't work» on a 5-minute chart alone; the 4-hour chart gives the
+trend, the 0-A-B-C is drawn on the 1-hour chart, and the entry is looked for on 5 minutes. As rules, on EURUSD
+(the one market with minute data), FXCM candles:
+
+- **Sequence (1-hour bars):** as in the live rule -- point 0 the extreme of 300 bars, a structure shift, valid after
+  a 38.2 % retracement. The **zone** opens when price reaches the 50 % retracement.
+- **Entry (5-minute bars):** in the zone, the first 5-minute close above the high of the bar that made the lowest
+  low since the zone opened (the turn); buy at the next open. The setup ends unfilled if price passes A, passes
+  point 0, or three days go by.
+- **Stop:** the lowest low since the zone opened, or point 0. **Target:** A, or C (the entry plus 0-A).
+- **Trend:** only with the 4-hour trend (the last 4-hour close against its EMA(50)), or either way.
+- 2 x 2 x 2 = **8 candidates.** Costs 0.8 pips and 0.010 % a night; no trade when the cost is over 0.25R.
+- **Choice,** 2021-2024: at least 100 trades, 3 of the 4 years up, t at least 2.5; the highest t. **Verdict,** once,
+  2025-01-01 on: sum above zero and both years above zero. (EURUSD's hourly bars of 2020-2026 were part of the
+  four-hour test already; these rules have not been run on them.)

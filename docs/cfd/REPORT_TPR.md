@@ -45,3 +45,11 @@ Four-hour bars, structure shift, entry at 61.8 %, stop at point 0, out at A; eig
 **Fail:** 350 trades, -21.7R, -0.062R a trade, 40 % winners (design: +0.065R). Years up: 2 of 7 (2024, 2025).
 Markets up: 3 of 8 -- EURGBP +12.8R, GBPJPY +7.4R, EURJPY +3.8R; EURUSD -5.1R, AUDUSD -4.9R, USDJPY -8.3R,
 GBPUSD -9.2R, gold -18.1R. The small design profit did not carry over. The hold-out is now used for this method.
+
+## Round 5: four timeframes -- 4-hour trend, 1-hour sequence, 5-minute entry (2026-10-12)
+
+EURUSD, 2021-2024, 8 candidates: **none qualified.** Without the trend filter there are 124-135 trades in four
+years; the best -- entry on the 5-minute turn inside the zone, stop at point 0, out at A -- made +0.09R a trade with
+57 % winners and three years of four up, t 0.9 (the bar is 2.5). With the 4-hour trend filter only 16 trades are
+left in four years: the sequence is a reversal pattern, so it is nearly always against the 4-hour trend when its
+zone is reached. The stop under the zone's low wins one trade in six. The hold-out was not run.
