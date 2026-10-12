@@ -13,3 +13,12 @@ hold-out (2020 on) was not run.
 test, found before anything was concluded from it: when one bar fell through the entry and through point 0, the
 setup was dropped as «lapsed» instead of counted as a filled trade stopped at a loss. With that fixed the profit is
 gone. The same error flattered the two EURUSD rounds of REPORT_ABC.md; they were negative even so.
+
+## Round 2: the structure shift of the SK System videos (2026-10-12)
+
+The playlist the user sent («SK System Strategy Simplified», six videos in Malayalam; the auto-translated subtitles
+of two could be read, YouTube refused the other four) teaches the same 0-A-B-C sequence and adds one condition: a
+sequence counts only after price has broken the last lower high. With that condition, eight markets, 2012-2019,
+12 candidates: **none qualified.** Two were slightly above zero -- four-hour bars, out at A: +0.065R a trade on 492
+trades at the 61.8 % entry (t 1.1, four years of eight up, 2017-2019 all down). The other ten lost. The hold-out
+was not run.
