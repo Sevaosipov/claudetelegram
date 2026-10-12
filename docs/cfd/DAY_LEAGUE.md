@@ -56,3 +56,17 @@ expectation.
 
 The user will trade at IC Markets on a Raw Spread account: EURUSD's round trip is counted as 0.8 pips (about 0.1 of
 spread and $7 a lot) instead of 0.015 % of the price.
+
+## Amendment A3 (2026-10-12, after the first day: two trades closed at 18:00, +1.2R and +1.8R, none open)
+
+The user asked to drop the 18:00 exit after both trades of the first day went on in their favour after it: a
+trade now lives until its stop or TP3, overnight and over a weekend.
+
+- No time exit. A third closes at each of TP1-TP3 and the stop moves as before; nothing else closes a trade.
+- An idea makes no new trade in a market while its last one there is open.
+- Financing: 0.010 % of the price for every calendar night held, as in the daily league.
+- The league's end: no new trades after four weeks; the final board waits for the open ones.
+
+For the record: holding these entries longer was tested before this change (REPORT_SWING_EURUSD.md) and did not
+help. The two trades of 12 October stay scored as they closed.
+
