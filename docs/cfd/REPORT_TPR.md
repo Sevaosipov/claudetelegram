@@ -60,3 +60,18 @@ Round 5's best rule, unchanged, 2021-2024, seven currency pairs: **877 trades, -
 one year of four up (2024), three markets of seven up. EURUSD +12.6R and EURGBP +10.9R; EURJPY -27.1R, GBPJPY
 -9.7R, GBPUSD -8.2R; AUDUSD and USDJPY at zero. With seven times the trades the result did not rise toward the
 bar, it fell to zero: EURUSD's +0.09R was chance. The hold-out was not run.
+
+## Round 7: Open range and SK together (2026-10-12)
+
+Seven currency pairs, 15-minute bars, 2021-2024, the day league's Open range as it runs:
+
+| Open range taken... | trades | per trade | t | years up | markets up |
+|---|---|---|---|---|---|
+| always | 6,606 | -0.088R | -6.4 | 0 of 4 | 1 of 7 |
+| only with an SK sequence in force the same way | 1,640 | -0.063R | -2.3 | 0 of 4 | 1 of 7 |
+| only when the last SK order pointed the same way | 3,285 | -0.085R | -4.4 | 0 of 4 | 1 of 7 |
+| only against the last SK order | 3,265 | -0.092R | -4.7 | 0 of 4 | 1 of 7 |
+
+**Neither combination qualifies;** with SK or against it, Open range loses about the same. Two rules without an edge
+do not make one together. The table also shows Open range alone losing in every year and in six markets of seven
+(only USDJPY is up) -- on 6,600 trades that is not chance. The hold-out was not run.

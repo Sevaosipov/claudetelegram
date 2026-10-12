@@ -438,3 +438,101 @@ def run_mtf(period: str, log=print, pair: str = "EURUSD", raw: bool = False):
     if raw:
         return {names[k]: v for k, v in rows.items()}
     return sorted((edge.result(names[k], v) for k, v in rows.items()), key=lambda x: -x.t)
+
+
+# ---------------------------------------------------------------- round 7: Open range and SK together
+def open_range_setups(bars: list[Bar], atr: list, first: dt.date, last: dt.date) -> list[tuple]:
+    """(index of the signal bar, side, stop) of the day league's OPEN-RANGE on 15-minute bars: the first close
+    outside the four bars of London's first hour, the signal bar closing 09:00-17:00 Europe/Riga."""
+    out, i, n = [], 0, len(bars)
+    quarter = dt.timedelta(minutes=15)
+    while i < n:
+        b = bars[i]
+        ldn = b.ts.astimezone(day.LONDON)
+        if ldn.weekday() >= 5 or (ldn.hour, ldn.minute) != (8, 0) or not first <= ldn.date() <= last:
+            i += 1
+            continue
+        hour = [x for x in bars[i:i + 4] if x.ts < b.ts + 4 * quarter]
+        j = i + len(hour)
+        if len(hour) == 4:
+            high, low = max(x.high for x in hour), min(x.low for x in hour)
+            while j < n and day.local(bars[j].ts).date() == day.local(b.ts).date():
+                end = day.local(bars[j].ts + quarter).time()
+                if end > day.ENTRY_UNTIL:
+                    break
+                c = bars[j].close
+                if c > high or c < low:
+                    if end >= day.ENTRY_FROM and atr[j]:
+                        out.append((j, "long" if c > high else "short", (high + low) / 2))
+                    break
+                j += 1
+        i = max(j, i + 1)
+    return out
+
+
+def sk_state(h1: list[Bar], cost: float):
+    """What the live SK rule had in force on the 1-hour chart: [(from, to, side)] while an order waited or
+    its trade was open, and [(time, side)] of every order."""
+    atr = ind.atr(h1, 14)
+    hour = dt.timedelta(hours=1)
+    spans, orders = [], []
+    for side, sign in (("long", 1), ("short", -1)):
+        log: list = []
+        trades(h1, atr, dt.date.min, dt.date.max, sign, m=0.0, e=0.618, stop_at=1.0, thirds=False, look=300,
+               cost=cost, night_pct=0.010, break_k=3, c_target="A", log=log)
+        since = None
+        for ev in log:
+            when = h1[ev[1]].ts + hour
+            if ev[0] == "order":
+                since = when
+                orders.append((when, side))
+            elif ev[0] in ("cancel", "void", "exit") and since is not None:
+                spans.append((since, when, side))
+                since = None
+        if since is not None:
+            spans.append((since, h1[-1].ts + hour, side))
+    return spans, sorted(orders)
+
+
+def run_combo(period: str, log=print):
+    """{rule: {market: rows}} for Open range alone, with SK ACTIVE, with SK LAST, and against SK."""
+    from bisect import bisect_right
+    out: dict[str, dict[str, list]] = {k: {} for k in ("alone", "ACTIVE", "LAST", "against")}
+    levels = [(1.0, 1 / 3), (2.0, 1 / 3), (3.0, 1 / 3)]
+    for pair in PIP:
+        m1 = rd.load_m1(pair)
+        m15, h1 = bars_of(m1, 15), rd.to_hours(m1)
+        first, last = rd.DESIGN if period == "design" else (rd.HOLDOUT_FROM, m15[-1].ts.date())
+        cost = COST_PIPS[pair] * PIP[pair]
+        atr = ind.atr(m15, 14)
+        spans, orders = sk_state(h1, cost)
+        order_times = [t for t, _s in orders]
+        edge.COST_ABS, edge.NIGHT_PCT = cost, 0.010
+        try:
+            free = {k: 0 for k in out}
+            rows = {k: [] for k in out}
+            for j, side, stop in open_range_setups(m15, atr, first, last):
+                at = m15[j].ts + dt.timedelta(minutes=15)
+                sign = 1 if side == "long" else -1
+                r = sign * (m15[j + 1].open - stop) if j + 1 < len(m15) else 0
+                if r <= 0 or r > 4.0 * atr[j] or cost / r > MAX_COST_R:
+                    continue
+                active = any(a <= at < b and s == side for a, b, s in spans)
+                k = bisect_right(order_times, at) - 1
+                latest = orders[k][1] if k >= 0 else None
+                wanted = {"alone": True, "ACTIVE": active, "LAST": latest == side,
+                          "against": latest is not None and latest != side}
+                for name, ok in wanted.items():
+                    if not ok or j < free[name]:
+                        continue
+                    got = edge.trade(m15, j + 1, side, r, levels=levels, trail=True)
+                    if got is None:
+                        continue
+                    rows[name].append((day.local(at).year, got[0]))
+                    free[name] = got[1]
+            for name in out:
+                out[name][pair] = rows[name]
+        finally:
+            edge.COST_ABS = edge.NIGHT_PCT = None
+        log(f"  {pair} done")
+    return out
