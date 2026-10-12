@@ -34,3 +34,14 @@ Reading: being selective did what was hoped on costs -- the same idea went from 
 about zero is all it is, on two trades a month. That is neither a profit nor day trading. Further targets did not
 help: 3R, 4R, 5R and no target gave the same result within noise. The hold-out is now used; a third search would
 need new data to be judged on.
+
+## Round 3: conditions known at the entry (2026-10-12)
+
+The open-range rule as it now runs (no time exit, thirds at 1R-2R-3R, 0.8 pips), 2021-2024: 937 trades, -0.117R a
+trade, no year up. With each of five conditions and each pair of them (16 candidates): **all sixteen lost**. Trading
+only with the 5-day or the 20-day move halves the loss (-0.06R to -0.09R a trade) and the best pair, with the 5-day
+move and the day before, comes to -0.036R on 290 trades with one year of four up. A narrow range makes it worse.
+«No adaptation found»; the 2025-2026 hold-out was not run for this rule.
+
+12 October was a with-trend break (5-day and 20-day both down). Such days are the rule's better half, and still
+lose a little on average.
