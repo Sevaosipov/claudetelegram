@@ -26,6 +26,7 @@ import sec_144
 import sec_edgar
 import senate_efd
 import sweden
+import uk
 import telegram_notify
 import universe
 
@@ -403,6 +404,45 @@ def run_sweden_pass(conn, args) -> int:
         # filings=None: scanned as a date range, so there's no honest per-day count.
         if d < today:
             db.mark_day_scanned(conn, "SWEDEN", d.isoformat(), None)
+    return new_count
+
+
+def run_uk_pass(conn, args) -> int:
+    """Logs every new UK director purchase (FCA National Storage Mechanism, uk.py) to SQLite/CSV. Sales
+    and everything that is not a plain purchase or sale are saved too, but only purchases are printed and
+    counted. Amounts are pounds, converted to EUR before the min_value test like Sweden's."""
+    seen = db.uk_seen_ids(conn)
+    new_count = 0
+    today = dt.date.today()
+    dates = _days_to_scan(conn, "UK", args.uk_days, args.uk_days)
+    from_date = min(dates)
+    print(f"[UK] scanning {from_date.isoformat()}..{today.isoformat()}")
+    session = uk.new_session()
+    for filing_id, txns in uk.scan_new_filings(from_date, today, seen, session=session):
+        for txn in txns:
+            if txn["txn_type"] == "P" and fx.to_eur(txn["value"], txn["currency"], conn) < args.min_value:
+                continue
+            is_new = db.save_uk_purchase(conn, txn)
+            if is_new and txn["txn_type"] == "P":
+                new_count += 1
+                print(telegram_notify.format_uk_line(txn))
+                _append_csv({
+                    "found_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "source": "FCA NSM",
+                    "date": txn["txn_date"],
+                    "person": txn["person"],
+                    "role": txn["position"],
+                    "issuer_or_asset": txn["issuer_name"],
+                    "ticker": txn["isin"],
+                    "amount": f"{txn['value']:,.0f} {txn['currency']}",
+                    "url": txn["source_url"],
+                })
+        db.mark_uk_id_seen(conn, filing_id)
+        seen.add(filing_id)
+        conn.commit()
+    for d in dates:
+        if d < today:
+            db.mark_day_scanned(conn, "UK", d.isoformat(), None)
     return new_count
 
 

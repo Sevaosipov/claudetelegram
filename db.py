@@ -369,6 +369,37 @@ CREATE TABLE IF NOT EXISTS sweden_seen_ids (
     row_id TEXT PRIMARY KEY
 );
 
+-- UK director dealings (Director/PDMR Shareholding announcements in the FCA's National Storage Mechanism) --
+-- the British equivalent of Form 4. See uk.py. Keyed like BaFin and Sweden on the ISIN (the form has no
+-- ticker); the value stays in pounds here and is converted to EUR when a signal is built. `nature` is the
+-- company's own wording; txn_type is 'P'/'S' only for a plain purchase or sale and 'O' for everything else
+-- (awards, vesting, share plans, reinvested dividends), which is stored but never counted.
+CREATE TABLE IF NOT EXISTS uk_purchases (
+    txn_key         TEXT PRIMARY KEY,
+    filing_id       TEXT,
+    published       TEXT,
+    person          TEXT,
+    position        TEXT,
+    issuer_name     TEXT,
+    lei             TEXT,
+    isin            TEXT,
+    nature          TEXT,
+    txn_type        TEXT,   -- 'P' / 'S' / 'O'
+    txn_date        TEXT,   -- ISO YYYY-MM-DD
+    shares          REAL,
+    price           REAL,   -- pounds
+    currency        TEXT,
+    value           REAL,
+    related_party   INTEGER,
+    place           TEXT,
+    source_url      TEXT,
+    found_at        TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS uk_seen_ids (
+    filing_id TEXT PRIMARY KEY
+);
+
 -- Which calendar days have been fully scanned for a date-indexed source (SEC's
 -- daily index, Newsweb's date-range list). Without this the bot scans a blind
 -- trailing window of N days, so a single missed run -- a failed job, a long
@@ -1294,6 +1325,27 @@ def save_sec_proposed_sale(conn: sqlite3.Connection, s) -> bool:
          s.security_class, s.units_to_sell, s.market_value, s.units_outstanding,
          s.approx_sale_date, s.exchange, s.acquisition_nature, s.payment_nature, s.source_url),
     )
+    return cur.rowcount > 0
+
+
+def uk_seen_ids(conn: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT filing_id FROM uk_seen_ids")}
+
+
+def mark_uk_id_seen(conn: sqlite3.Connection, filing_id: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO uk_seen_ids(filing_id) VALUES (?)", (filing_id,))
+
+
+def save_uk_purchase(conn: sqlite3.Connection, t: dict) -> bool:
+    """t is a dict of uk.parse_filing(). True only for a transaction never stored before."""
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO uk_purchases
+           (txn_key, filing_id, published, person, position, issuer_name, lei, isin, nature, txn_type,
+            txn_date, shares, price, currency, value, related_party, place, source_url)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (t["txn_key"], t["filing_id"], t["published"], t["person"], t["position"], t["issuer_name"], t["lei"],
+         t["isin"], t["nature"], t["txn_type"], t["txn_date"], t["shares"], t["price"], t["currency"],
+         t["value"], int(t["related_party"]), t["place"], t["source_url"]))
     return cur.rowcount > 0
 
 

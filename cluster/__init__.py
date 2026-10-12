@@ -57,6 +57,9 @@ from .common import (  # noqa: F401
     SWEDEN_MIN_BUYERS,
     SWEDEN_SOLO_THRESHOLD,
     SWEDEN_WINDOW_DAYS,
+    UK_MIN_BUYERS,
+    UK_SOLO_THRESHOLD,
+    UK_WINDOW_DAYS,
     W_CRYPTO_BASE,
     W_CRYPTO_SIZE,
     W_FIRST_BUY,
@@ -92,6 +95,7 @@ from .buys import (  # noqa: F401
     find_sec_clusters,
     find_senate_clusters,
     find_sweden_clusters,
+    find_uk_clusters,
 )
 from .stakes import (  # noqa: F401
     StakeSignal,
@@ -134,4 +138,5 @@ from .roles import (  # noqa: F401
     bafin_role,
     sec_role,
     sweden_role,
+    uk_role,
 )

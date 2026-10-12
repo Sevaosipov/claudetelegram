@@ -24,7 +24,7 @@ def is_caution(sig) -> bool:
     return hasattr(sig, "crypto_kind") and not sig.bullish
 
 
-_BUY_SIDE_SOURCES = ("sec", "house", "senate", "bafin", "norway", "sweden", "crypto")
+_BUY_SIDE_SOURCES = ("sec", "house", "senate", "bafin", "norway", "sweden", "uk", "crypto")
 
 # run_daily.sh's own tuning: the mandatory-filing 5%/13G default is mostly routine
 # 13G ownership crossings, not news.
@@ -88,6 +88,8 @@ def buy_side_signals(conn, *, ignore_alert_state: bool = False, sources: dict | 
     if on.get("sweden", False):
         signals += cluster.find_sweden_clusters(conn, ignore_alert_state=ignore_alert_state,
                                                  **cluster_kwargs, **sweden_kwargs)
+    if on.get("uk", False):
+        signals += cluster.find_uk_clusters(conn, ignore_alert_state=ignore_alert_state, **cluster_kwargs)
     if on.get("stakes", on.get("sec", False)):
         signals += cluster.find_stake_signals(conn, ignore_alert_state=ignore_alert_state,
                                               **stake_kwargs)

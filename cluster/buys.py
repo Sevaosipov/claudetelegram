@@ -8,7 +8,7 @@ import datetime as dt
 import fx
 import sweden
 
-from .roles import Buyer, bafin_role, sec_role, sweden_role
+from .roles import Buyer, bafin_role, sec_role, sweden_role, uk_role
 from .common import (
     BAFIN_MIN_BUYERS,
     BAFIN_SOLO_THRESHOLD,
@@ -32,6 +32,9 @@ from .common import (
     SWEDEN_MIN_BUYERS,
     SWEDEN_SOLO_THRESHOLD,
     SWEDEN_WINDOW_DAYS,
+    UK_MIN_BUYERS,
+    UK_SOLO_THRESHOLD,
+    UK_WINDOW_DAYS,
     _ASSET_SUFFIX_RE,
     _JUNK_TICKER_SQL,
     parse_amount_low,
@@ -553,3 +556,52 @@ def find_sweden_clusters(conn, window_days: int = SWEDEN_WINDOW_DAYS, min_buyers
             buyers=[Buyer(name, sweden_role(o["position"], o["related"]), o["total"]) for name, o in by_person.items()],
         ))
     return signals
+
+
+def find_uk_clusters(conn, window_days: int = UK_WINDOW_DAYS, min_buyers: int = UK_MIN_BUYERS,
+                     min_value: float = MIN_CLUSTER_VALUE, solo_threshold: float = UK_SOLO_THRESHOLD,
+                     ignore_alert_state: bool = False) -> list[ClusterSignal]:
+    """UK director purchases (uk.py), keyed on the ISIN like BaFin and Sweden. Only plain purchases count:
+    awards, vesting, share plans and reinvested dividends are stored as 'O' and never read here. Pounds are
+    converted to EUR per row."""
+    since = (dt.date.today() - dt.timedelta(days=window_days)).isoformat()
+    rows = conn.execute(
+        """SELECT isin, issuer_name, person, position, txn_date, value, currency, related_party
+           FROM uk_purchases
+           WHERE txn_type = 'P' AND txn_date >= ? AND isin IS NOT NULL AND isin != ''""",
+        (since,),
+    ).fetchall()
+    by_isin: dict[str, list] = {}
+    for r in rows:
+        by_isin.setdefault(r[0], []).append(r)
+
+    signals = []
+    for isin, group in by_isin.items():
+        by_person: dict[str, dict] = {}
+        for _, issuer_name, person, position, txn_date, value, currency, related in group:
+            slot = by_person.setdefault(person or "?", {"issuer_name": issuer_name, "position": position,
+                                                        "total": 0.0, "related": related})
+            slot["total"] += fx.to_eur(value, currency, conn)
+        total_value = sum(o["total"] for o in by_person.values())
+        biggest = max(by_person.values(), key=lambda o: o["total"])
+        is_cluster = len(by_person) >= min_buyers
+        if not is_cluster and biggest["total"] < solo_threshold:
+            continue
+        if total_value < min_value:
+            continue
+        member_names = list(by_person)
+        if not ignore_alert_state and not should_alert(conn, "UK", isin, member_names, total_value):
+            continue
+        company = next(iter(by_person.values()))["issuer_name"]
+        members = [f"{name} ({o['position'] or 'Insider'}) €{o['total']:,.0f}" for name, o in by_person.items()]
+        dates = [r[4] for r in group]
+        signals.append(ClusterSignal(
+            source="UK", ticker=isin, company=company, buyer_count=len(by_person),
+            total_value=total_value or None, members=members,
+            window_start=min(dates), window_end=max(dates),
+            reason="cluster" if is_cluster else "solo",
+            member_names=member_names,
+            buyers=[Buyer(name, uk_role(o["position"], o["related"]), o["total"]) for name, o in by_person.items()],
+        ))
+    return signals
+

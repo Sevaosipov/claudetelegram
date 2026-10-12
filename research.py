@@ -174,6 +174,8 @@ def european_activity(conn, key: str) -> list:
             FROM norway_purchases WHERE ticker = ?""", "Oslo Børs"),
         ("""SELECT txn_date, person, position, txn_type, value, currency, source_url
             FROM sweden_purchases WHERE isin = ? AND status = 'Aktuell'""", "FI (Sweden)"),
+        ("""SELECT txn_date, person, position, txn_type, value, currency, source_url
+            FROM uk_purchases WHERE isin = ? AND txn_type IN ('P', 'S')""", "FCA (UK)"),
     ):
         for r in conn.execute(sql, (key,)).fetchall():
             rows.append((*r, source))
