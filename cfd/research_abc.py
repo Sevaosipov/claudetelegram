@@ -19,7 +19,7 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
            stop_at: float, thirds: bool, look: int = LOOK, stop_atr: float | None = None,
            targets: tuple | None = None, trend: list | None = None, cost: float = COST,
            night_pct: float = NIGHT_PCT, break_k: int = 0, c_target: str | None = None,
-           cci: list | None = None) -> list[tuple[int, float]]:
+           cci: list | None = None, stop_fixed: float | None = None) -> list[tuple[int, float]]:
     """(year, result in R after costs) of one side's trades; `sign` +1 long, -1 short (prices mirrored).
     `stop_at` is the retracement the stop sits at: 1.0 is point 0, more is beyond it; with `stop_atr` the
     stop is that many ATR from the entry instead. `look` bars make «an absolute low». `targets` (round 3) are
@@ -93,9 +93,12 @@ def trades(bars: list[Bar], atr: list, first: dt.date, last: dt.date, sign: int,
             entry = top - e * size
             if lo[i] > entry:                                    # not already through the entry
                 stop = entry - stop_atr * atr[i] if stop_atr else top - stop_at * size
+                if stop_fixed:                                   # round 4: a fixed distance in price
+                    stop = entry - stop_fixed
                 levels = [zero + k * size for k in targets] if targets else [top, entry + size, entry + 1.618 * size]
                 if c_target:                                     # round 2: A, C (the entry plus 0-A), or both
-                    levels = {"A": [top], "C": [entry + size], "A+C": [top, entry + size]}[c_target]
+                    levels = {"A": [top], "C": [entry + size], "A+C": [top, entry + size],
+                              "C161": [entry + 1.618 * size]}[c_target]
                 order = (entry, stop, levels)
                 since = i
         i += 1
@@ -296,5 +299,27 @@ def run_sk3(period: str, log=print):
                                    cost=cost, night_pct=night, c_target=target, cci=cci if use else None)
                 name = f"SK3 {frame} E{e:g} stop{'0' if stop == 1.0 else f'{stop:g}'} {target}{' CCI' if use else ''}"
                 out.setdefault(name, {})[market] = rows
+        log(f"  {market} done")
+    return out
+
+
+def run_sk4(period: str, log=print):
+    """Round 4: the Tradebook's fixed 20-pip stop at each of the four entries, out at C (161.8 %) or at A."""
+    out: dict[str, dict[str, list]] = {}
+    for market in [*PIP, "XAUUSD"]:
+        bars = market_hours(market)
+        cost = 0.30 if market == "XAUUSD" else COST_PIPS[market] * PIP[market]
+        night = 0.020 if market == "XAUUSD" else 0.010
+        twenty = 2.0 if market == "XAUUSD" else 20 * PIP[market]
+        first, last = TPR_DESIGN if period == "design" else (TPR_HOLDOUT_FROM, bars[-1].ts.date())
+        start = next(k for k, b in enumerate(bars) if b.ts.date() >= first - dt.timedelta(days=120))
+        bars = bars[start:]
+        atr = ind.atr(bars, 14)
+        for e, target in product((0.5, 0.559, 0.618, 0.667), ("C161", "A")):
+            rows = []
+            for sign in (1, -1):
+                rows += trades(bars, atr, first, last, sign, m=0.0, e=e, stop_at=1.0, thirds=False, look=300,
+                               cost=cost, night_pct=night, c_target=target, stop_fixed=twenty)
+            out.setdefault(f"SK4 H1 E{e:g} 20pips {target}", {})[market] = rows
         log(f"  {market} done")
     return out
