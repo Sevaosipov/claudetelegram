@@ -38,3 +38,10 @@ the 161.8 % extension or at A: **all eight lost,** -0.03R to -0.14R a trade on 4
 three years of eight up. With the far target one trade in five wins. The hold-out was not run.
 
 Over the five rounds on this method: 150 candidates, none qualifying.
+
+## The live candidate on the hold-out, run once (2026-10-12)
+
+Four-hour bars, structure shift, entry at 61.8 %, stop at point 0, out at A; eight markets, 2020-01-01 on.
+**Fail:** 350 trades, -21.7R, -0.062R a trade, 40 % winners (design: +0.065R). Years up: 2 of 7 (2024, 2025).
+Markets up: 3 of 8 -- EURGBP +12.8R, GBPJPY +7.4R, EURJPY +3.8R; EURUSD -5.1R, AUDUSD -4.9R, USDJPY -8.3R,
+GBPUSD -9.2R, gold -18.1R. The small design profit did not carry over. The hold-out is now used for this method.
