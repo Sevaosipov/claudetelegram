@@ -659,7 +659,11 @@ def run(conn, *, today: dt.date | None = None, fetch: data.Fetch | None = None, 
         except Exception as e:
             print(f"[league] trade {t.id} {t.pair}: {type(e).__name__}: {e}", file=sys.stderr)
     if not over:
+        from cfd import paper
+        import telegram_notify as _tn
         for sig in signals_of_the_day(today, feed, cot=cot, yields=yields):
+            if paper.stopped(conn, paper.key_of("League", _tn.LEAGUE_NAMES.get(sig.idea, sig.idea))):
+                continue                                 # retired at paper.STOP_R (amendment A6)
             try:
                 t = make(conn, sig, feed)
                 if t is not None:

@@ -499,8 +499,21 @@ def _league_pass(conn, args) -> None:
     if _filtered_run(args) or args.no_telegram:
         return
     result = _run_source("LEAGUE", cfd_league.run, conn)
+    _paper_pass(conn)
     if result is not None and any(result):
         print(f"[LEAGUE] opened {result[0]}, closed {result[1]}")
+
+
+def _paper_pass(conn) -> None:
+    """Every paper test on one board, once a week, and an idea at -10R retired (cfd/paper.py). A failure is
+    logged and the run goes on."""
+    try:
+        from cfd import paper
+        today = dt.date.today()
+        paper.retire(conn, today, telegram_notify.send_text)
+        paper.weekly(conn, today, telegram_notify.send_text)
+    except Exception as e:
+        print(f"[PAPER] failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def _upkeep_pass(conn, args) -> None:

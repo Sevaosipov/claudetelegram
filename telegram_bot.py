@@ -160,6 +160,8 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "размер в лотах для IC Markets.\n"
              "/mt5 — счёт MetaTrader 5: баланс, открытые позиции, результат закрытых сделок за 7 и 30 дней.\n"
              "/spread — измеренная стоимость сделки (спред и комиссия) по данным MetaTrader.\n"
+             "/paper — все бумажные тесты CFD на одной доске (приходит и по понедельникам); идея, "
+             "ушедшая в −10R, останавливается сама.\n"
              "/day — дневная бумажная лига: внутридневные CFD-сделки 09:00–18:00, тест на 4 недели "
              "(/day off — без сообщений о сделках).\n"
              "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
@@ -257,6 +259,20 @@ def _handle_risk_command(conn, text: str) -> bool:
     except Exception as e:
         print(f"[telegram_bot] /risk failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось выполнить /risk ({type(e).__name__}). Попробуйте позже.")
+    return True
+
+
+def _handle_paper_command(conn, text: str) -> bool:
+    """/paper: every paper test on one board (cfd/paper.py). Returns False for any other message."""
+    parts = text.split()
+    if not parts or parts[0].lower().split("@")[0] != "/paper":
+        return False
+    try:
+        from cfd import paper
+        telegram_notify.send_text(paper.board(conn, dt.date.today()))
+    except Exception as e:
+        print(f"[telegram_bot] /paper failed: {type(e).__name__}: {e}", file=sys.stderr)
+        telegram_notify.send_text(f"Не удалось выполнить /paper ({type(e).__name__}). Попробуйте позже.")
     return True
 
 
@@ -795,7 +811,7 @@ def _handle_message(conn, text: str) -> None:
     if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
             or _handle_size_command(conn, text) or _handle_league_command(conn, text)
             or _handle_day_command(conn, text) or _handle_sk_command(conn, text) or _handle_risk_command(conn, text)
-            or _handle_mt5_command(conn, text)
+            or _handle_mt5_command(conn, text) or _handle_paper_command(conn, text)
             or _handle_watch_command(conn, text) or _handle_signals_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
