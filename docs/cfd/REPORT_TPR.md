@@ -53,3 +53,10 @@ years; the best -- entry on the 5-minute turn inside the zone, stop at point 0, 
 57 % winners and three years of four up, t 0.9 (the bar is 2.5). With the 4-hour trend filter only 16 trades are
 left in four years: the sequence is a reversal pattern, so it is nearly always against the 4-hour trend when its
 zone is reached. The stop under the zone's low wins one trade in six. The hold-out was not run.
+
+## Round 6: the same four-timeframe rule on seven markets (2026-10-12)
+
+Round 5's best rule, unchanged, 2021-2024, seven currency pairs: **877 trades, -21.8R, -0.025R a trade, t -0.7;**
+one year of four up (2024), three markets of seven up. EURUSD +12.6R and EURGBP +10.9R; EURJPY -27.1R, GBPJPY
+-9.7R, GBPUSD -8.2R; AUDUSD and USDJPY at zero. With seven times the trades the result did not rise toward the
+bar, it fell to zero: EURUSD's +0.09R was chance. The hold-out was not run.
