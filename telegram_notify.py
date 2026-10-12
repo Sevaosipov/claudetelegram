@@ -1502,7 +1502,7 @@ def format_day_opens(trades: list, *, html: bool = True) -> str:
     """The intraday paper trades opened in one pass, a bare block each: the market and the side, the entry,
     the stop and the target."""
     from cfd import intraday
-    blocks = ["\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD day",
+    blocks = ["\n".join([f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · CFD day · {intraday.IDEAS[t.idea]}",
                          f"Entry {_day_price(t, t.entry)}", f"Stop  {_day_price(t, t.stop_price)}"]
                         + [f"TP{k}   {_day_price(t, intraday.level(t, k))}" for k in range(1, intraday.LEVELS + 1)])
               for t in trades]
@@ -1518,11 +1518,11 @@ def format_day_event(t, event: str = "close", *, html: bool = True) -> str:
     if event.startswith("tp:"):
         k = int(event[3:])
         stop = t.entry if k == 1 else intraday.level(t, k - 1)
-        text = f"{t.pair} TP{k} {_day_price(t, intraday.level(t, k))} stop {_day_price(t, stop)}"
+        text = f"{t.pair} {intraday.IDEAS[t.idea]} TP{k} {_day_price(t, intraday.level(t, k))} stop {_day_price(t, stop)}"
     else:
         how = f"TP{intraday.LEVELS}" if t.reason == "target" else "stop" if t.reason == "stop" and not t.stage \
             else "closed"
-        text = f"{t.pair} {how} {_day_price(t, t.exit_price)} {t.result_r:+.1f}R"
+        text = f"{t.pair} {intraday.IDEAS[t.idea]} {how} {_day_price(t, t.exit_price)} {t.result_r:+.1f}R"
     return f"<pre>{_esc(text)}</pre>" if html else text
 
 
@@ -1543,7 +1543,7 @@ def format_day_board(board, *, day=None, final: bool = False, html: bool = True)
                  + f"{sum(s.net for s in scores):>+6.2f} {sum(s.closed for s in scores):>3} "
                    f"{sum(s.wins for s in scores):>3} {sum(s.open for s in scores):>2}")
     for t in board.open:
-        lines += ["", f"{t.pair} {'Long' if t.side == 'long' else 'Short'}",
+        lines += ["", f"{t.pair} {'Long' if t.side == 'long' else 'Short'} · {intraday.IDEAS[t.idea]}",
                   f"{_day_price(t, t.entry)}  SL {_day_price(t, t.stop)}  "
                   f"TP{t.stage + 1} {_day_price(t, intraday.level(t, t.stage + 1))}"]
     text = "\n".join(lines)
