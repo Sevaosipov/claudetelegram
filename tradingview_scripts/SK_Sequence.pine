@@ -22,12 +22,12 @@ keepOld  = input.bool(true, "Keep finished trades on the chart")
 htfOn    = input.bool(true, "Only with the higher-timeframe trend")
 htfTf    = input.timeframe("D", "Higher timeframe")
 htfLen   = input.int(50, "Its trend average (EMA)", minval = 5)
-upCol    = input.color(color.new(#26c6da, 0), "Buy setups (leg, zone, entry)")
-dnCol    = input.color(color.new(#ff9800, 0), "Sell setups (leg, zone, entry)")
+upCol    = input.color(color.new(#26c6da, 0), "Buy setups (zone, entry line)")
+dnCol    = input.color(color.new(#ff9800, 0), "Sell setups (zone, entry line)")
 col0     = input.color(color.new(#ffffff, 0), "Point 0")
-colA     = input.color(color.new(#fdd835, 0), "Point A")
-colB     = input.color(color.new(#ab47bc, 0), "Point B")
-colC     = input.color(color.new(#2979ff, 0), "Point C: target line, zone, result")
+colA     = input.color(color.new(#fdd835, 0), "Point A, and the line 0 to A")
+colB     = input.color(color.new(#ab47bc, 0), "Point B, and the line A to B")
+colC     = input.color(color.new(#2979ff, 0), "Point C: the line B to C, targets, zone, result")
 colStop  = input.color(color.new(#9e9e9e, 0), "Stop / invalidation")
 
 type SK
@@ -47,6 +47,10 @@ type SK
     bool inTrade = false
     int fillBar = na
     line leg = na
+    line legAB = na
+    line legBC = na
+    line legCC = na
+    int tp1Bar = na
     line lEntry = na
     line lStop = na
     line lTp = na
@@ -80,6 +84,9 @@ if not na(pl)
 
 wipe(SK s) =>
     line.delete(s.leg)
+    line.delete(s.legAB)
+    line.delete(s.legBC)
+    line.delete(s.legCC)
     line.delete(s.lEntry)
     line.delete(s.lStop)
     line.delete(s.lTp)
@@ -96,6 +103,9 @@ wipe(SK s) =>
 
 detach(SK s) =>
     s.leg := na
+    s.legAB := na
+    s.legBC := na
+    s.legCC := na
     s.lEntry := na
     s.lStop := na
     s.lTp := na
@@ -143,6 +153,7 @@ finish(SK s, int dir, bool won) =>
               style = dir > 0 == won ? label.style_label_down : label.style_label_up,
               color = won ? color.new(colC, 10) : color.new(colStop, 10), textcolor = color.white, size = size.small)
     if won
+        s.legCC := line.new(s.tp1Bar, dir * s.tp1, bar_index, dir * s.target, color = colC, width = 2)             // on to TP2
         tallyN.set(1, tallyN.get(1) + 1)
     else if not s.hit1
         tallyN.set(2, tallyN.get(2) + 1)
@@ -168,6 +179,8 @@ step(SK s, int dir) =>
         else if bar_index > s.fillBar
             if not s.hit1 and hi >= s.tp1                      // TP1: half out, the stop to the entry
                 s.hit1 := true
+                s.tp1Bar := bar_index
+                s.legBC := line.new(s.fillBar, dir * s.entry, bar_index, dir * s.tp1, color = colC, width = 2)     // B -> C
                 tallyN.set(0, tallyN.get(0) + 1)
                 label.new(bar_index, dir * s.tp1, "TP1 ✓", style = dir > 0 ? label.style_label_down : label.style_label_up,
                           color = color.new(colC, 10), textcolor = color.white, size = size.small)
@@ -194,6 +207,7 @@ step(SK s, int dir) =>
                 s.inTrade := true
                 s.fillBar := bar_index
                 stretch(s)
+                s.legAB := line.new(s.topBar, dir * s.top, bar_index, dir * s.entry, color = colB, width = 2)   // A -> B
                 s.lB := label.new(bar_index, dir * s.entry, "B", style = dir > 0 ? label.style_label_up : label.style_label_down,
                                   color = color.new(colB, 10), textcolor = color.white, size = size.small)
                 if lo <= s.stop
@@ -222,7 +236,7 @@ step(SK s, int dir) =>
                         s.hasOrder := true
                         s.orderBar := bar_index
                         placed := true
-                        s.leg := line.new(s.zeroBar, dir * s.zero, s.topBar, dir * s.top, color = color.new(col, 30), width = 2)
+                        s.leg := line.new(s.zeroBar, dir * s.zero, s.topBar, dir * s.top, color = colA, width = 2)       // 0 -> A, in A's colour
                         s.l0 := label.new(s.zeroBar, dir * s.zero, "0", style = dir > 0 ? label.style_label_up : label.style_label_down,
                                           color = color.new(col0, 10), textcolor = color.black, size = size.small)
                         s.lA := label.new(s.topBar, dir * s.top, "A", style = dir > 0 ? label.style_label_down : label.style_label_up,
