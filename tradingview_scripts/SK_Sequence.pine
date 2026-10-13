@@ -134,12 +134,12 @@ finish(SK s, int dir, bool won) =>
     float r1 = (s.tp1 - s.entry) / s.risk
     float rest = ((won ? s.target : s.stop) - s.entry) / s.risk
     float total = s.hit1 ? 0.5 * r1 + 0.5 * rest : rest
-    string text = won ? "TP2 ✓ " : s.hit1 ? "stop after TP1 " : "SL "
+    string outcome = won ? "TP2 ✓ " : s.hit1 ? "stop after TP1 " : "SL "
     label.delete(s.lC)
     label.delete(s.lC1)
     label.delete(s.lInv)
     label.delete(s.lInfo)
-    label.new(bar_index, dir * (won ? s.target : s.stop), text + (total >= 0 ? "+" : "") + str.tostring(total, "#.0") + "R",
+    label.new(bar_index, dir * (won ? s.target : s.stop), outcome + (total >= 0 ? "+" : "") + str.tostring(total, "#.0") + "R",
               style = dir > 0 == won ? label.style_label_down : label.style_label_up,
               color = won ? color.new(colC, 10) : color.new(colStop, 10), textcolor = color.white, size = size.small)
     if won
