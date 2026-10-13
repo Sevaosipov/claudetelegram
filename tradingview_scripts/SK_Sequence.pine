@@ -1,33 +1,30 @@
 //@version=6
-// SK Sequence -- the rule the bot runs on paper (cfd/sk_live.py, docs/cfd/SK_LIVE.md), drawn on the chart.
+// SK Sequence -- the 0-A-B-C sequence drawn on the chart.
 //   Point 0: the highest high / lowest low of the last N bars.
 //   A: the extreme since, beyond the last swing point confirmed before point 0 (a structure shift).
-//   Once price has retraced 38.2 % of 0-A: a limit at the 61.8 % retracement, stop at point 0, target at A.
-//   A new extreme beyond A, or beyond point 0, cancels the order.
-//   C is the method's own target: the entry plus 100 % and 161.8 % of 0-A. It is drawn for reference; the
-//   bot takes its profit at A, which did better than C in every test. After A is reached the C lines are
-//   followed on: a tick marks each C level price gets to before it falls back to the entry, and the table
-//   counts how often that happened on this chart.
-// Also drawn, as SK tools usually show them: the 161.8-200 % target zone, an «Invalidation» tag at the stop,
-// and what the trade pays at A and at C in multiples of its risk. An optional filter takes only setups
-// with the higher timeframe's trend; it is off by default because the bot does not use it.
-// The bot reads four-hour bars; on another timeframe the drawings are that timeframe's own.
-indicator("SK Sequence (bot rule)", "SK", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 200)
+//      A only starts the sequence: it is not a target.
+//   B: once price has retraced 38.2 % of 0-A, a limit at the 61.8 % retracement (inside the 50-66.7 % zone).
+//   C: the take-profit -- the entry plus 161.8 % of 0-A, the near edge of the 161.8-200 % target zone.
+//   Stop: point 0 (the invalidation). A new extreme beyond A, or beyond point 0, cancels the order.
+//   By default only setups with the higher timeframe's trend are taken.
+// The bot's paper test (cfd/sk_live.py) differs in two ways: it takes its profit at A, which did better than C
+// in every test, and it uses no trend filter.
+indicator("SK Sequence", "SK", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 300)
 
 lookback = input.int(300, "Point 0: extreme of N bars", minval = 20)
 pivotN   = input.int(3, "Swing: bars each side", minval = 1)
-entryLvl = input.float(0.618, "Entry retracement", minval = 0.4, maxval = 0.9, step = 0.001)
+entryLvl = input.float(0.618, "Entry retracement (B)", minval = 0.4, maxval = 0.9, step = 0.001)
+targetX  = input.float(1.618, "Take-profit extension (C)", minval = 1.0, maxval = 3.0, step = 0.001)
 keepOld  = input.bool(true, "Keep finished trades on the chart")
-showC    = input.bool(true, "Show the C levels (100 %, and the 161.8-200 % target zone)")
-htfOn    = input.bool(false, "Only with the higher-timeframe trend (not the bot's rule)")
+htfOn    = input.bool(true, "Only with the higher-timeframe trend")
 htfTf    = input.timeframe("D", "Higher timeframe")
 htfLen   = input.int(50, "Its trend average (EMA)", minval = 5)
 upCol    = input.color(color.new(#26c6da, 0), "Buy setups (leg, zone, entry)")
 dnCol    = input.color(color.new(#ff9800, 0), "Sell setups (leg, zone, entry)")
 col0     = input.color(color.new(#ffffff, 0), "Point 0")
-colA     = input.color(color.new(#fdd835, 0), "Point A and its target line")
+colA     = input.color(color.new(#fdd835, 0), "Point A")
 colB     = input.color(color.new(#ab47bc, 0), "Point B")
-colC     = input.color(color.new(#2979ff, 0), "Point C: lines, zone, ticks")
+colC     = input.color(color.new(#2979ff, 0), "Point C: target line, zone, result")
 colStop  = input.color(color.new(#9e9e9e, 0), "Stop / invalidation")
 
 type SK
@@ -47,34 +44,17 @@ type SK
     line lEntry = na
     line lStop = na
     line lTp = na
+    line l100 = na
     box zone = na
+    box cZone = na
     label l0 = na
     label lA = na
     label lB = na
-    line lC1 = na
-    line lC2 = na
-    label lblC1 = na
-    label lblC2 = na
-    box cZone = na
+    label lC = na
     label lInv = na
     label lInfo = na
 
-// A sequence that reached A, followed on toward C until price is back at its entry.
-type Chase
-    int dir
-    int since
-    float c1
-    float c2
-    float be
-    bool hit1
-    line l1
-    line l2
-    label b1
-    label b2
-    box zone
-
-var array<Chase> chases = array.new<Chase>()
-var array<int> tallyN = array.from(0, 0, 0)      // reached A, then C 100 %, then C 161.8 %
+var array<int> tallyN = array.from(0, 0)         // reached C, stopped out
 
 // The higher timeframe's trend, from its last finished bar (so nothing repaints).
 htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[1], lookahead = barmerge.lookahead_on)
@@ -96,15 +76,13 @@ wipe(SK s) =>
     line.delete(s.lEntry)
     line.delete(s.lStop)
     line.delete(s.lTp)
+    line.delete(s.l100)
     box.delete(s.zone)
+    box.delete(s.cZone)
     label.delete(s.l0)
     label.delete(s.lA)
     label.delete(s.lB)
-    line.delete(s.lC1)
-    line.delete(s.lC2)
-    label.delete(s.lblC1)
-    label.delete(s.lblC2)
-    box.delete(s.cZone)
+    label.delete(s.lC)
     label.delete(s.lInv)
     label.delete(s.lInfo)
 
@@ -113,15 +91,13 @@ detach(SK s) =>
     s.lEntry := na
     s.lStop := na
     s.lTp := na
+    s.l100 := na
     s.zone := na
+    s.cZone := na
     s.l0 := na
     s.lA := na
     s.lB := na
-    s.lC1 := na
-    s.lC2 := na
-    s.lblC1 := na
-    s.lblC2 := na
-    s.cZone := na
+    s.lC := na
     s.lInv := na
     s.lInfo := na
 
@@ -135,32 +111,23 @@ stretch(SK s) =>
     line.set_x2(s.lEntry, bar_index)
     line.set_x2(s.lStop, bar_index)
     line.set_x2(s.lTp, bar_index)
+    line.set_x2(s.l100, bar_index)
     box.set_right(s.zone, bar_index)
-    line.set_x2(s.lC1, bar_index)
-    line.set_x2(s.lC2, bar_index)
-    label.set_x(s.lblC1, bar_index)
-    label.set_x(s.lblC2, bar_index)
     box.set_right(s.cZone, bar_index)
+    label.set_x(s.lC, bar_index)
     label.set_x(s.lInv, bar_index)
     label.set_x(s.lInfo, bar_index)
 
 finish(SK s, int dir, bool won) =>
     stretch(s)
     r = (s.target - s.entry) / (s.entry - s.stop)
-    label.new(bar_index, dir * (won ? s.target : s.stop), won ? "TP +" + str.tostring(r, "#.0") + "R" : "SL -1R",
+    label.delete(s.lC)
+    label.delete(s.lInv)
+    label.delete(s.lInfo)
+    label.new(bar_index, dir * (won ? s.target : s.stop), won ? "C ✓ +" + str.tostring(r, "#.0") + "R" : "SL -1R",
               style = dir > 0 == won ? label.style_label_down : label.style_label_up,
-              color = won ? color.new(colA, 10) : color.new(colStop, 10), textcolor = won ? color.black : color.white, size = size.small)
-    if won
-        tallyN.set(0, tallyN.get(0) + 1)
-        if not na(s.lC1)                 // hand the C lines over: they are followed on from the next bar
-            float move = s.target - s.stop
-            chases.push(Chase.new(dir, bar_index, s.entry + move, s.entry + 1.618 * move, s.entry, false,
-                                  s.lC1, s.lC2, s.lblC1, s.lblC2, s.cZone))
-            s.lC1 := na
-            s.lC2 := na
-            s.lblC1 := na
-            s.lblC2 := na
-            s.cZone := na
+              color = won ? color.new(colC, 10) : color.new(colStop, 10), textcolor = color.white, size = size.small)
+    tallyN.set(won ? 0 : 1, tallyN.get(won ? 0 : 1) + 1)
     if not keepOld
         wipe(s)
     detach(s)
@@ -207,14 +174,17 @@ step(SK s, int dir) =>
                     s.topBar := bar_index
                 float size = s.top - s.zero
                 bool shifted = not na(s.barrier) and s.top > s.barrier
+                bool trendOk = not htfOn or (dir > 0 ? htfUp : not htfUp)
                 if s.hasOrder
                     stretch(s)
-                else if size > 0 and shifted and (not htfOn or (dir > 0 ? htfUp : not htfUp)) and lo <= s.top - 0.382 * size
+                else if size > 0 and shifted and trendOk and lo <= s.top - 0.382 * size
                     float e = s.top - entryLvl * size
                     if lo > e
+                        float risk = e - s.zero
+                        float c = e + targetX * size
                         s.entry := e
                         s.stop := s.zero
-                        s.target := s.top
+                        s.target := c
                         s.hasOrder := true
                         s.orderBar := bar_index
                         placed := true
@@ -227,25 +197,16 @@ step(SK s, int dir) =>
                                           border_color = color.new(col, 60), bgcolor = color.new(col, 88))
                         s.lEntry := line.new(s.topBar, dir * e, bar_index, dir * e, color = color.new(col, 0), style = line.style_dashed)
                         s.lStop := line.new(s.topBar, dir * s.stop, bar_index, dir * s.stop, color = colStop, style = line.style_dotted)
-                        s.lTp := line.new(s.topBar, dir * s.target, bar_index, dir * s.target, color = colA, style = line.style_dotted)
-                        float risk = e - s.zero
+                        s.lTp := line.new(s.topBar, dir * c, bar_index, dir * c, color = colC, width = 2)
+                        s.l100 := line.new(s.topBar, dir * (e + size), bar_index, dir * (e + size), color = color.new(colC, 55), style = line.style_dotted)
+                        s.cZone := box.new(s.topBar, dir * c, bar_index, dir * (e + 2.0 * size),
+                                           border_color = color.new(colC, 60), bgcolor = color.new(colC, 88))
+                        s.lC := label.new(bar_index, dir * c, "C  TP", style = label.style_label_left,
+                                          color = color.new(colC, 10), textcolor = color.white, size = size.small)
                         s.lInv := label.new(bar_index, dir * s.stop, "Invalidation", style = label.style_label_left,
                                             color = color.new(colStop, 30), textcolor = color.white, size = size.small)
-                        s.lInfo := label.new(bar_index, dir * e, "Entry · A " + str.tostring((s.top - e) / risk, "#.0") + "R · C "
-                                             + str.tostring(1.618 * size / risk, "#.0") + "R", style = label.style_label_left,
-                                             color = color.new(col, 30), textcolor = color.white, size = size.small)
-                        if showC
-                            float c1 = e + size
-                            float c2 = e + 1.618 * size
-                            color cc = colC
-                            s.lC1 := line.new(s.topBar, dir * c1, bar_index, dir * c1, color = cc, style = line.style_dashed)
-                            s.lC2 := line.new(s.topBar, dir * c2, bar_index, dir * c2, color = cc, style = line.style_dashed)
-                            s.lblC1 := label.new(bar_index, dir * c1, "C 100%", style = label.style_label_left,
-                                                 color = color.new(cc, 20), textcolor = color.white, size = size.small)
-                            s.lblC2 := label.new(bar_index, dir * c2, "C 161.8-200%", style = label.style_label_left,
-                                                 color = color.new(cc, 20), textcolor = color.white, size = size.small)
-                            s.cZone := box.new(s.topBar, dir * c2, bar_index, dir * (e + 2.0 * size),
-                                               border_color = color.new(cc, 60), bgcolor = color.new(cc, 88))
+                        s.lInfo := label.new(bar_index, dir * e, "Entry · C pays " + str.tostring((c - e) / risk, "#.0") + "R",
+                                             style = label.style_label_left, color = color.new(col, 30), textcolor = color.black, size = size.small)
     placed
 
 var SK buy = SK.new()
@@ -256,57 +217,22 @@ if barstate.isconfirmed
     newBuy := step(buy, 1)
     newSell := step(sell, -1)
 
-// Follow the sequences that reached A: tick each C level price gets to; stop when it is back at the entry.
-if barstate.isconfirmed and chases.size() > 0
-    for i = chases.size() - 1 to 0
-        Chase c = chases.get(i)
-        if bar_index > c.since
-            float chi = c.dir > 0 ? high : -low
-            float clo = c.dir > 0 ? low : -high
-            line.set_x2(c.l1, bar_index)
-            line.set_x2(c.l2, bar_index)
-            label.set_x(c.b1, bar_index)
-            label.set_x(c.b2, bar_index)
-            box.set_right(c.zone, bar_index)
-            bool over = false
-            if clo <= c.be
-                over := true
-            else
-                if not c.hit1 and chi >= c.c1
-                    c.hit1 := true
-                    tallyN.set(1, tallyN.get(1) + 1)
-                    label.new(bar_index, c.dir * c.c1, "C 100% ✓", style = c.dir > 0 ? label.style_label_down : label.style_label_up,
-                              color = color.new(colC, 10), textcolor = color.white, size = size.small)
-                if chi >= c.c2
-                    tallyN.set(2, tallyN.get(2) + 1)
-                    label.new(bar_index, c.dir * c.c2, "C 161.8% ✓", style = c.dir > 0 ? label.style_label_down : label.style_label_up,
-                              color = color.new(colC, 10), textcolor = color.white, size = size.small)
-                    over := true
-            if over
-                label.delete(c.b1)
-                label.delete(c.b2)
-                chases.remove(i)
-
-var table tally = table.new(position.top_right, 2, 4, border_width = 1)
-if barstate.islast and showC
-    int nA = tallyN.get(0)
-    int nC1 = tallyN.get(1)
-    int nC2 = tallyN.get(2)
+var table tally = table.new(position.top_right, 2, 3, border_width = 1)
+if barstate.islast
+    int nC = tallyN.get(0)
+    int nS = tallyN.get(1)
     color bg = color.new(color.gray, 75)
     table.cell(tally, 0, 0, "SK on this chart", bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 1, 0, "", bgcolor = bg)
-    table.cell(tally, 0, 1, "reached A", bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 1, 1, str.tostring(nA), bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 0, 2, "then C 100%", bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 1, 2, str.tostring(nC1) + (nA > 0 ? "  (" + str.tostring(100.0 * nC1 / nA, "#") + "%)" : ""),
+    table.cell(tally, 1, 0, htfOn ? "with " + htfTf + " trend" : "any trend", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 0, 1, "reached C", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 1, str.tostring(nC) + (nC + nS > 0 ? "  (" + str.tostring(100.0 * nC / (nC + nS), "#") + "%)" : ""),
                bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 0, 3, "then C 161.8%", bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 1, 3, str.tostring(nC2) + (nA > 0 ? "  (" + str.tostring(100.0 * nC2 / nA, "#") + "%)" : ""),
-               bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 0, 2, "stopped at 0", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 2, str.tostring(nS), bgcolor = bg, text_color = color.white, text_size = size.small)
 
 if newBuy
     alert("SK Buy limit " + syminfo.ticker + "  entry " + str.tostring(buy.entry, format.mintick) + "  stop "
-          + str.tostring(buy.stop, format.mintick) + "  TP " + str.tostring(buy.target, format.mintick), alert.freq_once_per_bar_close)
+          + str.tostring(buy.stop, format.mintick) + "  TP (C) " + str.tostring(buy.target, format.mintick), alert.freq_once_per_bar_close)
 if newSell
     alert("SK Sell limit " + syminfo.ticker + "  entry " + str.tostring(-sell.entry, format.mintick) + "  stop "
-          + str.tostring(-sell.stop, format.mintick) + "  TP " + str.tostring(-sell.target, format.mintick), alert.freq_once_per_bar_close)
+          + str.tostring(-sell.stop, format.mintick) + "  TP (C) " + str.tostring(-sell.target, format.mintick), alert.freq_once_per_bar_close)
