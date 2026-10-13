@@ -5,7 +5,9 @@
 //   Once price has retraced 38.2 % of 0-A: a limit at the 61.8 % retracement, stop at point 0, target at A.
 //   A new extreme beyond A, or beyond point 0, cancels the order.
 //   C is the method's own target: the entry plus 100 % and 161.8 % of 0-A. It is drawn for reference; the
-//   bot takes its profit at A, which did better than C in every test.
+//   bot takes its profit at A, which did better than C in every test. After A is reached the C lines are
+//   followed on: a tick marks each C level price gets to before it falls back to the entry, and the table
+//   counts how often that happened on this chart.
 // The bot reads four-hour bars; on another timeframe the drawings are that timeframe's own.
 indicator("SK Sequence (bot rule)", "SK", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 200)
 
@@ -42,6 +44,24 @@ type SK
     line lC2 = na
     label lblC1 = na
     label lblC2 = na
+
+// A sequence that reached A, followed on toward C until price is back at its entry.
+type Chase
+    int dir
+    int since
+    float c1
+    float c2
+    float be
+    bool hit1
+    line l1
+    line l2
+    label b1
+    label b2
+
+var array<Chase> chases = array.new<Chase>()
+var int nA = 0
+var int nC1 = 0
+var int nC2 = 0
 
 lowestL  = ta.lowest(low, lookback)
 highestH = ta.highest(high, lookback)
@@ -104,6 +124,16 @@ finish(SK s, int dir, bool won) =>
     label.new(bar_index, dir * (won ? s.target : s.stop), won ? "TP +" + str.tostring(r, "#.0") + "R" : "SL -1R",
               style = dir > 0 == won ? label.style_label_down : label.style_label_up,
               color = won ? color.new(#26a69a, 10) : color.new(#ef5350, 10), textcolor = color.white, size = size.small)
+    if won
+        nA += 1
+        if not na(s.lC1)                 // hand the C lines over: they are followed on from the next bar
+            float move = s.target - s.stop
+            chases.push(Chase.new(dir, bar_index, s.entry + move, s.entry + 1.618 * move, s.entry, false,
+                                  s.lC1, s.lC2, s.lblC1, s.lblC2))
+            s.lC1 := na
+            s.lC2 := na
+            s.lblC1 := na
+            s.lblC2 := na
     if not keepOld
         wipe(s)
     detach(s)
@@ -190,6 +220,50 @@ bool newSell = false
 if barstate.isconfirmed
     newBuy := step(buy, 1)
     newSell := step(sell, -1)
+
+// Follow the sequences that reached A: tick each C level price gets to; stop when it is back at the entry.
+if barstate.isconfirmed and chases.size() > 0
+    for i = chases.size() - 1 to 0
+        Chase c = chases.get(i)
+        if bar_index > c.since
+            float chi = c.dir > 0 ? high : -low
+            float clo = c.dir > 0 ? low : -high
+            line.set_x2(c.l1, bar_index)
+            line.set_x2(c.l2, bar_index)
+            label.set_x(c.b1, bar_index)
+            label.set_x(c.b2, bar_index)
+            bool over = false
+            if clo <= c.be
+                over := true
+            else
+                if not c.hit1 and chi >= c.c1
+                    c.hit1 := true
+                    nC1 += 1
+                    label.new(bar_index, c.dir * c.c1, "C 100% ✓", style = c.dir > 0 ? label.style_label_down : label.style_label_up,
+                              color = color.new(#26a69a, 10), textcolor = color.white, size = size.small)
+                if chi >= c.c2
+                    nC2 += 1
+                    label.new(bar_index, c.dir * c.c2, "C 161.8% ✓", style = c.dir > 0 ? label.style_label_down : label.style_label_up,
+                              color = color.new(#26a69a, 10), textcolor = color.white, size = size.small)
+                    over := true
+            if over
+                label.delete(c.b1)
+                label.delete(c.b2)
+                chases.remove(i)
+
+var table tally = table.new(position.top_right, 2, 4, border_width = 1)
+if barstate.islast and showC
+    color bg = color.new(color.gray, 75)
+    table.cell(tally, 0, 0, "SK on this chart", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 0, "", bgcolor = bg)
+    table.cell(tally, 0, 1, "reached A", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 1, str.tostring(nA), bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 0, 2, "then C 100%", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 2, str.tostring(nC1) + (nA > 0 ? "  (" + str.tostring(100.0 * nC1 / nA, "#") + "%)" : ""),
+               bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 0, 3, "then C 161.8%", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 3, str.tostring(nC2) + (nA > 0 ? "  (" + str.tostring(100.0 * nC2 / nA, "#") + "%)" : ""),
+               bgcolor = bg, text_color = color.white, text_size = size.small)
 
 if newBuy
     alert("SK Buy limit " + syminfo.ticker + "  entry " + str.tostring(buy.entry, format.mintick) + "  stop "
