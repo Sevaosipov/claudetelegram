@@ -250,7 +250,7 @@ step(SK s, int dir) =>
                         s.orderBar := bar_index
                         placed := true
                         s.leg := line.new(s.zeroBar, dir * s.zero, s.topBar, dir * s.top, color = colA, width = 2)       // 0 -> A, in A's colour
-                        s.span := math.max(s.topBar - s.zeroBar, 5)            // the plan: as long again as 0-A took
+                        s.span := math.min(math.max(s.topBar - s.zeroBar, 5), 100)     // the plan: as long again as 0-A took
                         s.pAB := line.new(s.topBar, dir * s.top, bar_index + s.span, dir * e, color = colB, style = line.style_dashed)
                         s.pBC := line.new(bar_index + s.span, dir * e, bar_index + 2 * s.span, dir * c, color = colC, style = line.style_dashed)
                         s.l0 := label.new(s.zeroBar, dir * s.zero, "0", style = dir > 0 ? label.style_label_up : label.style_label_down,
