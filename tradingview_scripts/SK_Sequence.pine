@@ -4,6 +4,8 @@
 //   A: the extreme since, beyond the last swing point confirmed before point 0 (a structure shift).
 //   Once price has retraced 38.2 % of 0-A: a limit at the 61.8 % retracement, stop at point 0, target at A.
 //   A new extreme beyond A, or beyond point 0, cancels the order.
+//   C is the method's own target: the entry plus 100 % and 161.8 % of 0-A. It is drawn for reference; the
+//   bot takes its profit at A, which did better than C in every test.
 // The bot reads four-hour bars; on another timeframe the drawings are that timeframe's own.
 indicator("SK Sequence (bot rule)", "SK", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 200)
 
@@ -11,6 +13,7 @@ lookback = input.int(300, "Point 0: extreme of N bars", minval = 20)
 pivotN   = input.int(3, "Swing: bars each side", minval = 1)
 entryLvl = input.float(0.618, "Entry retracement", minval = 0.4, maxval = 0.9, step = 0.001)
 keepOld  = input.bool(true, "Keep finished trades on the chart")
+showC    = input.bool(true, "Show the C levels (100 % and 161.8 % extension)")
 upCol    = input.color(color.new(#26a69a, 0), "Buy colour")
 dnCol    = input.color(color.new(#ef5350, 0), "Sell colour")
 
@@ -35,6 +38,10 @@ type SK
     label l0 = na
     label lA = na
     label lB = na
+    line lC1 = na
+    line lC2 = na
+    label lblC1 = na
+    label lblC2 = na
 
 lowestL  = ta.lowest(low, lookback)
 highestH = ta.highest(high, lookback)
@@ -56,6 +63,10 @@ wipe(SK s) =>
     label.delete(s.l0)
     label.delete(s.lA)
     label.delete(s.lB)
+    line.delete(s.lC1)
+    line.delete(s.lC2)
+    label.delete(s.lblC1)
+    label.delete(s.lblC2)
 
 detach(SK s) =>
     s.leg := na
@@ -66,6 +77,10 @@ detach(SK s) =>
     s.l0 := na
     s.lA := na
     s.lB := na
+    s.lC1 := na
+    s.lC2 := na
+    s.lblC1 := na
+    s.lblC2 := na
 
 cancel(SK s) =>
     if s.hasOrder
@@ -78,6 +93,10 @@ stretch(SK s) =>
     line.set_x2(s.lStop, bar_index)
     line.set_x2(s.lTp, bar_index)
     box.set_right(s.zone, bar_index)
+    line.set_x2(s.lC1, bar_index)
+    line.set_x2(s.lC2, bar_index)
+    label.set_x(s.lblC1, bar_index)
+    label.set_x(s.lblC2, bar_index)
 
 finish(SK s, int dir, bool won) =>
     stretch(s)
@@ -152,6 +171,16 @@ step(SK s, int dir) =>
                         s.lEntry := line.new(s.topBar, dir * e, bar_index, dir * e, color = color.new(col, 0), style = line.style_dashed)
                         s.lStop := line.new(s.topBar, dir * s.stop, bar_index, dir * s.stop, color = color.new(#ef5350, 0), style = line.style_dotted)
                         s.lTp := line.new(s.topBar, dir * s.target, bar_index, dir * s.target, color = color.new(#26a69a, 0), style = line.style_dotted)
+                        if showC
+                            float c1 = e + size
+                            float c2 = e + 1.618 * size
+                            color cc = color.new(#5b9cf6, 0)
+                            s.lC1 := line.new(s.topBar, dir * c1, bar_index, dir * c1, color = cc, style = line.style_dashed)
+                            s.lC2 := line.new(s.topBar, dir * c2, bar_index, dir * c2, color = cc, style = line.style_dashed)
+                            s.lblC1 := label.new(bar_index, dir * c1, "C 100%", style = label.style_label_left,
+                                                 color = color.new(cc, 20), textcolor = color.white, size = size.small)
+                            s.lblC2 := label.new(bar_index, dir * c2, "C 161.8%", style = label.style_label_left,
+                                                 color = color.new(cc, 20), textcolor = color.white, size = size.small)
     placed
 
 var SK buy = SK.new()
