@@ -1,0 +1,170 @@
+//@version=6
+// SK Sequence -- the rule the bot runs on paper (cfd/sk_live.py, docs/cfd/SK_LIVE.md), drawn on the chart.
+//   Point 0: the highest high / lowest low of the last N bars.
+//   A: the extreme since, beyond the last swing point confirmed before point 0 (a structure shift).
+//   Once price has retraced 38.2 % of 0-A: a limit at the 61.8 % retracement, stop at point 0, target at A.
+//   A new extreme beyond A, or beyond point 0, cancels the order.
+// The bot reads four-hour bars; on another timeframe the drawings are that timeframe's own.
+indicator("SK Sequence (bot rule)", "SK", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 200)
+
+lookback = input.int(300, "Point 0: extreme of N bars", minval = 20)
+pivotN   = input.int(3, "Swing: bars each side", minval = 1)
+entryLvl = input.float(0.618, "Entry retracement", minval = 0.4, maxval = 0.9, step = 0.001)
+keepOld  = input.bool(true, "Keep finished trades on the chart")
+upCol    = input.color(color.new(#26a69a, 0), "Buy colour")
+dnCol    = input.color(color.new(#ef5350, 0), "Sell colour")
+
+type SK
+    float zero = na
+    float top = na
+    int zeroBar = na
+    int topBar = na
+    float barrier = na
+    bool hasOrder = false
+    int orderBar = na
+    float entry = na
+    float stop = na
+    float target = na
+    bool inTrade = false
+    int fillBar = na
+    line leg = na
+    line lEntry = na
+    line lStop = na
+    line lTp = na
+    box zone = na
+    label l0 = na
+    label lA = na
+    label lB = na
+
+lowestL  = ta.lowest(low, lookback)
+highestH = ta.highest(high, lookback)
+ph = ta.pivothigh(high, pivotN, pivotN)
+pl = ta.pivotlow(low, pivotN, pivotN)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+wipe(SK s) =>
+    line.delete(s.leg)
+    line.delete(s.lEntry)
+    line.delete(s.lStop)
+    line.delete(s.lTp)
+    box.delete(s.zone)
+    label.delete(s.l0)
+    label.delete(s.lA)
+    label.delete(s.lB)
+
+detach(SK s) =>
+    s.leg := na
+    s.lEntry := na
+    s.lStop := na
+    s.lTp := na
+    s.zone := na
+    s.l0 := na
+    s.lA := na
+    s.lB := na
+
+cancel(SK s) =>
+    if s.hasOrder
+        wipe(s)
+        detach(s)
+        s.hasOrder := false
+
+stretch(SK s) =>
+    line.set_x2(s.lEntry, bar_index)
+    line.set_x2(s.lStop, bar_index)
+    line.set_x2(s.lTp, bar_index)
+    box.set_right(s.zone, bar_index)
+
+finish(SK s, int dir, bool won) =>
+    stretch(s)
+    r = (s.target - s.entry) / (s.entry - s.stop)
+    label.new(bar_index, dir * (won ? s.target : s.stop), won ? "TP +" + str.tostring(r, "#.0") + "R" : "SL -1R",
+              style = dir > 0 == won ? label.style_label_down : label.style_label_up,
+              color = won ? color.new(#26a69a, 10) : color.new(#ef5350, 10), textcolor = color.white, size = size.small)
+    if not keepOld
+        wipe(s)
+    detach(s)
+    s.inTrade := false
+    s.zero := na
+    s.top := na
+
+step(SK s, int dir) =>
+    float hi = dir > 0 ? high : -low
+    float lo = dir > 0 ? low : -high
+    float lowestM = dir > 0 ? lowestL : -highestH
+    float barrierM = dir > 0 ? lastPH : -lastPL
+    color col = dir > 0 ? upCol : dnCol
+    bool placed = false
+    if s.inTrade
+        stretch(s)
+        if lo <= s.stop
+            finish(s, dir, false)
+        else if bar_index > s.fillBar and hi >= s.target
+            finish(s, dir, true)
+    else
+        bool fills = s.hasOrder and bar_index > s.orderBar and lo <= s.entry
+        if not fills and lo <= lowestM
+            cancel(s)
+            s.zero := lo
+            s.top := hi
+            s.zeroBar := bar_index
+            s.topBar := bar_index
+            s.barrier := barrierM
+        else if not na(s.zero)
+            if fills
+                s.hasOrder := false
+                s.inTrade := true
+                s.fillBar := bar_index
+                stretch(s)
+                s.lB := label.new(bar_index, dir * s.entry, "B", style = dir > 0 ? label.style_label_up : label.style_label_down,
+                                  color = color.new(col, 20), textcolor = color.white, size = size.small)
+                if lo <= s.stop
+                    finish(s, dir, false)
+            else
+                if hi > s.top
+                    cancel(s)
+                    s.top := hi
+                    s.topBar := bar_index
+                float size = s.top - s.zero
+                bool shifted = not na(s.barrier) and s.top > s.barrier
+                if s.hasOrder
+                    stretch(s)
+                else if size > 0 and shifted and lo <= s.top - 0.382 * size
+                    float e = s.top - entryLvl * size
+                    if lo > e
+                        s.entry := e
+                        s.stop := s.zero
+                        s.target := s.top
+                        s.hasOrder := true
+                        s.orderBar := bar_index
+                        placed := true
+                        s.leg := line.new(s.zeroBar, dir * s.zero, s.topBar, dir * s.top, color = color.new(col, 30), width = 2)
+                        s.l0 := label.new(s.zeroBar, dir * s.zero, "0", style = dir > 0 ? label.style_label_up : label.style_label_down,
+                                          color = color.new(color.gray, 20), textcolor = color.white, size = size.small)
+                        s.lA := label.new(s.topBar, dir * s.top, "A", style = dir > 0 ? label.style_label_down : label.style_label_up,
+                                          color = color.new(col, 20), textcolor = color.white, size = size.small)
+                        s.zone := box.new(s.topBar, dir * (s.top - 0.5 * size), bar_index, dir * (s.top - 0.667 * size),
+                                          border_color = color.new(col, 60), bgcolor = color.new(col, 88))
+                        s.lEntry := line.new(s.topBar, dir * e, bar_index, dir * e, color = color.new(col, 0), style = line.style_dashed)
+                        s.lStop := line.new(s.topBar, dir * s.stop, bar_index, dir * s.stop, color = color.new(#ef5350, 0), style = line.style_dotted)
+                        s.lTp := line.new(s.topBar, dir * s.target, bar_index, dir * s.target, color = color.new(#26a69a, 0), style = line.style_dotted)
+    placed
+
+var SK buy = SK.new()
+var SK sell = SK.new()
+bool newBuy = false
+bool newSell = false
+if barstate.isconfirmed
+    newBuy := step(buy, 1)
+    newSell := step(sell, -1)
+
+if newBuy
+    alert("SK Buy limit " + syminfo.ticker + "  entry " + str.tostring(buy.entry, format.mintick) + "  stop "
+          + str.tostring(buy.stop, format.mintick) + "  TP " + str.tostring(buy.target, format.mintick), alert.freq_once_per_bar_close)
+if newSell
+    alert("SK Sell limit " + syminfo.ticker + "  entry " + str.tostring(-sell.entry, format.mintick) + "  stop "
+          + str.tostring(-sell.stop, format.mintick) + "  TP " + str.tostring(-sell.target, format.mintick), alert.freq_once_per_bar_close)
