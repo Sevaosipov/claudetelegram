@@ -4,7 +4,8 @@
 //   A: the extreme since, beyond the last swing point confirmed before point 0 (a structure shift).
 //      A only starts the sequence: it is not a target.
 //   B: once price has retraced 38.2 % of 0-A, a limit at the 61.8 % retracement (inside the 50-66.7 % zone).
-//   C: the take-profit -- the entry plus 161.8 % of 0-A, the near edge of the 161.8-200 % target zone.
+//   C: the take-profits -- half at the entry plus 100 % of 0-A (TP1), half at the entry plus 161.8 % (TP2,
+//      the near edge of the 161.8-200 % target zone). After TP1 the stop moves to the entry.
 //   Stop: point 0 (the invalidation). A new extreme beyond A, or beyond point 0, cancels the order.
 //   By default only setups with the higher timeframe's trend are taken.
 // The bot's paper test (cfd/sk_live.py) differs in two ways: it takes its profit at A, which did better than C
@@ -14,7 +15,9 @@ indicator("SK Sequence", "SK", overlay = true, max_lines_count = 500, max_labels
 lookback = input.int(300, "Point 0: extreme of N bars", minval = 20)
 pivotN   = input.int(3, "Swing: bars each side", minval = 1)
 entryLvl = input.float(0.618, "Entry retracement (B)", minval = 0.4, maxval = 0.9, step = 0.001)
-targetX  = input.float(1.618, "Take-profit extension (C)", minval = 1.0, maxval = 3.0, step = 0.001)
+tp1X     = input.float(1.0, "TP1 extension (C 100 %)", minval = 0.5, maxval = 2.0, step = 0.001)
+targetX  = input.float(1.618, "TP2 extension (C 161.8 %)", minval = 1.0, maxval = 3.0, step = 0.001)
+moveBE   = input.bool(true, "After TP1 move the stop to the entry")
 keepOld  = input.bool(true, "Keep finished trades on the chart")
 htfOn    = input.bool(true, "Only with the higher-timeframe trend")
 htfTf    = input.timeframe("D", "Higher timeframe")
@@ -38,6 +41,9 @@ type SK
     float entry = na
     float stop = na
     float target = na
+    float tp1 = na
+    float risk = na
+    bool hit1 = false
     bool inTrade = false
     int fillBar = na
     line leg = na
@@ -51,10 +57,11 @@ type SK
     label lA = na
     label lB = na
     label lC = na
+    label lC1 = na
     label lInv = na
     label lInfo = na
 
-var array<int> tallyN = array.from(0, 0)         // reached C, stopped out
+var array<int> tallyN = array.from(0, 0, 0)      // reached TP1, reached TP2, stopped before TP1
 
 // The higher timeframe's trend, from its last finished bar (so nothing repaints).
 htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[1], lookahead = barmerge.lookahead_on)
@@ -83,6 +90,7 @@ wipe(SK s) =>
     label.delete(s.lA)
     label.delete(s.lB)
     label.delete(s.lC)
+    label.delete(s.lC1)
     label.delete(s.lInv)
     label.delete(s.lInfo)
 
@@ -98,6 +106,7 @@ detach(SK s) =>
     s.lA := na
     s.lB := na
     s.lC := na
+    s.lC1 := na
     s.lInv := na
     s.lInfo := na
 
@@ -115,19 +124,29 @@ stretch(SK s) =>
     box.set_right(s.zone, bar_index)
     box.set_right(s.cZone, bar_index)
     label.set_x(s.lC, bar_index)
+    label.set_x(s.lC1, bar_index)
     label.set_x(s.lInv, bar_index)
     label.set_x(s.lInfo, bar_index)
 
 finish(SK s, int dir, bool won) =>
     stretch(s)
-    r = (s.target - s.entry) / (s.entry - s.stop)
+    // half the position left at TP1 (when it was reached), the rest here: at TP2, or at the stop
+    float r1 = (s.tp1 - s.entry) / s.risk
+    float rest = ((won ? s.target : s.stop) - s.entry) / s.risk
+    float total = s.hit1 ? 0.5 * r1 + 0.5 * rest : rest
+    string text = won ? "TP2 ✓ " : s.hit1 ? "stop after TP1 " : "SL "
     label.delete(s.lC)
+    label.delete(s.lC1)
     label.delete(s.lInv)
     label.delete(s.lInfo)
-    label.new(bar_index, dir * (won ? s.target : s.stop), won ? "C ✓ +" + str.tostring(r, "#.0") + "R" : "SL -1R",
+    label.new(bar_index, dir * (won ? s.target : s.stop), text + (total >= 0 ? "+" : "") + str.tostring(total, "#.0") + "R",
               style = dir > 0 == won ? label.style_label_down : label.style_label_up,
               color = won ? color.new(colC, 10) : color.new(colStop, 10), textcolor = color.white, size = size.small)
-    tallyN.set(won ? 0 : 1, tallyN.get(won ? 0 : 1) + 1)
+    if won
+        tallyN.set(1, tallyN.get(1) + 1)
+    else if not s.hit1
+        tallyN.set(2, tallyN.get(2) + 1)
+    s.hit1 := false
     if not keepOld
         wipe(s)
     detach(s)
@@ -146,8 +165,20 @@ step(SK s, int dir) =>
         stretch(s)
         if lo <= s.stop
             finish(s, dir, false)
-        else if bar_index > s.fillBar and hi >= s.target
-            finish(s, dir, true)
+        else if bar_index > s.fillBar
+            if not s.hit1 and hi >= s.tp1                      // TP1: half out, the stop to the entry
+                s.hit1 := true
+                tallyN.set(0, tallyN.get(0) + 1)
+                label.new(bar_index, dir * s.tp1, "TP1 ✓", style = dir > 0 ? label.style_label_down : label.style_label_up,
+                          color = color.new(colC, 10), textcolor = color.white, size = size.small)
+                if moveBE
+                    s.stop := s.entry
+                    line.set_y1(s.lStop, dir * s.entry)
+                    line.set_y2(s.lStop, dir * s.entry)
+                    label.set_y(s.lInv, dir * s.entry)
+                    label.set_text(s.lInv, "Stop at entry")
+            if hi >= s.target
+                finish(s, dir, true)
     else
         bool fills = s.hasOrder and bar_index > s.orderBar and lo <= s.entry
         if not fills and lo <= lowestM
@@ -185,6 +216,9 @@ step(SK s, int dir) =>
                         s.entry := e
                         s.stop := s.zero
                         s.target := c
+                        s.tp1 := e + tp1X * size
+                        s.risk := risk
+                        s.hit1 := false
                         s.hasOrder := true
                         s.orderBar := bar_index
                         placed := true
@@ -198,14 +232,16 @@ step(SK s, int dir) =>
                         s.lEntry := line.new(s.topBar, dir * e, bar_index, dir * e, color = color.new(col, 0), style = line.style_dashed)
                         s.lStop := line.new(s.topBar, dir * s.stop, bar_index, dir * s.stop, color = colStop, style = line.style_dotted)
                         s.lTp := line.new(s.topBar, dir * c, bar_index, dir * c, color = colC, width = 2)
-                        s.l100 := line.new(s.topBar, dir * (e + size), bar_index, dir * (e + size), color = color.new(colC, 55), style = line.style_dotted)
+                        s.l100 := line.new(s.topBar, dir * s.tp1, bar_index, dir * s.tp1, color = colC, width = 1)
+                        s.lC1 := label.new(bar_index, dir * s.tp1, "C 100%  TP1", style = label.style_label_left,
+                                           color = color.new(colC, 30), textcolor = color.white, size = size.small)
                         s.cZone := box.new(s.topBar, dir * c, bar_index, dir * (e + 2.0 * size),
                                            border_color = color.new(colC, 60), bgcolor = color.new(colC, 88))
-                        s.lC := label.new(bar_index, dir * c, "C  TP", style = label.style_label_left,
+                        s.lC := label.new(bar_index, dir * c, "C 161.8%  TP2", style = label.style_label_left,
                                           color = color.new(colC, 10), textcolor = color.white, size = size.small)
                         s.lInv := label.new(bar_index, dir * s.stop, "Invalidation", style = label.style_label_left,
                                             color = color.new(colStop, 30), textcolor = color.white, size = size.small)
-                        s.lInfo := label.new(bar_index, dir * e, "Entry · C pays " + str.tostring((c - e) / risk, "#.0") + "R",
+                        s.lInfo := label.new(bar_index, dir * e, "Entry · TP1 " + str.tostring((s.tp1 - e) / risk, "#.0") + "R · TP2 " + str.tostring((c - e) / risk, "#.0") + "R",
                                              style = label.style_label_left, color = color.new(col, 30), textcolor = color.black, size = size.small)
     placed
 
@@ -217,22 +253,27 @@ if barstate.isconfirmed
     newBuy := step(buy, 1)
     newSell := step(sell, -1)
 
-var table tally = table.new(position.top_right, 2, 3, border_width = 1)
+var table tally = table.new(position.top_right, 2, 4, border_width = 1)
 if barstate.islast
-    int nC = tallyN.get(0)
-    int nS = tallyN.get(1)
+    int n1 = tallyN.get(0)
+    int nC = tallyN.get(1)
+    int nS = tallyN.get(2)
+    int nAll = n1 + nS
     color bg = color.new(color.gray, 75)
     table.cell(tally, 0, 0, "SK on this chart", bgcolor = bg, text_color = color.white, text_size = size.small)
     table.cell(tally, 1, 0, htfOn ? "with " + htfTf + " trend" : "any trend", bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 0, 1, "reached C", bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 1, 1, str.tostring(nC) + (nC + nS > 0 ? "  (" + str.tostring(100.0 * nC / (nC + nS), "#") + "%)" : ""),
+    table.cell(tally, 0, 1, "reached TP1 (C 100%)", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 1, str.tostring(n1) + (nAll > 0 ? "  (" + str.tostring(100.0 * n1 / nAll, "#") + "%)" : ""),
                bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 0, 2, "stopped at 0", bgcolor = bg, text_color = color.white, text_size = size.small)
-    table.cell(tally, 1, 2, str.tostring(nS), bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 0, 2, "then TP2 (C 161.8%)", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 2, str.tostring(nC) + (nAll > 0 ? "  (" + str.tostring(100.0 * nC / nAll, "#") + "%)" : ""),
+               bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 0, 3, "stopped before TP1", bgcolor = bg, text_color = color.white, text_size = size.small)
+    table.cell(tally, 1, 3, str.tostring(nS), bgcolor = bg, text_color = color.white, text_size = size.small)
 
 if newBuy
     alert("SK Buy limit " + syminfo.ticker + "  entry " + str.tostring(buy.entry, format.mintick) + "  stop "
-          + str.tostring(buy.stop, format.mintick) + "  TP (C) " + str.tostring(buy.target, format.mintick), alert.freq_once_per_bar_close)
+          + str.tostring(buy.stop, format.mintick) + "  TP1 " + str.tostring(buy.tp1, format.mintick) + "  TP2 " + str.tostring(buy.target, format.mintick), alert.freq_once_per_bar_close)
 if newSell
     alert("SK Sell limit " + syminfo.ticker + "  entry " + str.tostring(-sell.entry, format.mintick) + "  stop "
-          + str.tostring(-sell.stop, format.mintick) + "  TP (C) " + str.tostring(-sell.target, format.mintick), alert.freq_once_per_bar_close)
+          + str.tostring(-sell.stop, format.mintick) + "  TP1 " + str.tostring(-sell.tp1, format.mintick) + "  TP2 " + str.tostring(-sell.target, format.mintick), alert.freq_once_per_bar_close)
