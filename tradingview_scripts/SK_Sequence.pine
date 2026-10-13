@@ -22,8 +22,13 @@ showC    = input.bool(true, "Show the C levels (100 %, and the 161.8-200 % targe
 htfOn    = input.bool(false, "Only with the higher-timeframe trend (not the bot's rule)")
 htfTf    = input.timeframe("D", "Higher timeframe")
 htfLen   = input.int(50, "Its trend average (EMA)", minval = 5)
-upCol    = input.color(color.new(#26a69a, 0), "Buy colour")
-dnCol    = input.color(color.new(#ef5350, 0), "Sell colour")
+upCol    = input.color(color.new(#26c6da, 0), "Buy setups (leg, zone, entry)")
+dnCol    = input.color(color.new(#ff9800, 0), "Sell setups (leg, zone, entry)")
+col0     = input.color(color.new(#ffffff, 0), "Point 0")
+colA     = input.color(color.new(#fdd835, 0), "Point A and its target line")
+colB     = input.color(color.new(#ab47bc, 0), "Point B")
+colC     = input.color(color.new(#2979ff, 0), "Point C: lines, zone, ticks")
+colStop  = input.color(color.new(#9e9e9e, 0), "Stop / invalidation")
 
 type SK
     float zero = na
@@ -144,7 +149,7 @@ finish(SK s, int dir, bool won) =>
     r = (s.target - s.entry) / (s.entry - s.stop)
     label.new(bar_index, dir * (won ? s.target : s.stop), won ? "TP +" + str.tostring(r, "#.0") + "R" : "SL -1R",
               style = dir > 0 == won ? label.style_label_down : label.style_label_up,
-              color = won ? color.new(#26a69a, 10) : color.new(#ef5350, 10), textcolor = color.white, size = size.small)
+              color = won ? color.new(colA, 10) : color.new(colStop, 10), textcolor = won ? color.black : color.white, size = size.small)
     if won
         tallyN.set(0, tallyN.get(0) + 1)
         if not na(s.lC1)                 // hand the C lines over: they are followed on from the next bar
@@ -192,7 +197,7 @@ step(SK s, int dir) =>
                 s.fillBar := bar_index
                 stretch(s)
                 s.lB := label.new(bar_index, dir * s.entry, "B", style = dir > 0 ? label.style_label_up : label.style_label_down,
-                                  color = color.new(col, 20), textcolor = color.white, size = size.small)
+                                  color = color.new(colB, 10), textcolor = color.white, size = size.small)
                 if lo <= s.stop
                     finish(s, dir, false)
             else
@@ -215,24 +220,24 @@ step(SK s, int dir) =>
                         placed := true
                         s.leg := line.new(s.zeroBar, dir * s.zero, s.topBar, dir * s.top, color = color.new(col, 30), width = 2)
                         s.l0 := label.new(s.zeroBar, dir * s.zero, "0", style = dir > 0 ? label.style_label_up : label.style_label_down,
-                                          color = color.new(color.gray, 20), textcolor = color.white, size = size.small)
+                                          color = color.new(col0, 10), textcolor = color.black, size = size.small)
                         s.lA := label.new(s.topBar, dir * s.top, "A", style = dir > 0 ? label.style_label_down : label.style_label_up,
-                                          color = color.new(col, 20), textcolor = color.white, size = size.small)
+                                          color = color.new(colA, 10), textcolor = color.black, size = size.small)
                         s.zone := box.new(s.topBar, dir * (s.top - 0.5 * size), bar_index, dir * (s.top - 0.667 * size),
                                           border_color = color.new(col, 60), bgcolor = color.new(col, 88))
                         s.lEntry := line.new(s.topBar, dir * e, bar_index, dir * e, color = color.new(col, 0), style = line.style_dashed)
-                        s.lStop := line.new(s.topBar, dir * s.stop, bar_index, dir * s.stop, color = color.new(#ef5350, 0), style = line.style_dotted)
-                        s.lTp := line.new(s.topBar, dir * s.target, bar_index, dir * s.target, color = color.new(#26a69a, 0), style = line.style_dotted)
+                        s.lStop := line.new(s.topBar, dir * s.stop, bar_index, dir * s.stop, color = colStop, style = line.style_dotted)
+                        s.lTp := line.new(s.topBar, dir * s.target, bar_index, dir * s.target, color = colA, style = line.style_dotted)
                         float risk = e - s.zero
                         s.lInv := label.new(bar_index, dir * s.stop, "Invalidation", style = label.style_label_left,
-                                            color = color.new(#ef5350, 30), textcolor = color.white, size = size.small)
+                                            color = color.new(colStop, 30), textcolor = color.white, size = size.small)
                         s.lInfo := label.new(bar_index, dir * e, "Entry · A " + str.tostring((s.top - e) / risk, "#.0") + "R · C "
                                              + str.tostring(1.618 * size / risk, "#.0") + "R", style = label.style_label_left,
                                              color = color.new(col, 30), textcolor = color.white, size = size.small)
                         if showC
                             float c1 = e + size
                             float c2 = e + 1.618 * size
-                            color cc = color.new(#5b9cf6, 0)
+                            color cc = colC
                             s.lC1 := line.new(s.topBar, dir * c1, bar_index, dir * c1, color = cc, style = line.style_dashed)
                             s.lC2 := line.new(s.topBar, dir * c2, bar_index, dir * c2, color = cc, style = line.style_dashed)
                             s.lblC1 := label.new(bar_index, dir * c1, "C 100%", style = label.style_label_left,
@@ -271,11 +276,11 @@ if barstate.isconfirmed and chases.size() > 0
                     c.hit1 := true
                     tallyN.set(1, tallyN.get(1) + 1)
                     label.new(bar_index, c.dir * c.c1, "C 100% ✓", style = c.dir > 0 ? label.style_label_down : label.style_label_up,
-                              color = color.new(#26a69a, 10), textcolor = color.white, size = size.small)
+                              color = color.new(colC, 10), textcolor = color.white, size = size.small)
                 if chi >= c.c2
                     tallyN.set(2, tallyN.get(2) + 1)
                     label.new(bar_index, c.dir * c.c2, "C 161.8% ✓", style = c.dir > 0 ? label.style_label_down : label.style_label_up,
-                              color = color.new(#26a69a, 10), textcolor = color.white, size = size.small)
+                              color = color.new(colC, 10), textcolor = color.white, size = size.small)
                     over := true
             if over
                 label.delete(c.b1)
