@@ -8,6 +8,9 @@
 //   bot takes its profit at A, which did better than C in every test. After A is reached the C lines are
 //   followed on: a tick marks each C level price gets to before it falls back to the entry, and the table
 //   counts how often that happened on this chart.
+// Also drawn, as SK tools usually show them: the 161.8-200 % target zone, an «Invalidation» tag at the stop,
+// and what the trade pays at A and at C in multiples of its risk. An optional filter takes only setups
+// with the higher timeframe's trend; it is off by default because the bot does not use it.
 // The bot reads four-hour bars; on another timeframe the drawings are that timeframe's own.
 indicator("SK Sequence (bot rule)", "SK", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 200)
 
@@ -15,7 +18,10 @@ lookback = input.int(300, "Point 0: extreme of N bars", minval = 20)
 pivotN   = input.int(3, "Swing: bars each side", minval = 1)
 entryLvl = input.float(0.618, "Entry retracement", minval = 0.4, maxval = 0.9, step = 0.001)
 keepOld  = input.bool(true, "Keep finished trades on the chart")
-showC    = input.bool(true, "Show the C levels (100 % and 161.8 % extension)")
+showC    = input.bool(true, "Show the C levels (100 %, and the 161.8-200 % target zone)")
+htfOn    = input.bool(false, "Only with the higher-timeframe trend (not the bot's rule)")
+htfTf    = input.timeframe("D", "Higher timeframe")
+htfLen   = input.int(50, "Its trend average (EMA)", minval = 5)
 upCol    = input.color(color.new(#26a69a, 0), "Buy colour")
 dnCol    = input.color(color.new(#ef5350, 0), "Sell colour")
 
@@ -44,6 +50,9 @@ type SK
     line lC2 = na
     label lblC1 = na
     label lblC2 = na
+    box cZone = na
+    label lInv = na
+    label lInfo = na
 
 // A sequence that reached A, followed on toward C until price is back at its entry.
 type Chase
@@ -57,9 +66,14 @@ type Chase
     line l2
     label b1
     label b2
+    box zone
 
 var array<Chase> chases = array.new<Chase>()
 var array<int> tallyN = array.from(0, 0, 0)      // reached A, then C 100 %, then C 161.8 %
+
+// The higher timeframe's trend, from its last finished bar (so nothing repaints).
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[1], lookahead = barmerge.lookahead_on)
+htfUp = close > htfEma
 
 lowestL  = ta.lowest(low, lookback)
 highestH = ta.highest(high, lookback)
@@ -85,6 +99,9 @@ wipe(SK s) =>
     line.delete(s.lC2)
     label.delete(s.lblC1)
     label.delete(s.lblC2)
+    box.delete(s.cZone)
+    label.delete(s.lInv)
+    label.delete(s.lInfo)
 
 detach(SK s) =>
     s.leg := na
@@ -99,6 +116,9 @@ detach(SK s) =>
     s.lC2 := na
     s.lblC1 := na
     s.lblC2 := na
+    s.cZone := na
+    s.lInv := na
+    s.lInfo := na
 
 cancel(SK s) =>
     if s.hasOrder
@@ -115,6 +135,9 @@ stretch(SK s) =>
     line.set_x2(s.lC2, bar_index)
     label.set_x(s.lblC1, bar_index)
     label.set_x(s.lblC2, bar_index)
+    box.set_right(s.cZone, bar_index)
+    label.set_x(s.lInv, bar_index)
+    label.set_x(s.lInfo, bar_index)
 
 finish(SK s, int dir, bool won) =>
     stretch(s)
@@ -127,11 +150,12 @@ finish(SK s, int dir, bool won) =>
         if not na(s.lC1)                 // hand the C lines over: they are followed on from the next bar
             float move = s.target - s.stop
             chases.push(Chase.new(dir, bar_index, s.entry + move, s.entry + 1.618 * move, s.entry, false,
-                                  s.lC1, s.lC2, s.lblC1, s.lblC2))
+                                  s.lC1, s.lC2, s.lblC1, s.lblC2, s.cZone))
             s.lC1 := na
             s.lC2 := na
             s.lblC1 := na
             s.lblC2 := na
+            s.cZone := na
     if not keepOld
         wipe(s)
     detach(s)
@@ -180,7 +204,7 @@ step(SK s, int dir) =>
                 bool shifted = not na(s.barrier) and s.top > s.barrier
                 if s.hasOrder
                     stretch(s)
-                else if size > 0 and shifted and lo <= s.top - 0.382 * size
+                else if size > 0 and shifted and (not htfOn or (dir > 0 ? htfUp : not htfUp)) and lo <= s.top - 0.382 * size
                     float e = s.top - entryLvl * size
                     if lo > e
                         s.entry := e
@@ -199,6 +223,12 @@ step(SK s, int dir) =>
                         s.lEntry := line.new(s.topBar, dir * e, bar_index, dir * e, color = color.new(col, 0), style = line.style_dashed)
                         s.lStop := line.new(s.topBar, dir * s.stop, bar_index, dir * s.stop, color = color.new(#ef5350, 0), style = line.style_dotted)
                         s.lTp := line.new(s.topBar, dir * s.target, bar_index, dir * s.target, color = color.new(#26a69a, 0), style = line.style_dotted)
+                        float risk = e - s.zero
+                        s.lInv := label.new(bar_index, dir * s.stop, "Invalidation", style = label.style_label_left,
+                                            color = color.new(#ef5350, 30), textcolor = color.white, size = size.small)
+                        s.lInfo := label.new(bar_index, dir * e, "Entry · A " + str.tostring((s.top - e) / risk, "#.0") + "R · C "
+                                             + str.tostring(1.618 * size / risk, "#.0") + "R", style = label.style_label_left,
+                                             color = color.new(col, 30), textcolor = color.white, size = size.small)
                         if showC
                             float c1 = e + size
                             float c2 = e + 1.618 * size
@@ -207,8 +237,10 @@ step(SK s, int dir) =>
                             s.lC2 := line.new(s.topBar, dir * c2, bar_index, dir * c2, color = cc, style = line.style_dashed)
                             s.lblC1 := label.new(bar_index, dir * c1, "C 100%", style = label.style_label_left,
                                                  color = color.new(cc, 20), textcolor = color.white, size = size.small)
-                            s.lblC2 := label.new(bar_index, dir * c2, "C 161.8%", style = label.style_label_left,
+                            s.lblC2 := label.new(bar_index, dir * c2, "C 161.8-200%", style = label.style_label_left,
                                                  color = color.new(cc, 20), textcolor = color.white, size = size.small)
+                            s.cZone := box.new(s.topBar, dir * c2, bar_index, dir * (e + 2.0 * size),
+                                               border_color = color.new(cc, 60), bgcolor = color.new(cc, 88))
     placed
 
 var SK buy = SK.new()
@@ -230,6 +262,7 @@ if barstate.isconfirmed and chases.size() > 0
             line.set_x2(c.l2, bar_index)
             label.set_x(c.b1, bar_index)
             label.set_x(c.b2, bar_index)
+            box.set_right(c.zone, bar_index)
             bool over = false
             if clo <= c.be
                 over := true
