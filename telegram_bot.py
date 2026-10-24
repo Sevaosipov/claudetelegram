@@ -892,6 +892,17 @@ def _sample_spreads(conn) -> None:
         print(f"[telegram_bot] spread sample failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+def _crypto_cfd_pass(conn) -> None:
+    """The crypto CFD signals (cfd/live.py) again, once an hour: at the daily run's 08:00 Yahoo has often not
+    yet published the day before's bar, and the pass then reads nothing (it only reads a bar dated yesterday).
+    Reading again is safe -- a coin's signal for a day is made once, an open signal follows each bar once.
+    Whatever it raises is logged."""
+    try:
+        cfd_live.run(conn)
+    except Exception as e:
+        print(f"[telegram_bot] crypto CFD failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _sk_pass(conn) -> None:
     """One pass of the SK paper run (cfd/sk_live.py). Whatever it raises is logged and the polling goes on."""
     try:
@@ -934,6 +945,7 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
             if int(now // 3600) != sk_hour:                 # the SK rule reads four-hour bars: once an hour
                 sk_hour = int(now // 3600)
                 _sk_pass(conn)
+                _crypto_cfd_pass(conn)
         try:
             _poll_once(conn, token, chat_id, session)
             backoff = 5
