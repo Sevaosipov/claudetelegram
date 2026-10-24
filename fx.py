@@ -39,7 +39,7 @@ _PAIR = {
     "CHF": "EURCHF=X",
     "ISK": "EURISK=X",
     "PLN": "EURPLN=X",
-    # quote currencies of the CFD instruments (cfd/plan.py sizes a trade from its stop in the quote)
+    # further majors, so a price quoted in one is never taken as EUR
     "JPY": "EURJPY=X",
     "AUD": "EURAUD=X",
     "NZD": "EURNZD=X",

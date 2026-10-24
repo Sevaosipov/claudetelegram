@@ -29,7 +29,7 @@ from telegram_notify import DOT_GREEN, DOT_RED, signed_pct
 WEEK_DAYS = 6               # the week is today - 6 days ... today
 MAX_REASONS = 2             # a buy names this many of its reasons
 RISK_TAG = "High risk"      # a line of an alt's buy block
-KIND = "Invest"             # what a weekly buy is: the asset itself is bought (a CFD signal says «CFD»)
+KIND = "Invest"             # what a weekly buy is: the asset itself is bought
 MAX_SELLERS = 5             # a group exit names this many sellers, then «и ещё N»
 BEST_WORST = 3              # the summary names this many best and this many worst positions
 LEFT_OUT_KEY = "weekly_left_out_{week}"     # kv: [{"ticker", "why"}] the week's pick left out (bot._pick_week)
