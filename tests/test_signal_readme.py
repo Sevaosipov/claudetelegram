@@ -110,7 +110,6 @@ def test_the_readme_examples_are_what_the_code_renders(conn):
     alt = dict(ticker="CRYPTO:SOL", source="CRYPTO", company="SOL", kind="crypto", score=75.0, stop_pct=0.22,
                reasons=["выше 100-дн. средней", "20 дн. +12%", "60 дн. +30%"], t212=None, risk=True,
                price=150.0)
-    state = dict(close=1.2000, ma=1.1500, diff=0.35, atr=0.008)
     for buy in (pick, alt):                              # the two buys: blocks of their own, above the list
         assert f"```none\n{re.sub('</?pre>', '', _shown(weekly.buy_text(buy)))}\n```" in _section()
     expected = [
@@ -119,8 +118,6 @@ def test_the_readme_examples_are_what_the_code_renders(conn):
         tn.format_close_alert(insider),
         ta._new_text("GME", holding, "стоп, продажи инсайдеров, новости"),
         ta._sold_text("GME", _position(), 24.05),
-        tn.format_carry_signal("FLAT", "LONG", state, reason="entry", level=1.152),
-        tn.format_carry_signal("LONG", "FLAT", dict(state, close=1.16), reason="trailing stop", level=1.167),
     ]
     signals = _blocks()[0]
     assert signals == [_shown(text) for text in expected]

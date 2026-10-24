@@ -716,7 +716,7 @@ def main_run(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "DB_PATH", tmp_path / "data" / "d.db")
     monkeypatch.setattr(bot, "LOG_PATH", tmp_path / "data" / "bot.log")
     for name in ("run_sec_pass", "run_stake_pass", "run_144_pass", "run_house_pass",
-                 "run_bafin_pass", "run_norway_pass", "run_sweden_pass", "run_uk_pass", "_paper_pass", "run_senate_pass",
+                 "run_bafin_pass", "run_norway_pass", "run_sweden_pass", "run_uk_pass", "run_senate_pass",
                  "run_crypto_treasury_pass", "run_crypto_etf_pass", "run_farside_pass",
                  "run_onchain_pass"):
         monkeypatch.setattr(bot, name, lambda *a, **kw: 0)
@@ -789,20 +789,6 @@ def main_run(monkeypatch, tmp_path):
         return t212_account.SyncResult()
     monkeypatch.setattr(bot.t212_account, "sync", t212_sync)
 
-    def cfd_pass(conn):
-        # kept apart from `calls` too: the steps that were done before it, and whether it was run at all
-        run.cfd.append(list(calls))
-        if run.cfd_crashes:
-            raise RuntimeError("yahoo is down")
-        return types.SimpleNamespace(tracked=1, made=2, paused=False)
-    monkeypatch.setattr(bot.cfd_live, "run", cfd_pass)
-
-    def league_pass(conn):
-        run.league.append(list(calls))
-        if run.league_crashes:
-            raise RuntimeError("cftc is down")
-        return (1, 0)
-    monkeypatch.setattr(bot.cfd_league, "run", league_pass)
     monkeypatch.setattr(bot.watch, "run", lambda conn: run.watched.append(1) or 0)
     for step in ("backup", "takeover_alerts", "tradingview_login"):
         monkeypatch.setattr(bot.upkeep, step, lambda *a, _s=step, **k: run.upkeep.append(_s))
@@ -824,8 +810,6 @@ def main_run(monkeypatch, tmp_path):
     run.signals, run.refuse = [], set()                           # the week's signals; texts Telegram refuses
     run.complete = True                                           # False: a scoring pass that did not get through
     run.syncs, run.sync_silent, run.sync_crashes = [], [], False  # the Trading 212 sync (stubbed)
-    run.cfd, run.cfd_crashes = [], False                          # the CFD pass (stubbed): `calls` as it was
-    run.league, run.league_crashes = [], False                    # the paper league's pass (stubbed), the same
     run.hour = 18                                                 # past the Friday hour: the week's messages may go
     run.prepared = []                                             # the days the picks were made ready to send
     run.watched = []                                              # the watch pass (stubbed): once a full run
@@ -1317,60 +1301,6 @@ def test_a_holding_the_daily_sync_finds_is_opened_and_announced_before_the_exits
         < calls.index("check_exits")
     [pos] = positions.open_positions(main_run.db())
     assert (pos.ticker, pos.origin, pos.quantity) == ("GME", "t212", 10.0)
-
-
-# ------------------------------------------------------------------ the experimental CFD pass
-def test_the_cfd_pass_runs_once_after_the_positions_step_of_a_full_run(main_run):
-    main_run()
-    assert len(main_run.cfd) == 1
-    assert "check_exits" in main_run.cfd[0] and ("closes", main_run.closes) in main_run.cfd[0]
-
-
-@pytest.mark.parametrize("day", [MON, WED, FRI, SAT, SUN])
-def test_the_cfd_pass_runs_on_every_full_run_whatever_the_day(main_run, day):
-    main_run.today = day
-    main_run()
-    assert len(main_run.cfd) == 1
-
-
-@pytest.mark.parametrize("flag", ["--sec-only", "--house-only", "--bafin-only", "--norway-only", "--sweden-only"])
-def test_a_filtered_run_does_not_run_the_cfd_pass(main_run, flag):
-    main_run(flag)
-    assert main_run.cfd == []
-
-
-def test_a_run_with_no_telegram_skips_the_cfd_pass_and_says_so(main_run, capsys):
-    main_run("--no-telegram")
-    assert main_run.cfd == [] and "[CFD] skipped: --no-telegram" in capsys.readouterr().out
-
-
-def test_a_crashing_cfd_pass_is_reported_and_the_run_goes_on(main_run, capsys):
-    main_run.cfd_crashes = True
-    main_run()
-    err = capsys.readouterr()
-    assert "[CFD] pass failed: RuntimeError: yahoo is down" in err.err
-    assert main_run.db().execute("SELECT COUNT(*) FROM kv_cache WHERE key = 'last_successful_run'").fetchone() == (1,)
-    assert "poll finished" in err.out
-
-
-def test_the_cfd_pass_logs_what_it_did(main_run, capsys):
-    main_run()
-    assert "[CFD] 1 update message(s), 2 new signal(s)" in capsys.readouterr().out
-
-
-def test_the_league_pass_runs_after_the_cfd_pass_on_a_full_run_only(main_run, capsys):
-    main_run()
-    assert len(main_run.league) == 1 and "[LEAGUE] opened 1, closed 0" in capsys.readouterr().out
-    main_run("--no-telegram")
-    main_run("--sec-only")
-    assert len(main_run.league) == 1
-
-
-def test_a_crashing_league_pass_is_reported_and_the_run_goes_on(main_run, capsys):
-    main_run.league_crashes = True
-    main_run()
-    out = capsys.readouterr()
-    assert len(main_run.league) == 1 and "LEAGUE" in out.out + out.err
 
 
 # ---- the Friday hour: the week's messages go out from 17:00, with the evening's light run

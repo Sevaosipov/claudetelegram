@@ -44,10 +44,6 @@ Yahoo way (EQNR.OL, VOLV-B.ST): it is stored the way the signal tables know it, 
 bare ticker with its source (EQNR, NORWAY), so it is priced on its own exchange.
 See POSITIONS_USAGE and _handle_positions_command.
 
-/cfd shows the experimental CFD signals of the 13 coins (cfd/live.py: the open ones, the record of the
-closed ones, the settings) and /cfd balance|risk|maxrisk|off|on changes the settings; the daily run in bot.py
-sends the signals themselves.
-
 The Trading 212 account is tracked too (t212_account.py), read only: the bot never places an
 order. The loop syncs the account's holdings into the positions at start and then every 15 minutes
 (T212_SYNC_SECONDS; a failed sync is logged and the polling goes on), so a holding is watched
@@ -75,7 +71,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import math
 import os
 import re
@@ -100,12 +95,6 @@ import signal_record
 import t212_account
 import watch
 import telegram_notify
-from cfd import intraday as cfd_intraday
-from cfd import league as cfd_league
-from cfd import sk_live as cfd_sk
-from cfd import sizing as cfd_sizing
-from cfd import live as cfd_live
-from cfd import plan as cfd_plan
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "disclosures.db"
@@ -147,23 +136,9 @@ HELP_TEXT = ("Пришлите тикер или монету (NVDA, BTC) — п
              "Любой вопрос текстом (или /ask …) — ответит аналитик с графиком "
              "TradingView и данными бота.\n"
              "/bought и /sold — записать покупку и продажу вне Trading 212 (сам счёт бот видит).\n"
-             "/cfd — CFD-сигналы по 13 монетам (эксперимент): открытые, итоги, настройки.\n"
-             "/cfd plan XAUUSD buy 4461.80 stop 4449.10 — ваша CFD-сделка: 4 цели, риск и объём, "
-             "сообщение на каждой цели и на стопе.\n"
              "Сигналы на покупку приходят по пятницам, сигнал на продажу по вашим позициям — сразу.\n"
              "/size — на сколько евро покупать по сигналу: недельный бюджет (/size budget 30) или риск "
              "и предел доли счёта.\n"
-             "/league — бумажная лига форекс-идей: тест на 13 недель, счёт по каждой идее.\n"
-             "/sk — стратегия SK (последовательность 0-A-B-C) на бумаге: лимитные заявки по EURUSD и золоту "
-             "на 4-часовых свечах (/sk off — без сообщений).\n"
-             "/risk — сколько евро можно потерять на одной CFD-сделке (/risk 10): в сигналах появится "
-             "размер в лотах для IC Markets.\n"
-             "/mt5 — счёт MetaTrader 5: баланс, открытые позиции, результат закрытых сделок за 7 и 30 дней.\n"
-             "/spread — измеренная стоимость сделки (спред и комиссия) по данным MetaTrader.\n"
-             "/paper — все бумажные тесты CFD на одной доске (приходит и по понедельникам); идея, "
-             "ушедшая в −10R, останавливается сама.\n"
-             "/day — дневная бумажная лига: внутридневные CFD-сделки 09:00–18:00, тест на 4 недели "
-             "(/day off — без сообщений о сделках).\n"
              "/watch — уровни, которых бот ждёт после разборов: при закрытии за уровнем придёт свежий "
              "разбор сам.\n"
              "/signals — как сработали пятничные сигналы бота: через 1, 4 и 12 недель, в сравнении с рынком.\n"
@@ -234,98 +209,6 @@ def _position_listing(arg: str) -> tuple[str, str | None] | None:
     return positions.split_venue(ticker) or (ticker, None)
 
 
-def _handle_day_command(conn, text: str) -> bool:
-    """/day: the day league's scoreboard and its mute switch (cfd/intraday.py). Returns False for any
-    other message."""
-    parts = text.split()
-    if not parts or parts[0].lower().split("@")[0] != "/day":
-        return False
-    try:
-        telegram_notify.send_text(cfd_intraday.handle_command(conn, text))
-    except Exception as e:
-        print(f"[telegram_bot] /day failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось выполнить /day ({type(e).__name__}). Попробуйте позже.")
-    return True
-
-
-def _handle_risk_command(conn, text: str) -> bool:
-    """/risk: the euros a CFD trade may lose, from which a signal's lot size is worked out (cfd/sizing.py).
-    Returns False for any other message."""
-    parts = text.split()
-    if not parts or parts[0].lower().split("@")[0] != "/risk":
-        return False
-    try:
-        telegram_notify.send_text(telegram_notify._esc(cfd_sizing.handle_command(conn, text)))
-    except Exception as e:
-        print(f"[telegram_bot] /risk failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось выполнить /risk ({type(e).__name__}). Попробуйте позже.")
-    return True
-
-
-def _handle_paper_command(conn, text: str) -> bool:
-    """/paper: every paper test on one board (cfd/paper.py). Returns False for any other message."""
-    parts = text.split()
-    if not parts or parts[0].lower().split("@")[0] != "/paper":
-        return False
-    try:
-        from cfd import paper
-        telegram_notify.send_text(paper.board(conn, dt.date.today()))
-    except Exception as e:
-        print(f"[telegram_bot] /paper failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось выполнить /paper ({type(e).__name__}). Попробуйте позже.")
-    return True
-
-
-def _handle_mt5_command(conn, text: str) -> bool:
-    """/mt5: the MetaTrader account as the bridge reports it; /spread: the measured costs. Returns False for
-    any other message."""
-    from cfd import mt5_bridge
-    parts = text.split()
-    command = parts[0].lower().split("@")[0] if parts else ""
-    if command not in ("/mt5", "/spread"):
-        return False
-    try:
-        if command == "/mt5":
-            telegram_notify.send_text(telegram_notify.format_mt5(
-                mt5_bridge.account(), mt5_bridge.open_positions(), mt5_bridge.closed_trades(),
-                dt.datetime.now(dt.timezone.utc)))
-        else:
-            telegram_notify.send_text(telegram_notify.format_spreads(
-                {name: mt5_bridge.measured_cost(name, conn=conn) for name in cfd_sk.MARKETS},
-                {name: cost for name, (_symbol, cost, _night) in cfd_sk.MARKETS.items()}))
-    except Exception as e:
-        print(f"[telegram_bot] {command} failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось выполнить {command} ({type(e).__name__}). Попробуйте позже.")
-    return True
-
-
-def _handle_sk_command(conn, text: str) -> bool:
-    """/sk: the SK paper run's board and its mute switch (cfd/sk_live.py). Returns False for any other message."""
-    parts = text.split()
-    if not parts or parts[0].lower().split("@")[0] != "/sk":
-        return False
-    try:
-        telegram_notify.send_text(cfd_sk.handle_command(conn, text))
-    except Exception as e:
-        print(f"[telegram_bot] /sk failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось выполнить /sk ({type(e).__name__}). Попробуйте позже.")
-    return True
-
-
-def _handle_league_command(conn, text: str) -> bool:
-    """/league: the forex paper league's scoreboard and its mute switch (cfd/league.py). Returns False for
-    any other message."""
-    parts = text.split()
-    if not parts or parts[0].lower().split("@")[0] != "/league":
-        return False
-    try:
-        telegram_notify.send_text(cfd_league.handle_command(conn, text))
-    except Exception as e:
-        print(f"[telegram_bot] /league failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось выполнить /league ({type(e).__name__}). Попробуйте позже.")
-    return True
-
-
 def _handle_watch_command(conn, text: str) -> bool:
     """/watch: the levels the bot waits for after its analyses, and /watch off TICKER (watch.py). Returns
     False for any other message."""
@@ -366,20 +249,6 @@ def _handle_size_command(conn, text: str) -> bool:
     except Exception as e:
         print(f"[telegram_bot] /size failed: {type(e).__name__}: {e}", file=sys.stderr)
         telegram_notify.send_text(f"Не удалось выполнить /size ({type(e).__name__}). Попробуйте позже.")
-    return True
-
-
-def _handle_cfd_command(conn, text: str) -> bool:
-    """/cfd and its settings (cfd/live.py): the experimental CFD signals of the 13 coins -- the open ones,
-    the record, the balance, the risk and the pause. Returns False for any other message."""
-    parts = text.split()
-    if not parts or parts[0].lower().split("@")[0] != "/cfd":
-        return False
-    try:
-        telegram_notify.send_text(cfd_live.handle_command(conn, text))
-    except Exception as e:
-        print(f"[telegram_bot] /cfd failed: {type(e).__name__}: {e}", file=sys.stderr)
-        telegram_notify.send_text(f"Не удалось выполнить /cfd ({type(e).__name__}). Попробуйте позже.")
     return True
 
 
@@ -808,10 +677,7 @@ def _handle_message(conn, text: str) -> None:
     any other /command (help, /model included); then a single token that is an asset with a price --
     the ticker analysis; anything else -- a question for the analyst."""
     text = (text or "").strip()
-    if (_handle_positions_command(conn, text) or _handle_cfd_command(conn, text)
-            or _handle_size_command(conn, text) or _handle_league_command(conn, text)
-            or _handle_day_command(conn, text) or _handle_sk_command(conn, text) or _handle_risk_command(conn, text)
-            or _handle_mt5_command(conn, text) or _handle_paper_command(conn, text)
+    if (_handle_positions_command(conn, text) or _handle_size_command(conn, text)
             or _handle_watch_command(conn, text) or _handle_signals_command(conn, text)):
         return
     if text.lower().startswith("/backtest"):
@@ -863,59 +729,10 @@ def _watch_intraday(conn) -> None:
         print(f"[telegram_bot] watch failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
-def _track_cfd_plans(conn) -> None:
-    """One pass over the user's open CFD trades (cfd/plan.py: a message at each stage and at the close).
-    Whatever it raises is logged and the polling goes on."""
-    try:
-        cfd_plan.run(conn)
-    except Exception as e:
-        print(f"[telegram_bot] CFD plans failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
-DAY_BAR_SECONDS, DAY_BAR_LAG = 900, 20       # the day league runs once per 15-minute bar, this long after it
-
-
-def _day_league(conn) -> None:
-    """One pass of the day league (cfd/intraday.py). Whatever it raises is logged and the polling goes on."""
-    try:
-        cfd_intraday.run(conn)
-    except Exception as e:
-        print(f"[telegram_bot] day league failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
-def _sample_spreads(conn) -> None:
-    """Store the live spreads the MetaTrader bridge quotes (cfd/mt5_bridge.py). A failure is logged."""
-    try:
-        from cfd import mt5_bridge
-        mt5_bridge.sample_spreads(conn)
-    except Exception as e:
-        print(f"[telegram_bot] spread sample failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
-def _crypto_cfd_pass(conn) -> None:
-    """The crypto CFD signals (cfd/live.py) again, once an hour: at the daily run's 08:00 Yahoo has often not
-    yet published the day before's bar, and the pass then reads nothing (it only reads a bar dated yesterday).
-    Reading again is safe -- a coin's signal for a day is made once, an open signal follows each bar once.
-    Whatever it raises is logged."""
-    try:
-        cfd_live.run(conn)
-    except Exception as e:
-        print(f"[telegram_bot] crypto CFD failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
-def _sk_pass(conn) -> None:
-    """One pass of the SK paper run (cfd/sk_live.py). Whatever it raises is logged and the polling goes on."""
-    try:
-        cfd_sk.run(conn)
-    except Exception as e:
-        print(f"[telegram_bot] SK failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
 def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=time.time,
            sleep=time.sleep, rounds: int | None = None) -> None:
     """The always-on loop: long-poll Telegram, and sync the Trading 212 account at start and then
-    every T212_SYNC_SECONDS (between two polls, so at most one long poll or one answer late), and
-    follow the user's open CFD trades every cfd_plan.TRACK_SECONDS the same way. A
+    every T212_SYNC_SECONDS (between two polls, so at most one long poll or one answer late). A
     poll that fails on the network is retried after a growing pause. `rounds` ends the loop after
     that many polls (tests); `clock` and `sleep` are the time seams.
 
@@ -924,8 +741,6 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
     too, rather than waiting out the difference. After a 401 or a 403 the next sync is an hour
     away, not 15 minutes: the key will not heal by itself."""
     next_sync, wait = clock(), T212_SYNC_SECONDS
-    next_plans = clock()
-    day_slot = sk_hour = None
     backoff = 5
     done = 0
     while rounds is None or done < rounds:
@@ -935,17 +750,6 @@ def _serve(conn, token: str, chat_id: str, session: requests.Session, *, clock=t
             wait = _sync_t212(conn)
             next_sync = now + wait
             _watch_intraday(conn)
-        if now >= next_plans or next_plans - now > cfd_plan.TRACK_SECONDS:
-            _track_cfd_plans(conn)
-            next_plans = now + cfd_plan.TRACK_SECONDS
-        if now % DAY_BAR_SECONDS >= DAY_BAR_LAG and int(now // DAY_BAR_SECONDS) != day_slot:
-            day_slot = int(now // DAY_BAR_SECONDS)
-            _day_league(conn)
-            _sample_spreads(conn)
-            if int(now // 3600) != sk_hour:                 # the SK rule reads four-hour bars: once an hour
-                sk_hour = int(now // 3600)
-                _sk_pass(conn)
-                _crypto_cfd_pass(conn)
         try:
             _poll_once(conn, token, chat_id, session)
             backoff = 5

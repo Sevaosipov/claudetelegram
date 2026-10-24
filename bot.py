@@ -73,8 +73,6 @@ import t212_account
 import universe
 import telegram_notify
 import weekly
-from cfd import league as cfd_league
-from cfd import live as cfd_live
 from passes import (
     CSV_PATH,
     _sec_forms,
@@ -492,30 +490,6 @@ def _sync_t212(conn, args) -> None:
               f"closed {len(result.closed)}")
 
 
-def _league_pass(conn, args) -> None:
-    """The forex paper league (cfd/league.py): its paper trades are followed and the day's new ones made, a
-    Telegram message per event and a scoreboard at the first run of a month. On a full run only, and not
-    with --no-telegram, as the CFD pass. A crash is reported like a failed source."""
-    if _filtered_run(args) or args.no_telegram:
-        return
-    result = _run_source("LEAGUE", cfd_league.run, conn)
-    _paper_pass(conn)
-    if result is not None and any(result):
-        print(f"[LEAGUE] opened {result[0]}, closed {result[1]}")
-
-
-def _paper_pass(conn) -> None:
-    """Every paper test on one board, once a week, and an idea at -10R retired (cfd/paper.py). A failure is
-    logged and the run goes on."""
-    try:
-        from cfd import paper
-        today = dt.date.today()
-        paper.retire(conn, today, telegram_notify.send_text)
-        paper.weekly(conn, today, telegram_notify.send_text)
-    except Exception as e:
-        print(f"[PAPER] failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
 def _upkeep_pass(conn, args) -> None:
     """The day's housekeeping (upkeep.py), after everything else on a full run: a dated copy of the
     database; the holdings checked for a pending buyout; the analyst's TradingView sign-in; and, at the
@@ -540,22 +514,6 @@ def _watch_pass(conn, args) -> None:
     fired = _run_source("WATCH", watch.run, conn)
     if fired:
         print(f"[WATCH] {fired} level(s) reached")
-
-
-def _cfd_pass(conn, args) -> None:
-    """The experimental CFD signals (cfd/live.py): the open ones are tracked through the new daily bars and
-    the 13 coins are scanned for a new breakout, a Telegram message per event. After the positions step, on
-    a full run only -- a filtered run leaves it alone, as it leaves the scoring. A --no-telegram run skips
-    it: the pass keeps a signal only once its message went out, and nothing would. A crash is reported
-    like a failed source."""
-    if _filtered_run(args):
-        return
-    if args.no_telegram:
-        print("[CFD] skipped: --no-telegram")
-        return
-    result = _run_source("CFD", cfd_live.run, conn)
-    if result is not None and (result.tracked or result.made):
-        print(f"[CFD] {result.tracked} update message(s), {result.made} new signal(s)")
 
 
 def _send_closes(conn, closes: list) -> bool:
@@ -975,8 +933,6 @@ def main():
                 else:
                     print("[telegram] weekly message waits for the week's scoring pass")
 
-        _cfd_pass(conn, args)
-        _league_pass(conn, args)
         _watch_pass(conn, args)
         _upkeep_pass(conn, args)
 

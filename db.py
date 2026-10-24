@@ -637,31 +637,6 @@ CREATE TABLE IF NOT EXISTS buy_signals (
 );
 CREATE INDEX IF NOT EXISTS buy_signals_ticker ON buy_signals(ticker, sent_at);
 
--- The experimental live CFD signals (cfd/live.py, spec 2026-10-08-cfd-live-crypto-breakout.md): one row per
--- breakout signal on a coin, kept while it is open and after it closes. The bot never places an order.
-CREATE TABLE IF NOT EXISTS cfd_signals (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    coin        TEXT NOT NULL,             -- SOL (BTC, ETH ...)
-    symbol      TEXT NOT NULL,             -- the Yahoo symbol, SOL-USD
-    side        TEXT NOT NULL,             -- long | short
-    signal_date TEXT NOT NULL,             -- ISO date of the signal bar (its close made the signal)
-    entry       REAL NOT NULL,             -- the reference entry: the open of the next bar
-    stop0       REAL NOT NULL,             -- the initial stop
-    stop        REAL NOT NULL,             -- the trailing stop in force after the last bar processed
-    r           REAL NOT NULL,             -- |entry - stop0|
-    checkpoint  INTEGER NOT NULL DEFAULT 0, -- the highest of +1R..+4R reached (0-4)
-    last_bar    TEXT NOT NULL,             -- ISO date of the last completed bar processed
-    status      TEXT NOT NULL DEFAULT 'open', -- open | closed
-    closed_date TEXT,
-    exit_price  REAL,
-    result_r    REAL,                      -- after the pre-registered costs
-    risk_pct    REAL,                      -- NULL with no balance set (as risk_eur and qty)
-    risk_eur    REAL,
-    qty         REAL,
-    created     TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS cfd_signals_coin_date ON cfd_signals(coin, signal_date);
-
 -- A level an analysis said to wait for (watch.py): «Wait   close above 1.43». The daily run reads the asset's
 -- last completed close and, beyond the level, has the analyst write a fresh analysis.
 CREATE TABLE IF NOT EXISTS watch_levels (
@@ -674,119 +649,6 @@ CREATE TABLE IF NOT EXISTS watch_levels (
     fired_at    TEXT,
     fired_close REAL
 );
-
--- The forex paper league (cfd/league.py, docs/cfd/PAPER_LEAGUE.md): one row per paper trade of an idea run
--- forward for 13 weeks. The bot never places an order.
-CREATE TABLE IF NOT EXISTS league_trades (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    idea        TEXT NOT NULL,             -- COT-WITH | RATE-MOM | CMD-LEAD | MONTH-END
-    pair        TEXT NOT NULL,             -- EURUSD
-    symbol      TEXT NOT NULL,             -- the Yahoo symbol
-    side        TEXT NOT NULL,             -- long | short
-    ref         TEXT NOT NULL,             -- what the signal was made on: a report's date, a week, a month
-    signal_date TEXT NOT NULL,             -- ISO date of the signal bar
-    atr         REAL NOT NULL,             -- ATR(14) of the signal bar
-    stop_atr    REAL NOT NULL,             -- the stop's distance in ATR
-    exit_after  TEXT NOT NULL,             -- bars:N | date:YYYY-MM-DD
-    status      TEXT NOT NULL,             -- pending | open | closed
-    entry_date  TEXT,
-    entry       REAL,
-    stop        REAL,
-    last_bar    TEXT,                      -- ISO date of the last completed bar processed
-    exit_date   TEXT,
-    exit_price  REAL,
-    result_r    REAL,                      -- after costs
-    reason      TEXT,                      -- stop | time
-    created     TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS league_trades_ref ON league_trades(idea, pair, ref);
-
--- The day league (cfd/intraday.py, docs/cfd/DAY_LEAGUE.md): one row per intraday paper trade of an idea run
--- forward for four weeks on 15-minute bars. The bot never places an order.
-CREATE TABLE IF NOT EXISTS day_trades (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    idea         TEXT NOT NULL,            -- OPEN-RANGE | BRK-15 | ASIA-SWEEP
-    pair         TEXT NOT NULL,
-    symbol       TEXT NOT NULL,            -- the Yahoo symbol
-    side         TEXT NOT NULL,            -- long | short
-    ref          TEXT NOT NULL,            -- the local day (and the side, for ASIA-SWEEP)
-    signal_ts    TEXT NOT NULL,            -- UTC start of the signal bar
-    atr          REAL NOT NULL,            -- ATR(14) of the signal bar
-    stop_price   REAL NOT NULL,
-    target_r     REAL,                     -- the target that many R from the entry ...
-    target_price REAL,                     -- ... or at this price
-    status       TEXT NOT NULL,            -- pending | open | closed
-    entry_ts     TEXT,
-    entry        REAL,
-    target       REAL,
-    last_ts      TEXT,                     -- UTC start of the last completed bar processed
-    exit_ts      TEXT,
-    exit_price   REAL,
-    result_r     REAL,                     -- after the round-trip cost
-    reason       TEXT,                     -- stop | target | time | void
-    created      TEXT NOT NULL,
-    stop         REAL,                     -- the stop in force (the entry after TP1, TP1 after TP2)
-    stage        INTEGER DEFAULT 0,        -- take-profits filled (0-3), a third of the position each
-    remaining    REAL DEFAULT 1.0,         -- the share still open
-    realized     REAL DEFAULT 0.0          -- the result of the parts closed so far, in R
-);
-CREATE UNIQUE INDEX IF NOT EXISTS day_trades_ref ON day_trades(idea, pair, ref);
-
--- The SK sequence on paper (cfd/sk_live.py, docs/cfd/SK_LIVE.md): one row per limit order the rule placed.
--- The bot never places an order.
-CREATE TABLE IF NOT EXISTS sk_trades (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    pair       TEXT NOT NULL,              -- EURUSD
-    ref        TEXT NOT NULL,              -- the bars of point 0 and of A, and the side
-    side       TEXT NOT NULL,              -- long | short
-    entry      REAL NOT NULL,              -- the limit
-    stop       REAL NOT NULL,
-    target     REAL NOT NULL,
-    order_ts   TEXT NOT NULL,              -- UTC end of the bar that made the order
-    status     TEXT NOT NULL,              -- pending | open | closed | cancelled
-    fill_ts    TEXT,
-    fill_price REAL,
-    exit_ts    TEXT,
-    result_r   REAL,                       -- after costs
-    scored     INTEGER NOT NULL DEFAULT 0, -- 1: ordered after the paper run began, counts on the board
-    created    TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS sk_trades_ref ON sk_trades(pair, ref);
-
--- The spread of each market the MetaTrader bridge carries, sampled from its live quote every quarter of an hour
--- (cfd/mt5_bridge.sample_spreads): what a trade really costs at the user's broker, hour by hour.
-CREATE TABLE IF NOT EXISTS mt5_spreads (
-    ts     TEXT NOT NULL,             -- UTC, ISO
-    name   TEXT NOT NULL,             -- EURUSD
-    spread REAL NOT NULL,             -- ask - bid, in price units
-    PRIMARY KEY (ts, name)
-);
-
--- The user's own CFD trades (cfd/plan.py, /cfd plan): one row per trade the user told the bot about, followed
--- through its four take-profit stages to its close. The bot never places an order.
-CREATE TABLE IF NOT EXISTS cfd_plans (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,             -- XAUUSD, EURUSD, SOLUSD
-    symbol      TEXT NOT NULL,             -- the Yahoo symbol the prices come from
-    side        TEXT NOT NULL,             -- long | short
-    entry       REAL NOT NULL,
-    stop0       REAL NOT NULL,             -- the stop the user gave
-    stop        REAL NOT NULL,             -- the stop in force (it steps up after TP1, TP2, TP3)
-    r           REAL NOT NULL,             -- |entry - stop0|
-    stage       INTEGER NOT NULL DEFAULT 0, -- take-profits reached (0-4)
-    remaining   REAL NOT NULL DEFAULT 1.0, -- the share of the position still open
-    realized_r  REAL NOT NULL DEFAULT 0.0, -- the result of the parts closed so far, in R
-    offset      REAL NOT NULL DEFAULT 0.0, -- added to every source price (a future against a spot quote)
-    last_ts     TEXT NOT NULL,             -- UTC start of the last 1-minute bar processed
-    status      TEXT NOT NULL DEFAULT 'open', -- open | closed | cancelled
-    closed_ts   TEXT,
-    exit_price  REAL,
-    result_r    REAL,                      -- before any cost
-    risk_pct    REAL,                      -- NULL with no balance set (as risk_eur and qty)
-    risk_eur    REAL,
-    qty         REAL,
-    created     TEXT NOT NULL
-);
 """
 
 
@@ -796,21 +658,6 @@ CREATE TABLE IF NOT EXISTS cfd_plans (
 # databases created before it. (table, column, type declaration)
 _ADDED_COLUMNS = [
     ("watch_levels", "intraday_at", "TEXT"),                    # when the intraday break was told (watch.intraday)
-    ("day_trades", "stop", "REAL"),                            # the day league's three take-profits (A1)
-    ("day_trades", "stage", "INTEGER DEFAULT 0"),
-    ("day_trades", "remaining", "REAL DEFAULT 1.0"),
-    ("day_trades", "realized", "REAL DEFAULT 0.0"),
-    ("league_trades", "stop_price", "REAL"),                   # a stop the signal names itself (BRK-RETEST)
-    ("league_trades", "target_r", "REAL"),                     # ... and a target that many R away: a real exit
-    ("league_trades", "target_price", "REAL"),                 # ... or a target at a price (RNG-DEV)
-    ("league_trades", "checkpoint", "INTEGER DEFAULT 0"),      # the highest of TP1..TP4 reached (marks, not exits)
-    # the second version of a league trade, which closes a quarter at each of TP1..TP4 (amendment A2)
-    ("league_trades", "stage2", "INTEGER DEFAULT 0"),          # take-profits filled
-    ("league_trades", "remaining2", "REAL DEFAULT 1.0"),       # the share still open
-    ("league_trades", "stop2", "REAL"),                        # its stop (NULL: the trade's own)
-    ("league_trades", "realized2", "REAL DEFAULT 0.0"),        # the result of the parts closed, in R, before costs
-    ("league_trades", "exit2_date", "TEXT"),                   # the day its last part closed
-    ("league_trades", "result2_r", "REAL"),                    # after costs; NULL while a part is open
     ("cluster_alert_state", "last_total_value", "REAL"),
     # Fields Form 4 has always carried and this project used to discard. See
     # sec_edgar.InsiderPurchase for what each one is for.
@@ -852,7 +699,14 @@ _ADDED_COLUMNS = [
 ]
 
 
+# Tables of features since removed, dropped from databases that still hold them: the CFD signals, paper
+# leagues and MetaTrader costs (removed 2026-10-24).
+_DROPPED_TABLES = ("cfd_signals", "league_trades", "day_trades", "sk_trades", "mt5_spreads", "cfd_plans")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
+    for table in _DROPPED_TABLES:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
     for table, column, decl in _ADDED_COLUMNS:
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if existing and column not in existing:
